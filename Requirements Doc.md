@@ -48,7 +48,7 @@
 
 - When the server is online, its available files and media streams are accessible.
 - When the server is unreachable, retrieval from the server fails without affecting files or media already downloaded to the client.
-- On the same LAN, connections strictly prioritize local mDNS and direct QUIC.
+- On the same LAN, try the direct local connection first but automatically fall back to another configured route when the local route is unresponsive.
 - If a disk, metadata provider, downloader, or media processor is unavailable, unaffected libraries remain usable. The affected app states which actions are disabled, queued, or retryable.
 - New clients provide setup and reconnect states and explain that only previously downloaded items are available offline.
 
@@ -116,6 +116,7 @@
 - Completed files in a partial playlist or batch remain available and are reported separately.
 - Failed transfers, backups, metadata lookups, and processing jobs support retry where applicable.
 - Completed organizational actions use Undo rather than Cancel.
+- Background indexing, recognition, deduplication, and metadata work yields to playback and interactive transfers, pauses under resource pressure, and resumes automatically.
 
 ### Server-Client Networking
 
@@ -127,6 +128,7 @@
 - Failed work remains visible with its actual state.
 - Resume is offered only when the source supports continuation. Otherwise, the app explains that the work must restart.
 - Empty, truncated, malformed, sign-in, or otherwise invalid provider responses are failures rather than authoritative no-result or removal responses. Preserve prior content, metadata, matches, and queued work.
+- Automatically retry short-lived failures, such as a lost connection, temporarily unavailable service, or provider rate limit, with increasing delays. Respect provider-requested wait periods and applicable network, power, and storage settings. Stop after a limited retry budget and notify the user only when input is required or that budget is exhausted.
 
 ### Content Rights
 
@@ -142,22 +144,22 @@
 - Accept individual or playlist links from YouTube, YouTube Music, and Spotify.
 - Download audio as `.m4a`.
 - Resolve Spotify links through YouTube Music audio streams.
-- Match Spotify items to YouTube Music using the title, primary artist, version labels such as live or remix, and approximate duration. Import automatically only when one candidate clearly agrees; otherwise, ask the user to choose or skip the item.
+- Match Spotify items to YouTube Music using the title, primary artist, version labels such as live or remix, and approximate duration. Import automatically only when one candidate clearly agrees. Continue the remaining import without interruption and collect ambiguous items in a dedicated review list where the user can resolve or skip several items together.
 - Migrate the existing Rust music-download CLI behavior into `jumpstart-server`.
 - A playlist import creates a same-named playlist in source order (with the audio files also downloaded individually in the library).
 - Successful tracks remain in the playlist. Failed tracks appear as retryable placeholders and are not redownloaded when the import is retried.
-- Retrying an unresolved import never substitutes a different recording for one previously selected or downloaded; a changed match requires confirmation.
+- Retrying an unresolved import never substitutes a different recording for one previously selected or downloaded; a changed candidate remains unresolved for batch review.
 - Report complete and partial download outcomes.
-- Detect byte-identical duplicates using exact-file comparison.
+- Detect byte-identical duplicates using exact-file comparison and reuse the existing library track automatically while preserving every intended playlist position.
 - Detect the same recording across different encoding, silence, or intros using audio-content comparison.
-- Present duplicate matches with **Keep Both** and **Use Existing** options.
+- Group possible non-identical duplicate matches into a non-blocking batch review with **Keep Both** and **Use Existing** options.
 - Choosing **Use Existing** places the existing library track into every intended playlist position while preserving source order and retry placeholders.
 
 ### Metadata and Discovery
 
 - Embed song thumbnails, artist tags, and time-synchronized lyrics from LRCLIB.
 - Allow manual lyric correction and removal.
-- If an automatic lyric refresh would replace manually edited or removed lyrics, prompt the user to **Keep Manual** or **Replace**. Ignoring the prompt keeps the manual state.
+- Automatic lyric refresh never replaces manually edited or removed lyrics. Keep the manual state and expose the fetched version through a non-blocking **Review Update** action.
 - Missing lyrics are a valid state and do not prevent import or playback.
 - Search for and import new music within Muse through connected Spotify and YouTube accounts. Opening a result in its provider app remains optional.
 - Songs support search and sorting by Name, Last Played, and Track Artist.
@@ -168,8 +170,7 @@
 - Playlists are labeled **Server** or **This Device**.
 - Server playlists synchronize linked offline copies across devices.
 - This Device playlists remain local.
-- The Artists tab automatically creates and updates artist playlists from Track Artist metadata. Specific Albums are compiled in sub playlists.
-- Manually added artist-playlist tracks are marked as pinned and remain until manually removed.
+- The Artists and Albums tabs are automatically updated views based on track metadata, not editable playlists. User-created playlists remain separate.
 - Playlist artwork can use an uploaded image or cover art from up to four songs.
 - Deleting a playlist or removing a track from a playlist never deletes its library audio. Deleting library audio is a separate explicit action that identifies affected playlists.
 
@@ -178,7 +179,7 @@
 - Provide an Apple Music-style interface for streaming and offline downloads.
 - Support play, pause, resume, seek, and stop.
 - On iOS, iPadOS, and Android, provide native lock-screen and notification media controls, playback progress, and cover artwork.
-- Allow the same or different music to play on multiple devices through a user setting.
+- Each device has an independent playback session by default. Only explicit handoff transfers a session, and remote controls target the selected active device.
 - Handoff transfers playback and controls to an available device that has the song locally or can reach the server.
 - Keep playback active on the source until the destination confirms playback. A failed handoff leaves source playback unchanged.
 - After successful handoff, the user may control the active player from their other connected devices.
@@ -197,7 +198,7 @@
 - Photogenic tracks which native Photos assets have been successfully backed up and links each one to its server item. Future backup scans skip unchanged assets already backed up.
 - Camera-roll backup history is stored on the server. After app reinstallation, device replacement, or local-data loss, Photogenic scans the authorized photo library and matches assets against existing server files. Confirmed matches are linked without re-uploading; incomplete items are retried, and modified assets are uploaded as related versions.
 - An authorized asset that is temporarily unavailable from cloud-optimized device storage remains **Waiting for Source** and is not counted as backed up. Retry respects the selected network and power settings.
-- Deleting a linked server item suppresses automatic re-upload of its unchanged native Photos asset. Offer **Back Up Again** explicitly; later native edits remain distinguishable as modified assets.
+- Deleting a linked server item suppresses automatic re-upload of its unchanged native Photos asset, including after app reinstallation, device replacement, or local asset-identifier changes. Offer **Back Up Again** explicitly; later native edits remain distinguishable as modified assets.
 
 ### Live Photos
 
@@ -261,8 +262,7 @@
 - Provide a Google Drive-style interface on all platforms.
 - Support local downloads on mobile.
 - Block search indexers from automatically retrieving virtual-drive content.
-- Allow thumbnail generators to retrieve photo and document files smaller than 25 MB.
-- Generate `.jpg` video thumbnails using ffmpeg.
+- Provide cached previews to the operating system without marking the original as downloaded or retrieving a complete server file solely to create a preview.
 - On macOS, Windows, and Linux, mount server storage as a native virtual drive.
 - Support random-access opening through a local chunk cache without requiring the complete library to be downloaded first.
 - When server content is unavailable and not fully cached, expose it as unavailable rather than as an empty, partial, or completed local file. Preserve its metadata and explain that opening requires reconnection or a completed download.
@@ -277,8 +277,9 @@
 - Allow the user to select another drive as backup storage for all six Jumpstart services.
 - One backup drive can back up multiple primary drives.
 - Each primary drive has its own backup folder.
+- Back up canonical app files, metadata, and the active Worlds state. Exclude backup destinations, temporary caches, prefetched-only content, and incomplete output.
+- Worlds remains responsible for creating, protecting, expiring, and restoring its own recovery points. Mass backs up and restores the complete Worlds data and backup catalog as one consistent unit.
 - Primary additions, deletions, and recoveries mirror to the backup.
-- Deleted or replaced backup versions remain in Backup History for 30 days before purge.
 - Show the last successful backup and latest verification.
 - Clearly identify missing, stale, full, or unreadable backup destinations.
 - Each recovery point contains a consistent set of file contents and associated app metadata, including organization, annotations, progress, and other user-created state. Disclose any excluded state before backup.
@@ -286,8 +287,7 @@
 - Support complete primary-drive recovery to a replacement drive.
 - Before a restore replaces or removes current data, show the affected items and retain the pre-restore state until the restored data is verified. A failed or interrupted restore leaves the prior state recoverable.
 - After server restart, completed backup work is not repeated. Incomplete output resumes when safe or is discarded and restarted.
-- Renaming or moving a primary renames or moves its linked backup while preserving Backup History. If the destination already contains a backup with that name, do not merge their histories without confirmation.
-- Replacing a primary preserves the existing backup.
+- Recognize a previously registered primary automatically using stable identity rather than its name or connection location, while preserving its Backup History. If that identity is missing, duplicated, or conflicts with another connected primary, do not synchronize until the user selects the correct primary.
 - When a replacement or empty primary is connected to an existing backup, require **Recover Existing Primary** or **Start as New Primary**. Do not mirror deletions into the existing backup before that choice and successful recovery verification.
 - Removing a primary archives its backup for 30 days and stops synchronization. The archive remains reversible until expiry, but the user may permanently purge it earlier after explicit confirmation.
 
@@ -308,11 +308,12 @@
 - Preserve reading position and annotations across chapter removal, addition, replacement, or duplication.
 - If replacement invalidates a saved position, bookmark, or annotation anchor, preserve it as unresolved against the prior version. Never silently discard it or attach it to different content; allow the user to relocate or delete it.
 - Visibly flag chapter gaps and replacements.
-- At approximately 80% chapter progress, prefetch and append the next chapter for continuous reading.
+- At approximately 80% chapter progress, prefetch at most the next chapter in the selected sequence on the device currently reading. Retrieve a source chapter onto the server only once, while allowing each reading device to keep its own local copy as needed. Do not alter the reading sequence.
 - Prefetch respects network and storage settings.
 - Label prefetch separately from explicit downloads.
 - Explicitly downloading a complete, verified prefetched chapter promotes the existing copy without downloading it again.
-- Prefetched chapters may be removed automatically when storage is needed. Explicit downloads are never removed automatically.
+- Store chapter identity, bookmarks, annotations, unresolved anchors, and reading progress independently from cached chapter files so they survive cache cleanup.
+- Prefetched chapters may be removed automatically when storage is needed only when they are closed and the same release can be fetched again. When downloaded again, restore its saved state automatically. If the same release is unavailable or changed, keep the saved state unresolved rather than attaching it to different content. Explicit downloads are never removed automatically.
 - Do not automatically remove a prefetched chapter while it is open in the reader. It becomes eligible for cleanup after the reader closes it.
 
 ### Library and Reader
@@ -325,7 +326,7 @@
 - Support local downloads, zoom, bookmarks, annotations, and reading progress.
 - Define progress separately for fixed-page books and EPUBs.
 - Support right-to-left CBZ pagination, vertical webtoon scrolling, and automatic double-page spread detection.
-- Automatically rotate wide landscape images 90 degrees to fill the vertical screen, with a remembered per-page override.
+- For wide images, automatically choose fit, spread, or split-page presentation according to the active reading mode. Rotate only when orientation metadata requires correction or the user requests it, and remember overrides per item.
 - Allow the user to change reading direction and page pairing, including whether the first page stands alone.
 - Anchor EPUB progress and annotations using EPUB CFI.
 - Support vertical and horizontal scrolling.
@@ -362,10 +363,10 @@
 
 ### Disc Identification and Track Selection
 
-- For movies, identify the title using the disc volume label and compare candidate track durations with TMDB runtime data. Select the only confident match automatically; when multiple tracks or editions remain plausible, require user confirmation before encoding.
+- For movies, identify the title using the disc volume label and compare candidate track durations with TMDB runtime data. Select the only confident match automatically.
 - For television, automatically match standard episode tracks using the expected runtime window, disc order, volume label, and TMDB runtime data.
 - Keep tracks outside the normal episode-duration range available for review so shorts, specials, double-length episodes, and unusual premieres are not discarded.
-- Before encoding an ambiguous television disc, let the user confirm the season, ordering scheme, specials, and episode mapping.
+- Ambiguous movie and television mappings do not block ripping or encoding when every plausible content track is retained. Keep those tracks **Unmatched** for non-blocking batch review, and require confirmation only before excluding a plausible track.
 - Filter menu tracks and obvious non-content tracks by minimum runtime, but retain them for manual review when uncertain.
 - Group director's cuts, dubbed versions, extras, trailers, and alternate aspect ratios under one title without treating them as duplicates.
 
@@ -395,9 +396,11 @@
 - Allow opening and ending markers to be corrected, disabled, or dismissed per item.
 - Allow manual next-episode navigation at any time.
 - Mark an episode or movie watched at its ending marker or at the end of the video or when the user marks it manually.
+- Required episodes are regular episodes in the selected provider ordering. Specials, extras, alternate cuts, and unmatched tracks are excluded unless the user includes them.
 - Mark a season watched when all required episodes are watched or when the user marks it manually.
 - Mark a series watched when all required available seasons are watched.
 - New episodes return the series to in-progress.
+- Metadata-only changes to episode order do not change watched status.
 - When no ending marker exists, use actual video completion or manual **Mark Watched**.
 
 ## Worlds — Minecraft Server CLI
@@ -422,16 +425,17 @@
 
 - Back up immediately before Minecraft, Fabric, Fabric API, mod, or configuration changes.
 - A pre-change backup records the current Minecraft, Fabric, Fabric API, and mod configuration.
-- Keep the pre-change backup and previous server/mod configuration protected from automatic cleanup until the user accepts the change or completes a rollback.
+- A pre-change backup and previous server/mod configuration are protected from automatic cleanup and excluded from the five-backup limit until the user accepts the change or completes a rollback. After acceptance, the backup becomes unprotected and counts toward the limit.
 - Create a daily backup only when world or player data changed since the last successful backup.
-- Keep the latest five unprotected backups, including scheduled and pre-change backups.
+- Keep the latest five unprotected backups.
 - User-protected backups do not count toward this limit. Selected restore-source and temporary safety backups are excluded only while restoration is active.
 - During a running-server backup:
   1. Warn connected players that a backup is beginning.
   2. Temporarily pause world saving.
   3. Request a complete save and wait for confirmation.
-  4. Copy the world to the backup destination.
+  4. Establish a fixed backup source that cannot change after world saving resumes.
   5. Resume normal world saving.
+  6. Write and verify the backup from that fixed source without keeping world saving paused.
 - If save confirmation or copying fails, mark the backup unsuccessful, discard incomplete output, and always resume normal world saving.
 - After any interrupted running-server backup, verify that world saving is enabled before normal play continues. If saving cannot resume, prominently warn the user and prevent silent continued play.
 - When the server is stopped, back up the world directly without starting it.
@@ -472,15 +476,15 @@
 
 ## III. External Service Failure Reference
 
-The system-wide External Service Availability rules apply to every row below.
+The system-wide External Service Availability rules apply to every row below, including automatic retry and preservation of completed local content. Rows list only provider-specific unavailable features, required input, or recovery exceptions.
 
 | Service or source | Unavailable features | Recovery behavior |
 |---|---|---|
-| YouTube / YouTube Music | Music search, link matching, and new audio or playlist downloads | Allow manual retry, reconnect an expired linked account, retain successful playlist tracks, and preserve failed entries for retry. |
-| Spotify | Connected-account search and Spotify-link resolution | Ask the user to reconnect an expired account and preserve failed imports for retry. |
-| LRCLIB | Lyrics and synchronized lyric timing | Import music without lyrics, retain existing lyrics, retry later automatically, and offer manual retry. |
-| MangaDex and similar sources | Search, chapter lists, covers, metadata, and chapter downloads | Preserve interrupted work when resumable; otherwise explain restart. Never remove downloaded chapters because the source removed them. |
-| TMDB / AniList | Movie, television, and anime identification and metadata | Display unmatched media using its filename and existing local metadata. Retry later without overwriting manual corrections, and retain manual matching through the corresponding provider ID. |
-| Mega and direct HTTP hosts | New and interrupted remote downloads | Show whether a renewed link, password, account access, decryption key, confirmation, or quota reset is required. Preserve progress only when supported. |
-| BitTorrent metadata sources, trackers, and peers | Torrent metadata retrieval, peer discovery, and active downloads | Keep the job visible, show waiting or availability status, retry discovery, and allow source replacement or cancellation. |
-| Mojang/Minecraft, Fabric, Fabric API, and configured mod repositories | New installs, version checks, and updates | Keep the installed configuration unchanged and startable, retain completed downloads, report failed or pending updates, and retry without applying a partial update set. |
+| YouTube / YouTube Music | Music search, link matching, and new audio or playlist downloads | Reconnect an expired linked account when required; successful playlist tracks remain usable and failed entries remain unresolved. |
+| Spotify | Connected-account search and Spotify-link resolution | Reconnect an expired linked account when required; failed imports remain unresolved. |
+| LRCLIB | Lyrics and synchronized lyric timing | Import music without lyrics and retain existing or manually edited lyrics. |
+| MangaDex and similar sources | Search, chapter lists, covers, metadata, and chapter downloads | Restart retrieval when the source cannot resume it; source removal does not remove downloaded chapters. |
+| TMDB / AniList | Movie, television, and anime identification and metadata | Display unmatched media using its filename and existing local metadata; manual matches remain locked. |
+| Mega and direct HTTP hosts | New and interrupted remote downloads | Request a renewed link, password, account access, decryption key, confirmation, or quota reset only when required. |
+| BitTorrent metadata sources, trackers, and peers | Torrent metadata retrieval, peer discovery, and active downloads | Show waiting or availability status. Another tracker or magnet may continue the job only when it identifies the same content; otherwise, create a separate job. |
+| Mojang/Minecraft, Fabric, Fabric API, and configured mod repositories | New installs, version checks, and updates | Keep the installed configuration unchanged and startable; never apply a partially retrieved update set. |
