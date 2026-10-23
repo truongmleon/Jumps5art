@@ -57,7 +57,7 @@
 - The user can approve, name, recognize, and remove their own devices.
 - New devices require explicit pairing on the same local network.
 - Removing a device immediately revokes server access and rejects its queued operations. Removal does not delete server content or claim to erase copies already stored on that device.
-- If no approved device remains available, provide a server-authorized recovery pairing path that does not restore previously revoked devices.
+- If no approved device is available to approve a new one, allow pairing to be approved directly from the server. Previously revoked devices remain revoked.
 
 ### Offline Conflict Resolution
 
@@ -84,7 +84,7 @@
 - Every server file has one owning app. Mass accesses other app libraries only as stated in the Mass requirements as READ only.
 - Files deleted from Muse, Photogenic, Mass, Bato, or Flex enter a shared server Recently Deleted area for 30 days and remain visible within the owning app.
 - Restoring an item returns its file and recoverable app metadata, annotations, bookmarks, watch state, and surviving album or collection membership.
-- If an item's original name or location is occupied during restoration, offer **Restore as Copy**, **Replace Existing**, or **Cancel**; never overwrite automatically.
+- When restoring an item from Recently Deleted, if its original name or location is occupied, offer **Restore as Copy**, **Replace Existing**, or **Cancel**; never overwrite automatically.
 - Permanent deletion removes the server file and its associated app metadata.
 - Backup history is separate from Activity History and Recently Deleted and retains deleted or replaced backup versions for 30 days.
 - Same-name uploads never silently overwrite an existing file. The user chooses **Replace**, **Keep Both**, or **Cancel**.
@@ -127,7 +127,6 @@
 - Failed work remains visible with its actual state.
 - Resume is offered only when the source supports continuation. Otherwise, the app explains that the work must restart.
 - Empty, truncated, malformed, sign-in, or otherwise invalid provider responses are failures rather than authoritative no-result or removal responses. Preserve prior content, metadata, matches, and queued work.
-- When reconnecting a linked service, identify the account being connected. If it differs from the account associated with pending work, require confirmation before migrating or canceling that work.
 
 ### Content Rights
 
@@ -143,7 +142,7 @@
 - Accept individual or playlist links from YouTube, YouTube Music, and Spotify.
 - Download audio as `.m4a`.
 - Resolve Spotify links through YouTube Music audio streams.
-- Import a Spotify match automatically only when one recording is uniquely confident. Ambiguous covers, live versions, remixes, and clean or explicit variants remain retryable placeholders until confirmed.
+- Match Spotify items to YouTube Music using the title, primary artist, version labels such as live or remix, and approximate duration. Import automatically only when one candidate clearly agrees; otherwise, ask the user to choose or skip the item.
 - Migrate the existing Rust music-download CLI behavior into `jumpstart-server`.
 - A playlist import creates a same-named playlist in source order (with the audio files also downloaded individually in the library).
 - Successful tracks remain in the playlist. Failed tracks appear as retryable placeholders and are not redownloaded when the import is retried.
@@ -158,7 +157,7 @@
 
 - Embed song thumbnails, artist tags, and time-synchronized lyrics from LRCLIB.
 - Allow manual lyric correction and removal.
-- Automatic lyric fetching and refresh never overwrite a manual correction or restore manually removed lyrics unless the user explicitly requests replacement.
+- If an automatic lyric refresh would replace manually edited or removed lyrics, prompt the user to **Keep Manual** or **Replace**. Ignoring the prompt keeps the manual state.
 - Missing lyrics are a valid state and do not prevent import or playback.
 - Search for and import new music within Muse through connected Spotify and YouTube accounts. Opening a result in its provider app remains optional.
 - Songs support search and sorting by Name, Last Played, and Track Artist.
@@ -268,7 +267,7 @@
 - Support random-access opening through a local chunk cache without requiring the complete library to be downloaded first.
 - When server content is unavailable and not fully cached, expose it as unavailable rather than as an empty, partial, or completed local file. Preserve its metadata and explain that opening requires reconnection or a completed download.
 - Server saves and deletions are atomic; incomplete transfers never appear as completed files or deletions.
-- A virtual-drive save is acknowledged only after it is durable in the local cache or committed to the server. Show durable but uncommitted saves as **Pending Sync**. If the server item changes or is deleted first, preserve the save as a conflict copy.
+- When the user saves through the virtual drive while the server is unavailable, retain the saved version locally and show **Pending Sync**. If the server copy changes or is deleted before synchronization, preserve both versions rather than overwriting either one.
 - Hold interrupted client saves in the local cache and retry them after reconnection.
 - Unsynchronized client saves survive app, device, and server restarts. Cache cleanup never removes them; they remain visible until synchronized, exported, or explicitly discarded after a data-loss warning.
 - Expose Muse, Photogenic, Bato, and Flex files as read-only.
@@ -278,7 +277,6 @@
 - Allow the user to select another drive as backup storage for all six Jumpstart services.
 - One backup drive can back up multiple primary drives.
 - Each primary drive has its own backup folder.
-- Renaming or moving a primary preserves its existing Backup History. If a requested backup-folder name already exists, do not merge histories without explicit confirmation.
 - Primary additions, deletions, and recoveries mirror to the backup.
 - Deleted or replaced backup versions remain in Backup History for 30 days before purge.
 - Show the last successful backup and latest verification.
@@ -288,7 +286,7 @@
 - Support complete primary-drive recovery to a replacement drive.
 - Before a restore replaces or removes current data, show the affected items and retain the pre-restore state until the restored data is verified. A failed or interrupted restore leaves the prior state recoverable.
 - After server restart, completed backup work is not repeated. Incomplete output resumes when safe or is discarded and restarted.
-- Renaming a primary renames its backup immediately.
+- Renaming or moving a primary renames or moves its linked backup while preserving Backup History. If the destination already contains a backup with that name, do not merge their histories without confirmation.
 - Replacing a primary preserves the existing backup.
 - When a replacement or empty primary is connected to an existing backup, require **Recover Existing Primary** or **Start as New Primary**. Do not mirror deletions into the existing backup before that choice and successful recovery verification.
 - Removing a primary archives its backup for 30 days and stops synchronization. The archive remains reversible until expiry, but the user may permanently purge it earlier after explicit confirmation.
@@ -315,7 +313,7 @@
 - Label prefetch separately from explicit downloads.
 - Explicitly downloading a complete, verified prefetched chapter promotes the existing copy without downloading it again.
 - Prefetched chapters may be removed automatically when storage is needed. Explicit downloads are never removed automatically.
-- Content currently open in the reader is pinned and cannot be evicted until the reading session ends.
+- Do not automatically remove a prefetched chapter while it is open in the reader. It becomes eligible for cleanup after the reader closes it.
 
 ### Library and Reader
 
@@ -358,8 +356,7 @@
 - Automatically encode uploaded or ripped video into AV1 for storage.
 - Retain the original until the AV1 result is verified playable with every selected video, audio, subtitle, and chapter track.
 - Before deleting the original, disclose every source video, audio, subtitle, or chapter track omitted from the AV1 result. Any omission requires explicit confirmation; otherwise retain the original.
-- Until verification succeeds, the original remains the playable library item with its metadata and watch state. Failure, cancellation, restart, or insufficient storage never exposes incomplete output or replaces the original.
-- Replacing the original with the verified AV1 version preserves item identity and watch history. Transfer resume positions and opening or ending markers only when they remain valid; otherwise retain them for review.
+- Until verification succeeds, the media remains unavailable for playback and incomplete output does not enter the library. Failure, cancellation, restart, or insufficient storage retains the original for retry.
 - Do not re-encode an AV1 file when all included tracks are supported.
 - Transcode AV1 for clients that cannot play it directly.
 
@@ -381,7 +378,6 @@
 - Apply provider metadata and artwork automatically only when one candidate is uniquely confident. Low-confidence, tied, or conflicting matches remain **Unmatched** until the user confirms one.
 - Allow manual matching by TMDB or AniList ID.
 - Manual matches and edits remain locked until explicitly reset.
-- Provider changes to episode IDs, ordering, or runtimes never remap existing files or watch state automatically. Present the proposed remapping and preserve the prior mapping until accepted.
 - Use separate Anime, Movies, and TV folders.
 - Anime defaults to AniList; Movies and TV default to TMDB.
 - Moving an item between folders changes its default provider for future matching but does not overwrite locked manual metadata.
