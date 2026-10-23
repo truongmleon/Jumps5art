@@ -12,7 +12,6 @@
 
 - Jumpstart is strictly single-user.
 - No accounts, roles, profiles, sharing, or other-user permissions are required.
-- Minecraft players are game participants rather than Jumpstart users and receive no Jumpstart management or storage permissions.
 
 ### Client Platforms
 
@@ -44,7 +43,7 @@
   - Worlds configurations and backups
 - Provide a documented server-migration process.
 - Migration and export produce a consistent, complete snapshot, identify every omitted or failed item, and leave the source unchanged until the user confirms successful recovery.
-- For a user-initiated server migration or full export, report known unsynchronized saves and device-only items on reachable devices and offer a separate optional consolidation step. Unavailable devices do not block the server snapshot; identify that their local-only data was not assessed.
+- For a user-initiated server migration or full export, report unsynchronized saves on reachable devices and offer to synchronize or export them first. Unavailable devices do not block the server snapshot; identify that their unsynchronized saves could not be assessed.
 
 ### Connectivity and Offline Use
 
@@ -273,7 +272,7 @@
 - Block search indexers from automatically retrieving virtual-drive content.
 - Provide cached previews to the operating system without marking the original as downloaded or retrieving a complete server file solely to create a preview.
 - On macOS, Windows, and Linux, mount server storage as a native virtual drive.
-- Detect filename differences that a client platform cannot represent, including case-only, reserved-name, and trailing-character collisions. Never expose two server items as the same client path; keep both available with clear collision-safe display names.
+- Detect filename differences that a client platform cannot represent. For example, Linux may allow both `Photo.jpg` and `photo.jpg`, while another platform may treat them as the same path. Keep both available with clear collision-safe display names rather than hiding or overwriting either item.
 - Support random-access opening through a local chunk cache without requiring the complete library to be downloaded first.
 - When server content is unavailable and not fully cached, expose it as unavailable rather than as an empty, partial, or completed local file. Preserve its metadata and explain that opening requires reconnection or a completed download.
 - Server saves and deletions are atomic; incomplete transfers never appear as completed files or deletions.
@@ -314,10 +313,10 @@
 ### Ingestion
 
 - Support direct file uploads.
-- Validate PDF, EPUB, and CBZ files before adding them to the library. Identify encrypted, password-protected, damaged, or unsupported content and explain whether it can be unlocked or repaired.
+- Validate PDF, EPUB, and CBZ files before adding them to the library. Identify damaged or unsupported content. For a supported password-protected file, ask for the password and unlock it automatically after the user supplies it; do not claim to bypass an unknown password or DRM.
 - Provide a manually invoked MangaDex downloader and support similar sources.
 - Package downloaded chapters as individual `.cbz` files while preserving covers and metadata.
-- Order CBZ pages using a valid embedded page order when available; otherwise use natural folder-and-filename order. If entries cannot be ordered uniquely, preserve every page, use archive order as the final tie-breaker, and show a non-blocking warning.
+- Order CBZ pages by natural folder-and-filename order so, for example, page `2` appears before page `10`. If entries cannot be ordered uniquely, preserve every page, use archive order as the final tie-breaker, and show a non-blocking warning.
 - Identify chapters by source, language, edition or scan group, volume, and chapter number. Alternate releases remain separate and enter the default reading sequence only when selected; navigation and prefetch follow that sequence.
 - Preserve reading position and annotations across chapter removal, addition, replacement, or duplication.
 - If replacement invalidates a saved position, bookmark, or annotation anchor, preserve it as unresolved against the prior version. Never silently discard it or attach it to different content; allow the user to relocate or delete it.
