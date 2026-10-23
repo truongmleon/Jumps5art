@@ -44,6 +44,7 @@
 - Provide a documented server-migration process.
 - Migration and export produce a consistent, complete snapshot, identify every omitted or failed item, and leave the source unchanged until the user confirms successful recovery.
 - For a user-initiated server migration or full export, report unsynchronized saves on reachable devices and offer to synchronize or export them first. Unavailable devices do not block the server snapshot; identify that their unsynchronized saves could not be assessed.
+- A full export also identifies device-only content and user-created state on reachable devices, including **This Device** playlists, and offers to include them or export them separately. Record excluded or unassessed device state in the export manifest.
 - Migration or recovery into a destination that already contains Jumpstart data identifies the affected content and preserves a verified destination recovery point. Never merge, overwrite, or delete destination data implicitly.
 - Provide a documented server-local recovery path that can inspect and restore verified backups when the primary database is unavailable or no approved client is accessible.
 
@@ -60,7 +61,7 @@
 - The user can approve, name, recognize, and remove their own devices.
 - Device names need not be unique. Wherever the user selects or reviews a device, also show enough identifying context, such as platform and last-seen time, to avoid choosing a same-named device implicitly.
 - New devices require explicit pairing on the same local network.
-- Removing a device immediately revokes server access and rejects its queued operations. Removal does not delete server content or claim to erase copies already stored on that device.
+- Removing a device immediately revokes server access, terminates its active server connections and streams, and rejects operations not yet accepted by the server. Previously accepted server-resident jobs follow the Long-Running Operations rules. Removal does not delete server content or claim to erase copies already stored on that device.
 - Device removal does not erase unsynchronized local changes. Keep them locally exportable until explicitly discarded after a data-loss warning.
 - If no approved device is available to approve a new one, allow pairing to be approved directly from the server. Previously revoked devices remain revoked.
 
@@ -77,7 +78,7 @@
 - When deletion conflicts with an offline content edit, deletion wins for the server item, but the edited content remains recoverable as a device-only copy that can be re-added.
 - Undo cancels a pending deletion, restores the item from Recently Deleted, or reverts the name change.
 - Conflict resolution does not rely on client-device clocks.
-- Online rename and reorder operations complete on the server or fail immediately. Offline changes complete locally as **Pending Sync**.
+- Online rename and reorder operations complete only after server confirmation. If the connection fails before the outcome is known, show **Awaiting Confirmation** and reconcile the same operation after reconnection; retries never apply it twice. Offline changes complete locally as **Pending Sync**.
 - If a device attempts to change an item that changed since it was last viewed or synchronized, combine compatible changes automatically. For incompatible changes, preserve the current server state and the conflicting device change. Continue using the server state while offering a non-blocking option to apply or dismiss the device change; never silently discard either version.
 
 ### History and File Lifecycle
@@ -90,7 +91,7 @@
 - Files deleted from Muse, Photogenic, Mass, Bato, or Flex enter a shared server Recently Deleted area for 30 days and remain visible within the owning app.
 - Restoring an item returns its file and recoverable app metadata, annotations, bookmarks, watch state, and surviving album or collection membership.
 - When restoring an item from Recently Deleted, if its original name or location is occupied, offer **Restore as Copy**, **Replace Existing**, or **Cancel**; never overwrite automatically.
-- Permanent deletion removes the server file and its associated app metadata.
+- Permanent deletion removes the server file and its associated app metadata, except minimal deletion records needed to prevent stale synchronization or unchanged camera-roll assets from recreating it automatically. These records do not retain file contents and do not block an explicit re-add or **Back Up Again** action.
 - Backup history is separate from Activity History and Recently Deleted and retains deleted or replaced backup versions for 30 days.
 - Same-name uploads never silently overwrite an existing file. The user chooses **Replace**, **Keep Both**, or **Cancel**.
 
@@ -99,7 +100,7 @@
 - One background daemon, `jumpstart-server`, manages the SQLite or PostgreSQL database and server filesystem.
 - Initial setup never initializes or adopts a non-empty storage location without identifying existing data and obtaining explicit confirmation.
 - Before an app or server update migrates persistent files or metadata, create and verify a recoverable pre-migration state. Failure leaves the prior state usable or recoverable until the migrated state is verified.
-- Uploads, downloads, folder creation, moves, and deletions occur exclusively through client requests to the daemon. Clients do not modify server storage directly.
+- Uploads, downloads, folder creation, moves, and deletions are mediated by the daemon, whether triggered by authorized client or Worlds CLI requests, previously accepted jobs, or configured scheduled or background work. Clients do not modify server storage directly.
 - Worlds communicates with the daemon through its CLI.
 - Muse registers as an active Media Session on mobile. The other apps allow the operating system to manage P2P node lifecycles.
 - Desktop Ctrl/Cmd+Z triggers the latest reversible action, including rename, move, reorder, deletion, and playlist creation or editing.
@@ -157,7 +158,7 @@
 - Migrate the existing Rust music-download CLI behavior into `jumpstart-server`.
 - A playlist import creates a same-named playlist in source order (with the audio files also downloaded individually in the library).
 - Recognize a previously imported playlist by its source and update the existing playlist by default. Preview source removals, preserve tracks the user added manually, do not redownload existing audio, and keep **Import as New** available.
-- Successful tracks remain in the playlist. Failed tracks appear as retryable placeholders and are not redownloaded when the import is retried.
+- Successful tracks remain in the playlist and are not redownloaded when the import is retried. Failed tracks remain retryable placeholders; retrying them preserves their intended playlist positions.
 - Retrying an unresolved import never substitutes a different recording for one previously selected or downloaded; a changed candidate remains unresolved for batch review.
 - Detect byte-identical duplicates using exact-file comparison and reuse the existing library track automatically while preserving every intended playlist position.
 - Detect the same recording across different encoding, silence, or intros using audio-content comparison.
@@ -166,7 +167,7 @@
 
 ### Metadata and Discovery
 
-- Embed song thumbnails, artist tags, and time-synchronized lyrics from LRCLIB.
+- Embed available song thumbnails and artist tags from the media source, and time-synchronized lyrics from LRCLIB when available.
 - Allow corrections to title, artists, album, artwork, and track information. Automatic updates never overwrite corrected fields and remain available for optional review.
 - Allow manual lyric correction and removal. Automatic lyric updates preserve that manual state and remain available through a non-blocking **Review Update** action.
 - Missing lyrics are a valid state and do not prevent import or playback.
@@ -224,7 +225,7 @@
   - Equivalent Copies
   - Related Edits
   - Burst or Similar Photos
-- Only byte-identical files or confirmed identical decoded images may share one stored asset with multiple references.
+- Only byte-identical source resources may share stored bytes across assets. Identical decoded images alone do not justify discarding distinct original files, embedded metadata, or companion resources; retain those originals separately and group them for review.
 - Equivalent copies, edits, bursts, and similar photos retain separate files and are grouped for review.
 - Deletion is always a manual user choice.
 - Deleting one reference to a shared asset preserves the asset and every remaining reference. Permanent asset deletion requires removal of all references and explicit confirmation.
@@ -333,7 +334,7 @@
 - Preserve reading position and annotations across chapter removal, addition, replacement, or duplication.
 - If replacement invalidates a saved position, bookmark, or annotation anchor, preserve it as unresolved against the prior version. Never silently discard it or attach it to different content; allow the user to relocate or delete it.
 - Visibly flag chapter gaps and replacements.
-- At approximately 80% chapter progress, prefetch at most the next chapter in the selected sequence on the device currently reading. Retrieve a source chapter onto the server only once, while allowing each reading device to keep its own local copy as needed. Do not alter the reading sequence.
+- At approximately 80% chapter progress, prefetch at most the next chapter in the selected sequence on the device currently reading. Coalesce concurrent retrievals of the same source release and reuse a verified server copy when available, while allowing each reading device its own local copy. Retrieval after cache eviction or a failed attempt remains possible. Do not alter the reading sequence.
 - Prefetch respects network and storage settings.
 - Label prefetch separately from explicit downloads.
 - Explicitly downloading a complete, verified prefetched chapter promotes the existing copy without downloading it again.
@@ -368,7 +369,7 @@
 - Closing during temporary browsing preserves Saved Reading Progress.
 - Bookmarks and annotations never change progress.
 - **Re-read** begins a new pass from the start, removes the active Finished status, and preserves prior completion history.
-- The user may manually mark a book or series Finished. Reaching the content end automatically finishes a standalone book; a series finishes automatically only when every chapter in its selected sequence is complete and no known chapter gap remains.
+- The user may manually mark a book or series Finished. A standalone book finishes automatically when Saved Reading Progress reaches the content end through normal reading or **Continue Reading from Here**. Reaching the end during temporary browsing never marks a chapter, book, or series complete. A series finishes automatically only when every chapter in its selected sequence is complete and no known chapter gap remains.
 - Saved Reading Progress synchronizes across devices. If an offline device reconnects with a different position after the server position changed, keep the server position and offer **Continue from this device's position**. Finished and Re-read actions synchronize separately and never erase completion history.
 
 ## Flex — Video Hub
@@ -422,7 +423,7 @@
 - Offer **Skip Opening** when an opening marker is available.
 - Allow opening and ending markers to be corrected, disabled, or dismissed per item.
 - Allow manual next-episode navigation at any time.
-- Mark an episode or movie watched at its ending marker or at the end of the video or when the user marks it manually.
+- Mark an episode or movie watched when normal playback reaches its active ending marker or the end of the video, or when the user marks it manually. Seeking, scrubbing, or previewing alone never changes watched status.
 - Required episodes are regular episodes in the selected provider ordering. Specials, extras, alternate cuts, and unmatched tracks are excluded unless the user includes them.
 - Mark a season watched when all required episodes are watched or when the user marks it manually.
 - Mark a series watched when all required available seasons are watched.
@@ -451,7 +452,7 @@
 
 ### Safe Backups
 
-- Back up immediately before Minecraft, Fabric, Fabric API, mod, or configuration changes.
+- Create and verify a protected pre-change backup before applying Minecraft, Fabric, Fabric API, mod, or configuration changes. If verification fails, leave the active world and configuration unchanged.
 - A pre-change backup records the current Minecraft, Fabric, Fabric API, and mod configuration.
 - A pre-change backup and previous server/mod configuration are protected from automatic cleanup and excluded from the five-backup limit until the user accepts the change or completes a rollback. After acceptance, the backup becomes unprotected and counts toward the limit.
 - List pending changes and provide explicit **Accept Change** and **Roll Back** commands.
@@ -492,7 +493,7 @@
 - Support installing, removing, enabling, disabling, and updating mods.
 - Before applying mod changes, show the complete add, remove, and version-change plan. Include unambiguous required dependencies automatically and do not apply a set with unresolved dependencies or known hard conflicts.
 - Warn when a mod appears incompatible with the selected Minecraft or Fabric version.
-- If the server fails after an update, allow rollback to the previous server and mod configuration.
+- If the server fails after an update, offer rollback of both world data and the matching server and mod configuration from the protected pre-change recovery point. Identify any newer world progress that would be replaced and follow the Restoration confirmation and safety-backup policy.
 - Never upgrade existing world data without a verified pre-change backup. Restoration follows the safety-backup policy above.
 - Warn that removing a mod may affect blocks, items, or world data created by that mod.
 

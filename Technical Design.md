@@ -171,6 +171,7 @@ Store Activity History, unresolved conflicts, Recently Deleted entries, and Back
 - Unresolved conflicts remain until resolved; their seven-day history period begins at resolution.
 - Deletion moves recoverable item content and metadata to shared Recently Deleted for 30 days.
 - Permanent deletion removes the item and its app metadata after all retention references are released.
+- Keep minimal deletion tombstones independently of file-content and app-metadata retention so stale operations cannot resurrect purged items. Camera-roll suppression retains the verified resource identity needed by §9.1; an explicit re-add or **Back Up Again** can create a new live item without undoing the prior deletion.
 - Restore name or location collisions require **Restore as Copy**, **Replace Existing**, or **Cancel**.
 - Same-name uploads remain staged until **Replace**, **Keep Both**, or **Cancel** is committed; they never overwrite by name alone.
 - Backup History is independent of Activity History and Recently Deleted and retains deleted or replaced backup versions for 30 days.
@@ -189,6 +190,7 @@ Store Activity History, unresolved conflicts, Recently Deleted entries, and Back
 - Bind the issued device credential to its public key.
 - Authenticate every connection and mutation.
 - Retain revoked device IDs so revocation cannot be silently undone.
+- Revocation terminates the device's established RPC connections, subscriptions, media streams, and client-server transfers and rejects operations not yet accepted by the server. Previously accepted server-resident jobs continue under §7.2 and remain controllable by other approved devices.
 
 Device display names provide no authority and need not be unique.
 
@@ -236,7 +238,9 @@ Server behavior:
 3. Validate the base revision.
 4. Apply or create a conflict according to domain rules.
 5. Assign a global `change_seq`.
-6. Commit domain state and the outgoing change event in one transaction.
+6. Commit domain state, the operation ID and its outcome, and the outgoing change event in one transaction.
+
+An operation-status query or retry with the same operation ID returns its recorded outcome without repeating the mutation. Reuse of an operation ID with a different payload is rejected. Clients retain submitted mutations whose server outcome is unknown as **Awaiting Confirmation** until reconciliation establishes their outcome; unsent offline changes remain **Pending Sync**.
 
 Conflict behavior:
 
@@ -388,6 +392,8 @@ Represent a photo as an aggregate with versions and typed resources:
 
 Compound assets become visible only after all required resources are verified and committed together.
 
+Deduplicate stored bytes only for byte-identical resources. Matching decoded pixels may propose a review group, but every distinct original resource and its metadata remain retained and exportable.
+
 ### 9.3 Reversible Editing
 
 Keep originals immutable. Store edits as versioned recipes and derivatives:
@@ -473,6 +479,10 @@ Reads use a chunk cache. Open handles pin required chunks. Concurrent identical 
 
 Writable Mass files use durable shadow files and a write journal outside the evictable cache. Sync seals one immutable local version and commits it with a base-version precondition. If the server version changed, preserve both versions and create a conflict.
 
+Enforce read-only access to Muse, Photogenic, Bato, and Flex items in both the adapter and daemon mutation boundary. Copying one into Mass creates an independent Mass-owned item with copy-on-write content; virtual-drive writes, renames, moves, and deletions cannot mutate the source library item.
+
+Platform adapters block background indexer hydration and serve only existing cached previews to preview requests. Creating an operating-system preview never triggers a full original-file download or marks the original downloaded. Verify these distinctions in each platform prototype before enabling its virtual drive.
+
 ### 10.5 AI File Search
 
 Use:
@@ -482,7 +492,7 @@ Use:
 
 Extraction and embedding run in sandboxed workers with file-size, archive-expansion, memory, and time limits. Each indexed item records its content version, extractor/model version, and status: Pending, Indexed, Unsupported, or Failed.
 
-No file content, extracted text, or embedding leaves the server.
+AI extraction and embedding processing remain server-local. File contents, extracted text, and embeddings are never sent to external AI services; authorized client downloads, virtual-drive reads, and exports remain supported.
 
 ## 11. Bato
 
@@ -520,7 +530,7 @@ Natural page ordering:
 
 ### 11.4 Prefetch and Cache
 
-Create at most one prefetch intent for a device, current item, and reading-sequence revision. Deduplicate server ingestion across devices while allowing each reading device its own local cache copy.
+Create at most one prefetch intent for a device, current item, and reading-sequence revision. Coalesce in-flight server retrievals by source-release identity across devices and reuse complete verified server copies, while allowing each reading device its own local cache copy. A missing or unusable server copy may be retrieved again after safe eviction or a failed attempt.
 
 Evict previews first, then closed and reproducible prefetches. Never automatically evict explicit downloads, open content, or pending writes. Promoting prefetch to explicit download changes cache classification without retransferring bytes.
 
@@ -529,6 +539,8 @@ Evict previews first, then closed and reproducible prefetches. Never automatical
 Store current viewing location, synchronized saved progress, and append-only completion history separately.
 
 Progress operations carry the last observed server revision and content-version anchor. On stale progress, keep the server position and preserve the device position as **Continue from this device's position**. Finished and Re-read are separate revisioned events.
+
+Track normal reading and temporary browsing as distinct client states. Normal sequential reading advances saved progress; **Continue Reading from Here** explicitly adopts the viewing location and resumes normal reading. Derive automatic completion from saved progress, never from the temporary viewing location reached through search, links, bookmarks, contents navigation, or scrubbing.
 
 ## 12. Flex
 
@@ -572,6 +584,8 @@ Each update includes base server revision, playback session, content revision, s
 
 Seeking changes current location only. Durable progress advances after meaningful continued playback.
 
+Automatic watched events require normal playback reaching the active ending marker or content end. Seek, scrub, and preview events cannot emit watched transitions. Explicit manual watched changes remain separate revisioned events.
+
 ## 13. Worlds
 
 ### 13.1 Supervision
@@ -604,18 +618,23 @@ Every successful backup records and verifies the world, Minecraft version, Fabri
 
 - Require the server to be stopped.
 - Verify the source recovery point.
+- Show the selected world, backup date, recorded configuration, and affected current data for confirmation before replacement.
 - Create and verify the safety backup unless explicitly declined.
 - Materialize into staging on the same filesystem.
 - Validate world files, checksums, and recorded configuration.
-- Retain the current world as rollback state.
+- Retain the current world and configuration as rollback state.
 - Atomically activate the staged world.
 - Keep source and safety protections until post-restore verification.
+
+Journal the prior generation, staged generation, activation, and verification phases durably. If activation or verification fails, or restart finds an activation not recorded as verified, reestablish the prior world and configuration before allowing play, another mutation, or retry. Retain both generations until that reconciliation finishes; directory presence alone is not evidence of a completed restore.
 
 ### 13.4 Mods
 
 Maintain one immutable configuration generation and lockfile containing Minecraft, Fabric, API, mod versions, hashes, sources, dependencies, conflicts, and artifact availability.
 
-Planning is side-effect free. Automatically add only uniquely resolvable required dependencies. Block unresolved dependencies and hard conflicts. Apply a complete staged generation only after artifact verification and a protected pre-change backup.
+Planning is side-effect free. Automatically add only uniquely resolvable required dependencies. Block unresolved dependencies and hard conflicts. Apply a complete staged generation only after artifact verification and a verified, protected pre-change backup. This gate applies to all managed Minecraft, Fabric, API, mod, and configuration changes; a failed backup leaves the active generation unchanged.
+
+Rollback can restore the pre-change world together with its recorded configuration. Preview newer world progress that will be replaced, then use §13.3 confirmation, safety-backup, staging, and recovery rules rather than only switching binaries or the mod lockfile.
 
 ### 13.5 Unsafe Storage
 
@@ -648,6 +667,8 @@ Only explicit daemon deletion events become backup deletions. Unexpected missing
 ### 14.3 Restore, Migration, and Export
 
 Before a full export or migration, query reachable devices for unsynchronized durable work and offer to synchronize or export it. Unavailable devices do not block the server snapshot, but the result records that their state could not be assessed.
+
+For a full export, also enumerate device-only content and user-created state, including This Device playlists, and offer inclusion or a separate device export. The manifest distinguishes exported, excluded, and unassessed device state; local-only data must not disappear from the inventory merely because it has no synchronization queue entry.
 
 Inventory an occupied destination and create and verify a destination recovery point before changing it. Restore or migrate into destination-local staging, verify content, metadata, schema, and declared exclusions, then activate only the complete generation. Never merge, overwrite, or delete destination data implicitly.
 
@@ -702,18 +723,24 @@ Startup reconciliation checks running jobs, staging output, orphaned objects, wo
 - Kill the daemon during every ingestion stage.
 - Fill or disconnect each storage volume during writes.
 - Replay offline operations out of order.
-- Revoke a device with unsynchronized work and active jobs.
+- Lose the acknowledgment after a committed mutation, then query or retry without applying it twice.
+- Revoke a device with unsynchronized work, active streams, and accepted jobs; deny further access while retaining accepted server work.
 - Restore into an occupied destination.
 - Interrupt database and storage-format migration.
 - Replace provider responses with malformed, empty, rate-limited, and destructive valid changes.
 - Verify Live Photo and compound-asset atomicity.
+- Import photos with identical pixels but distinct original bytes or metadata; retain and export every original resource.
+- Purge a photo, reinstall the client, and verify unchanged camera-roll assets stay suppressed until explicit re-add.
 - Exercise playlist source updates with manual additions and placeholders.
 - Saturate CPU, GPU, disk, and network during playback.
 - Kill the VPN during tracker, DHT, and peer traffic.
 - Test virtual-drive atomic-save and rename-overwrite patterns.
+- Reject virtual-drive mutations of app-owned read-only items and prevent indexer or preview requests from hydrating originals.
 - Replace ebook and chapter content while preserving anchors.
+- Reach reading or playback end through temporary browsing, seeking, and previewing without emitting completion or watched events.
 - Verify every selected disc track survives AV1 processing.
 - Interrupt every Worlds backup and restore phase.
+- Interrupt Worlds restoration after activation but before verification and recover the prior world and configuration before play.
 - Rebuild indexes without changing canonical content.
 
 ## 18. Delivery Plan
@@ -745,6 +772,7 @@ Each stage requires successful restart and recovery tests before becoming the de
 - Define distribution of objects across multiple primary drives.
 - Determine minimum supported Linux filesystems and snapshot capabilities.
 - Decide backup encryption and recovery-key policy.
+- Resolve how the latest-five Worlds recovery-point limit interacts with 30-day Backup History: define whether expired unprotected recovery points enter that history or are purged, without weakening protected-backup rules.
 
 ### Clients
 
