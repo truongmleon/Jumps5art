@@ -219,6 +219,7 @@
 
 - Run face recognition, people clustering, and semantic photo search locally on the server.
 - **Merge People**, **Remove from Cluster**, and **Name Person** are reversible verified corrections.
+- Merged and named people become verified reference profiles that improve future face matching.
 - Future clustering respects these corrections and cannot rejoin manually separated faces unless the correction is reverted.
 
 ### Client UI
@@ -264,7 +265,7 @@
 - After server restart, completed backup work is not repeated. Incomplete output resumes when safe or is discarded and restarted.
 - Renaming a primary renames its backup immediately.
 - Replacing a primary preserves the existing backup.
-- Removing a primary archives its backup for 30 days and stops synchronization. Permanent deletion requires confirmation and remains reversible until expiry.
+- Removing a primary archives its backup for 30 days and stops synchronization. The archive remains reversible until expiry, but the user may permanently purge it earlier after explicit confirmation.
 
 ## Bato — eReader and Manga Library
 
@@ -339,7 +340,7 @@
 ### Metadata and Organization
 
 - Parse filenames with `torrent-name-parser`.
-- Use AniList for anime metadata and TMDB for movie and television metadata.
+- Use AniList's GraphQL API for anime metadata and TMDB for movie and television metadata.
 - Preserve existing thumbnails when available.
 - Fetch name, date, rating, genre, description, cast, artwork, and television episode descriptions.
 - Allow manual matching by TMDB or AniList ID.
@@ -392,7 +393,7 @@
 - Keep the latest five unprotected backups, including scheduled and pre-change backups.
 - User-protected backups do not count toward this limit. Selected restore-source and temporary safety backups are excluded only while restoration is active.
 - During a running-server backup:
-  1. Warn connected players when configured.
+  1. Warn connected players that a backup is beginning.
   2. Temporarily pause world saving.
   3. Request a complete save and wait for confirmation.
   4. Copy the world to the backup destination.
