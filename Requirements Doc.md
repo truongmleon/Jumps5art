@@ -44,6 +44,8 @@
 - Provide a documented server-migration process.
 - Migration and export produce a consistent, complete snapshot, identify every omitted or failed item, and leave the source unchanged until the user confirms successful recovery.
 - For a user-initiated server migration or full export, report unsynchronized saves on reachable devices and offer to synchronize or export them first. Unavailable devices do not block the server snapshot; identify that their unsynchronized saves could not be assessed.
+- Migration or recovery into a destination that already contains Jumpstart data identifies the affected content and preserves a verified destination recovery point. Never merge, overwrite, or delete destination data implicitly.
+- Provide a documented server-local recovery path that can inspect and restore verified backups when the primary database is unavailable or no approved client is accessible.
 
 ### Connectivity and Offline Use
 
@@ -59,6 +61,7 @@
 - Device names need not be unique. Wherever the user selects or reviews a device, also show enough identifying context, such as platform and last-seen time, to avoid choosing a same-named device implicitly.
 - New devices require explicit pairing on the same local network.
 - Removing a device immediately revokes server access and rejects its queued operations. Removal does not delete server content or claim to erase copies already stored on that device.
+- Device removal does not erase unsynchronized local changes. Keep them locally exportable until explicitly discarded after a data-loss warning.
 - If no approved device is available to approve a new one, allow pairing to be approved directly from the server. Previously revoked devices remain revoked.
 
 ### Offline Conflict Resolution
@@ -94,6 +97,8 @@
 ### App and Server Management
 
 - One background daemon, `jumpstart-server`, manages the SQLite or PostgreSQL database and server filesystem.
+- Initial setup never initializes or adopts a non-empty storage location without identifying existing data and obtaining explicit confirmation.
+- Before an app or server update migrates persistent files or metadata, create and verify a recoverable pre-migration state. Failure leaves the prior state usable or recoverable until the migrated state is verified.
 - Uploads, downloads, folder creation, moves, and deletions occur exclusively through client requests to the daemon. Clients do not modify server storage directly.
 - Worlds communicates with the daemon through its CLI.
 - Muse registers as an active Media Session on mobile. The other apps allow the operating system to manage P2P node lifecycles.
@@ -119,6 +124,8 @@
 - Failed transfers, backups, metadata lookups, and processing jobs support retry where applicable.
 - Completed organizational actions use Undo rather than Cancel.
 - Background indexing, recognition, deduplication, and metadata work yields to playback and interactive transfers, pauses under resource pressure, and resumes automatically.
+- After any client, daemon, or machine restart, long-running jobs retain confirmed progress and reconcile their source and destination before resuming, restarting, or reporting completion.
+- Disconnecting or removing the initiating device does not cancel accepted server-resident work. Work that still depends on that device becomes **Waiting for Source** or fails safely, and remaining approved devices can view and control it.
 
 ### Server-Client Networking
 
@@ -129,6 +136,7 @@
 - An external outage never removes completed local content or previously fetched metadata.
 - Failed work remains visible with its actual state.
 - Empty, truncated, malformed, sign-in, or otherwise invalid provider responses are failures rather than authoritative no-result or removal responses. Preserve prior content, metadata, matches, and queued work.
+- A valid provider response that removes or substantially contradicts previously accepted metadata is offered for review rather than applied destructively. Preserve the prior metadata and artwork until accepted.
 - Automatically retry short-lived failures, such as a lost connection, temporarily unavailable service, or provider rate limit, with increasing delays. Respect provider-requested wait periods and applicable network, power, and storage settings. Stop after a limited retry budget and notify the user only when input is required or that budget is exhausted.
 
 ### Content Rights
@@ -258,6 +266,7 @@
 - Support server-side HTTP downloads, including Mega and direct links.
 - Support BitTorrent downloads with a seeding ratio of 0.
 - Before resuming, verify that the remote source is unchanged. Never append data from a changed or unverified source to a partial file; retain the job and require a clean restart.
+- Do not mark an HTTP, Mega, or BitTorrent retrieval complete until it passes every available source identity and integrity check. Sign-in, quota, error, and interstitial pages are failures rather than downloaded content.
 - Show an actionable waiting state for credentials, decryption keys, renewed links, confirmations, provider limits, or other required input.
 - When a source cannot resume, retain the job and explain that retrieval must restart.
 
@@ -284,6 +293,7 @@
 - Back up canonical app files, metadata, and the active Worlds state. Exclude backup destinations, temporary caches, prefetched-only content, and incomplete output.
 - Worlds remains responsible for creating, protecting, expiring, and restoring its own recovery points. Mass backs up and restores the complete Worlds data and backup catalog as one consistent unit.
 - Primary additions, deletions, and recoveries mirror to the backup.
+- Unexpectedly missing, unreadable, or corrupted primary files or metadata are not treated as user deletions and are not mirrored to backups. Preserve the latest verified recovery points and mark the primary degraded until repaired or explicitly reconciled.
 - Show the last successful backup and latest verification.
 - Clearly identify missing, stale, full, or unreadable backup destinations.
 - When verification finds corruption, identify the affected recovery points, retain every available copy, and stop presenting the damaged copy as recoverable. Repair automatically only from a separately verified copy.
@@ -308,6 +318,7 @@
 
 - Support direct file uploads.
 - Validate PDF, EPUB, and CBZ files before adding them to the library. Identify damaged or unsupported content. For a supported password-protected file, ask for the password and unlock it automatically after the user supplies it; do not claim to bypass an unknown password or DRM.
+- Do not report an ebook as fully available offline if any required reading resource is remote or missing; identify the unavailable resources and affected content.
 - Provide a manually invoked MangaDex downloader and support similar sources.
 - Package downloaded chapters as individual `.cbz` files while preserving covers and metadata.
 - Order CBZ pages by natural folder-and-filename order so, for example, page `2` appears before page `10`. If entries cannot be ordered uniquely, preserve every page, use archive order as the final tie-breaker, and show a non-blocking warning.
@@ -359,6 +370,7 @@
 
 - Play movies, television shows, anime, and other video files.
 - Rip optical discs from the headless server or a desktop client with an optical drive.
+- A disc rip succeeds only when all selected source content is read without unresolved disc or drive errors. A playable but incomplete or damaged rip remains failed.
 - Use `makemkvcon` and ffmpeg for disc ripping and AV1 encoding.
 - Automatically encode uploaded or ripped video into AV1 for storage.
 - Retain the original until the AV1 result is verified playable with every selected video, audio, subtitle, and chapter track.
@@ -397,6 +409,7 @@
 - Support subtitles and Blu-ray subtitle formats.
 - Use libmpv for playback and ffmpeg for transcoding, with hardware acceleration when supported.
 - Save playback position periodically and on exit, synchronize the latest confirmed position across devices, and offer **Start Over**. Seeking or previewing alone does not replace the saved position.
+- A stale or offline playback checkpoint never overwrites newer server progress or watched state. Keep the server state and offer **Continue from this device's position** without relying on client clocks.
 - Remember explicit per-title audio and subtitle choices separately from preferred languages and track roles. Never substitute commentary or descriptive audio for ordinary audio, or full subtitles for forced or signs-only subtitles, solely because the language matches.
 - Allow manual correction of language labels.
 - Offer **Skip Opening** when an opening marker is available.
@@ -427,6 +440,7 @@
 - Before stop or restart, optionally warn connected players with a configurable countdown.
 - After an unexpected exit, retain logs and attempt no more than three automatic restarts within five minutes.
 - Repeated failures stop restart attempts and require user action.
+- If active world data can no longer be saved reliably, prevent continued player activity, report whether a clean save was confirmed, and require recovery verification before reopening the server.
 
 ### Safe Backups
 
