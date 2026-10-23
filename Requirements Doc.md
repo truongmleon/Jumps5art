@@ -12,6 +12,7 @@
 
 - Jumpstart is strictly single-user.
 - No accounts, roles, profiles, sharing, or other-user permissions are required.
+- Minecraft players are game participants rather than Jumpstart users and receive no Jumpstart management or storage permissions.
 
 ### Client Platforms
 
@@ -43,6 +44,7 @@
   - Worlds configurations and backups
 - Provide a documented server-migration process.
 - Migration and export produce a consistent, complete snapshot, identify every omitted or failed item, and leave the source unchanged until the user confirms successful recovery.
+- For a user-initiated server migration or full export, report known unsynchronized saves and device-only items on reachable devices and offer a separate optional consolidation step. Unavailable devices do not block the server snapshot; identify that their local-only data was not assessed.
 
 ### Connectivity and Offline Use
 
@@ -55,6 +57,7 @@
 ### Device Pairing
 
 - The user can approve, name, recognize, and remove their own devices.
+- Device names need not be unique. Wherever the user selects or reviews a device, also show enough identifying context, such as platform and last-seen time, to avoid choosing a same-named device implicitly.
 - New devices require explicit pairing on the same local network.
 - Removing a device immediately revokes server access and rejects its queued operations. Removal does not delete server content or claim to erase copies already stored on that device.
 - If no approved device is available to approve a new one, allow pairing to be approved directly from the server. Previously revoked devices remain revoked.
@@ -147,9 +150,9 @@
 - Match Spotify items to YouTube Music using the title, primary artist, version labels such as live or remix, and approximate duration. Import automatically only when one candidate clearly agrees. Continue the remaining import without interruption and collect ambiguous items in a dedicated review list where the user can resolve or skip several items together.
 - Migrate the existing Rust music-download CLI behavior into `jumpstart-server`.
 - A playlist import creates a same-named playlist in source order (with the audio files also downloaded individually in the library).
+- Recognize a previously imported playlist by its source and update the existing playlist by default. Preview source removals, preserve tracks the user added manually, do not redownload existing audio, and keep **Import as New** available.
 - Successful tracks remain in the playlist. Failed tracks appear as retryable placeholders and are not redownloaded when the import is retried.
 - Retrying an unresolved import never substitutes a different recording for one previously selected or downloaded; a changed candidate remains unresolved for batch review.
-- Report complete and partial download outcomes.
 - Detect byte-identical duplicates using exact-file comparison and reuse the existing library track automatically while preserving every intended playlist position.
 - Detect the same recording across different encoding, silence, or intros using audio-content comparison.
 - Group possible non-identical duplicate matches into a non-blocking batch review with **Keep Both** and **Use Existing** options.
@@ -158,6 +161,7 @@
 ### Metadata and Discovery
 
 - Embed song thumbnails, artist tags, and time-synchronized lyrics from LRCLIB.
+- Allow corrections to title, artists, album, artwork, and track information. Automatic updates never overwrite corrected fields and remain available for optional review.
 - Allow manual lyric correction and removal.
 - Automatic lyric refresh never replaces manually edited or removed lyrics. Keep the manual state and expose the fetched version through a non-blocking **Review Update** action.
 - Missing lyrics are a valid state and do not prevent import or playback.
@@ -184,6 +188,7 @@
 - Keep playback active on the source until the destination confirms playback. A failed handoff leaves source playback unchanged.
 - After successful handoff, the user may control the active player from their other connected devices.
 - A successful handoff preserves the current position, queue order, shuffle and repeat state, and upcoming-track context.
+- A delayed remote-control command applies only to the player targeted when it was issued. If handoff or reconnection changed that target, discard the command rather than controlling a different player.
 
 ## Photogenic — Photo Storage and AI Gallery
 
@@ -199,11 +204,14 @@
 - Camera-roll backup history is stored on the server. After app reinstallation, device replacement, or local-data loss, Photogenic scans the authorized photo library and matches assets against existing server files. Confirmed matches are linked without re-uploading; incomplete items are retried, and modified assets are uploaded as related versions.
 - An authorized asset that is temporarily unavailable from cloud-optimized device storage remains **Waiting for Source** and is not counted as backed up. Retry respects the selected network and power settings.
 - Deleting a linked server item suppresses automatic re-upload of its unchanged native Photos asset, including after app reinstallation, device replacement, or local asset-identifier changes. Offer **Back Up Again** explicitly; later native edits remain distinguishable as modified assets.
+- Mark an item **Backed Up** only after the server verifies a complete copy of the phone's original. If the source is unreadable or changes during transfer, show **Needs Attention** and retry safely.
+- Hidden, locked, or otherwise protected mobile media is a separate backup choice when the platform exposes it. Identify inaccessible or excluded items and do not count them toward a complete camera-roll backup.
 
 ### Live Photos
 
 - Store and link both the `.HEIC` and `.MOV` components as one Live Photo.
 - Backup, download, move, restore, and deletion treat both Live Photo components as one atomic item. Backup is complete only after both components are safely stored.
+- When the phone presents multiple resources for one asset, such as RAW and JPEG originals, HDR or depth sidecars, or an edited rendition, retain each available source resource and link them as one asset rather than flattening them.
 
 ### Duplicate and Similar Photo Review
 
@@ -229,6 +237,7 @@
 ### Metadata
 
 - Store capture date, capture time, time zone, location, frame rate, and capture device when available.
+- If the capture time zone is unavailable, keep it **Unknown** rather than inferring it from the server, location, or current device. Allow reversible time-zone correction.
 - Allow reversible corrections to date, time, and location.
 - Support file duplication and album creation.
 - Removing an item from an album or deleting an album never deletes the underlying photo, video, or Live Photo.
@@ -264,6 +273,7 @@
 - Block search indexers from automatically retrieving virtual-drive content.
 - Provide cached previews to the operating system without marking the original as downloaded or retrieving a complete server file solely to create a preview.
 - On macOS, Windows, and Linux, mount server storage as a native virtual drive.
+- Detect filename differences that a client platform cannot represent, including case-only, reserved-name, and trailing-character collisions. Never expose two server items as the same client path; keep both available with clear collision-safe display names.
 - Support random-access opening through a local chunk cache without requiring the complete library to be downloaded first.
 - When server content is unavailable and not fully cached, expose it as unavailable rather than as an empty, partial, or completed local file. Preserve its metadata and explain that opening requires reconnection or a completed download.
 - Server saves and deletions are atomic; incomplete transfers never appear as completed files or deletions.
@@ -271,6 +281,7 @@
 - Hold interrupted client saves in the local cache and retry them after reconnection.
 - Unsynchronized client saves survive app, device, and server restarts. Cache cleanup never removes them; they remain visible until synchronized, exported, or explicitly discarded after a data-loss warning.
 - Expose Muse, Photogenic, Bato, and Flex files as read-only.
+- Copying from a read-only app library creates an independent Mass-owned copy. Later changes to the source or copy do not affect the other.
 
 ### Backups
 
@@ -282,6 +293,7 @@
 - Primary additions, deletions, and recoveries mirror to the backup.
 - Show the last successful backup and latest verification.
 - Clearly identify missing, stale, full, or unreadable backup destinations.
+- When verification finds corruption, identify the affected recovery points, retain every available copy, and stop presenting the damaged copy as recoverable. Repair automatically only from a separately verified copy.
 - Each recovery point contains a consistent set of file contents and associated app metadata, including organization, annotations, progress, and other user-created state. Disclose any excluded state before backup.
 - Support selected-file and selected-folder restore.
 - Support complete primary-drive recovery to a replacement drive.
@@ -302,8 +314,10 @@
 ### Ingestion
 
 - Support direct file uploads.
+- Validate PDF, EPUB, and CBZ files before adding them to the library. Identify encrypted, password-protected, damaged, or unsupported content and explain whether it can be unlocked or repaired.
 - Provide a manually invoked MangaDex downloader and support similar sources.
 - Package downloaded chapters as individual `.cbz` files while preserving covers and metadata.
+- Order CBZ pages using a valid embedded page order when available; otherwise use natural folder-and-filename order. If entries cannot be ordered uniquely, preserve every page, use archive order as the final tie-breaker, and show a non-blocking warning.
 - Identify chapters by source, language, edition or scan group, volume, and chapter number. Alternate releases remain separate and enter the default reading sequence only when selected; navigation and prefetch follow that sequence.
 - Preserve reading position and annotations across chapter removal, addition, replacement, or duplication.
 - If replacement invalidates a saved position, bookmark, or annotation anchor, preserve it as unresolved against the prior version. Never silently discard it or attach it to different content; allow the user to relocate or delete it.
@@ -324,7 +338,7 @@
 - An automatically finished ongoing series returns to in-progress when a new chapter arrives.
 - If cover art is missing, render the title and author as the cover.
 - Support local downloads, zoom, bookmarks, annotations, and reading progress.
-- Define progress separately for fixed-page books and EPUBs.
+- For PDF and CBZ, calculate displayed progress from the current page and total readable pages. For EPUB, calculate it from the current location in the book's ordered reading content.
 - Support right-to-left CBZ pagination, vertical webtoon scrolling, and automatic double-page spread detection.
 - For wide images, automatically choose fit, spread, or split-page presentation according to the active reading mode. Rotate only when orientation metadata requires correction or the user requests it, and remember overrides per item.
 - Allow the user to change reading direction and page pairing, including whether the first page stands alone.
@@ -344,7 +358,7 @@
 - Closing during temporary browsing preserves Saved Reading Progress.
 - Bookmarks and annotations never change progress.
 - **Re-read** begins a new pass from the start, removes the active Finished status, and preserves prior completion history.
-- The user may manually mark an item Finished. Reaching 100% also marks it Finished.
+- The user may manually mark a book or series Finished. Reaching the content end automatically finishes a standalone book; a series finishes automatically only when every chapter in its selected sequence is complete and no known chapter gap remains.
 - Saved Reading Progress synchronizes across devices. If an offline device reconnects with a different position after the server position changed, keep the server position and offer **Continue from this device's position**. Finished and Re-read actions synchronize separately and never erase completion history.
 
 ## Flex — Video Hub
@@ -368,7 +382,7 @@
 - Keep tracks outside the normal episode-duration range available for review so shorts, specials, double-length episodes, and unusual premieres are not discarded.
 - Ambiguous movie and television mappings do not block ripping or encoding when every plausible content track is retained. Keep those tracks **Unmatched** for non-blocking batch review, and require confirmation only before excluding a plausible track.
 - Filter menu tracks and obvious non-content tracks by minimum runtime, but retain them for manual review when uncertain.
-- Group director's cuts, dubbed versions, extras, trailers, and alternate aspect ratios under one title without treating them as duplicates.
+- Group cuts and alternate presentations as **Versions** and trailers or bonus material as **Extras**. Treat dubbed audio as a track when embedded or as a labeled version when stored separately.
 
 ### Metadata and Organization
 
@@ -390,7 +404,8 @@
 - Provide a PlayStation/Netflix-inspired interface with global search.
 - Support subtitles and Blu-ray subtitle formats.
 - Use GPU-accelerated AV1 playback and transcoding through libmpv.
-- Remember audio and subtitle track preferences.
+- Save playback position periodically and on exit, synchronize the latest confirmed position across devices, and offer **Start Over**. Seeking or previewing alone does not replace the saved position.
+- Remember explicit per-title audio and subtitle choices separately from preferred languages and track roles. Never substitute commentary or descriptive audio for ordinary audio, or full subtitles for forced or signs-only subtitles, solely because the language matches.
 - Allow manual correction of language labels.
 - Offer **Skip Opening** when an opening marker is available.
 - Allow opening and ending markers to be corrected, disabled, or dismissed per item.
@@ -399,7 +414,7 @@
 - Required episodes are regular episodes in the selected provider ordering. Specials, extras, alternate cuts, and unmatched tracks are excluded unless the user includes them.
 - Mark a season watched when all required episodes are watched or when the user marks it manually.
 - Mark a series watched when all required available seasons are watched.
-- New episodes return the series to in-progress.
+- A manual season or series watched status persists until the user changes it. New required episodes return only automatically watched titles to in-progress.
 - Metadata-only changes to episode order do not change watched status.
 - When no ending marker exists, use actual video completion or manual **Mark Watched**.
 
@@ -413,8 +428,9 @@
 ### Server Management
 
 - Support create, start, stop, restart, and status.
+- **Create** succeeds only when no managed server exists. If one exists, fail without change and require a new explicit **Archive Existing** or **Replace** command. **Replace** first creates and verifies a recoverable backup.
 - `jumpstart-server` manages the Minecraft process and receives Worlds commands.
-- Status reports **Starting**, **Running**, **Stopping**, **Backing Up**, **Restoring**, **Updating**, or **Stopped**.
+- Status reports the server lifecycle and any concurrent operation independently, such as **Running — Backing Up** or **Stopped — Restoring**, and states whether players can connect.
 - Starting an already-running server or stopping an already-stopped server returns a clear message without causing an error.
 - Do not run conflicting operations simultaneously.
 - Before stop or restart, optionally warn connected players with a configurable countdown.
@@ -427,6 +443,7 @@
 - A pre-change backup records the current Minecraft, Fabric, Fabric API, and mod configuration.
 - A pre-change backup and previous server/mod configuration are protected from automatic cleanup and excluded from the five-backup limit until the user accepts the change or completes a rollback. After acceptance, the backup becomes unprotected and counts toward the limit.
 - Create a daily backup only when world or player data changed since the last successful backup.
+- Run the daily backup at a configurable local time. If that opportunity is missed, perform one backup at the next eligible time without stacking missed runs, and show the next attempt and last skip reason.
 - Keep the latest five unprotected backups.
 - User-protected backups do not count toward this limit. Selected restore-source and temporary safety backups are excluded only while restoration is active.
 - During a running-server backup:
@@ -461,6 +478,7 @@
 
 - Manage Minecraft, Fabric Loader, Fabric API, and installed Fabric mods.
 - Support installing, removing, enabling, disabling, and updating mods.
+- Before applying mod changes, show the complete add, remove, and version-change plan. Include unambiguous required dependencies automatically and do not apply a set with unresolved dependencies or known hard conflicts.
 - Warn when a mod appears incompatible with the selected Minecraft or Fabric version.
 - If the server fails after an update, allow rollback to the previous server and mod configuration.
 - Never upgrade or replace existing world data without a backup.
