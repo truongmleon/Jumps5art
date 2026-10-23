@@ -271,6 +271,10 @@
 - Do not mark an HTTP, Mega, or BitTorrent retrieval complete until it passes every available source identity and integrity check. Sign-in, quota, error, and interstitial pages are failures rather than downloaded content.
 - Show an actionable waiting state for credentials, decryption keys, renewed links, confirmations, provider limits, or other required input.
 - When a source cannot resume, retain the job and explain that retrieval must restart.
+- Completed remote downloads are initially owned by Mass. Based on supported file types, offer **Add to Muse**, **Add to Photogenic**, **Add to Bato**, or **Add to Flex**, while allowing the file to remain in Mass.
+- Allow a destination app to be selected per job or as an automatic default. The receiving app applies its normal ingestion requirements, including Flex AV1 processing.
+- Transfer ownership only after the receiving app verifies and accepts the file. Failure leaves the original unchanged in Mass; successful transfer reuses the stored file without duplicating it unless the user explicitly chooses **Copy**.
+- Keep the remote-download job and its history visible in Mass after ownership transfers.
 
 ### Client Access and Virtual Drive
 
