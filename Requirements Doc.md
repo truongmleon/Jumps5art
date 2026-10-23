@@ -329,8 +329,7 @@
 
 ### Disc Identification and Track Selection
 
-- For movies, automatically select the longest track when it is the only plausible main feature.
-- If multiple plausible tracks or editions exist, require confirmation before encoding.
+- For movies, identify the title using the disc volume label and compare candidate track durations with TMDB runtime data. Select the only confident match automatically; when multiple tracks or editions remain plausible, require user confirmation before encoding.
 - For television, automatically match standard episode tracks using the expected runtime window, disc order, volume label, and TMDB runtime data.
 - Keep tracks outside the normal episode-duration range available for review so shorts, specials, double-length episodes, and unusual premieres are not discarded.
 - Before encoding an ambiguous television disc, let the user confirm the season, ordering scheme, specials, and episode mapping.
