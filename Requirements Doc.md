@@ -87,7 +87,7 @@
 - When restoring an item from Recently Deleted, if its original name or location is occupied, offer **Restore as Copy**, **Replace Existing**, or **Cancel**; never overwrite automatically.
 - Permanent deletion removes the server file and its associated app metadata.
 - Backup history is separate from Activity History and Recently Deleted and retains deleted or replaced backup versions for 30 days.
-- A new upload, import, remote download, or extracted file never silently replaces existing content. Byte-identical content may reuse stored data, but preserve the new item's intended name, location, and organizational references. Otherwise, keep both using a collision-safe name. **Replace** remains a separate explicit action.
+- Same-name uploads never silently overwrite an existing file. The user chooses **Replace**, **Keep Both**, or **Cancel**.
 
 ### App and Server Management
 
@@ -128,11 +128,11 @@
 - Failed work remains visible with its actual state.
 - Resume is offered only when the source supports continuation. Otherwise, the app explains that the work must restart.
 - Empty, truncated, malformed, sign-in, or otherwise invalid provider responses are failures rather than authoritative no-result or removal responses. Preserve prior content, metadata, matches, and queued work.
-- Automatically retry temporary failures with increasing delays while respecting provider-requested wait periods and applicable network, power, and storage settings. Stop after a limited retry budget and notify the user only when input is required or that budget is exhausted.
+- Automatically retry short-lived failures, such as a lost connection, temporarily unavailable service, or provider rate limit, with increasing delays. Respect provider-requested wait periods and applicable network, power, and storage settings. Stop after a limited retry budget and notify the user only when input is required or that budget is exhausted.
 
 ### Content Rights
 
-- During initial setup, require one acknowledgement that the user is responsible for the right to ingest content. Prompt again only when a particular source, region, or operation requires additional confirmation.
+- Require the user to confirm that they have the right to ingest content.
 - Identify features that must be limited by region or source policy.
 
 ## II. Module Specifications
@@ -144,13 +144,13 @@
 - Accept individual or playlist links from YouTube, YouTube Music, and Spotify.
 - Download audio as `.m4a`.
 - Resolve Spotify links through YouTube Music audio streams.
-- Match Spotify items to YouTube Music using the title, primary artist, version labels such as live or remix, and approximate duration. Import automatically only when one candidate clearly agrees. Continue the remaining import without interruption and collect ambiguous items as unresolved placeholders for optional batch review.
+- Match Spotify items to YouTube Music using the title, primary artist, version labels such as live or remix, and approximate duration. Import automatically only when one candidate clearly agrees. Continue the remaining import without interruption and collect ambiguous items in a dedicated review list where the user can resolve or skip several items together.
 - Migrate the existing Rust music-download CLI behavior into `jumpstart-server`.
 - A playlist import creates a same-named playlist in source order (with the audio files also downloaded individually in the library).
 - Successful tracks remain in the playlist. Failed tracks appear as retryable placeholders and are not redownloaded when the import is retried.
 - Retrying an unresolved import never substitutes a different recording for one previously selected or downloaded; a changed candidate remains unresolved for batch review.
 - Report complete and partial download outcomes.
-- Detect byte-identical duplicates using exact-file comparison and reuse the existing library track automatically.
+- Detect byte-identical duplicates using exact-file comparison and reuse the existing library track automatically while preserving every intended playlist position.
 - Detect the same recording across different encoding, silence, or intros using audio-content comparison.
 - Group possible non-identical duplicate matches into a non-blocking batch review with **Keep Both** and **Use Existing** options.
 - Choosing **Use Existing** places the existing library track into every intended playlist position while preserving source order and retry placeholders.
@@ -308,11 +308,12 @@
 - Preserve reading position and annotations across chapter removal, addition, replacement, or duplication.
 - If replacement invalidates a saved position, bookmark, or annotation anchor, preserve it as unresolved against the prior version. Never silently discard it or attach it to different content; allow the user to relocate or delete it.
 - Visibly flag chapter gaps and replacements.
-- At approximately 80% chapter progress, prefetch at most the next chapter in the selected sequence. Deduplicate the request across devices and existing jobs, and do not alter the reading sequence.
+- At approximately 80% chapter progress, prefetch at most the next chapter in the selected sequence on the device currently reading. Retrieve a source chapter onto the server only once, while allowing each reading device to keep its own local copy as needed. Do not alter the reading sequence.
 - Prefetch respects network and storage settings.
 - Label prefetch separately from explicit downloads.
 - Explicitly downloading a complete, verified prefetched chapter promotes the existing copy without downloading it again.
-- Prefetched chapters may be removed automatically when storage is needed only when they are closed, can be fetched again, and have no bookmarks, annotations, unresolved anchors, or saved-progress dependency. Explicit downloads are never removed automatically.
+- Store chapter identity, bookmarks, annotations, unresolved anchors, and reading progress independently from cached chapter files so they survive cache cleanup.
+- Prefetched chapters may be removed automatically when storage is needed only when they are closed and the same release can be fetched again. When downloaded again, restore its saved state automatically. If the same release is unavailable or changed, keep the saved state unresolved rather than attaching it to different content. Explicit downloads are never removed automatically.
 - Do not automatically remove a prefetched chapter while it is open in the reader. It becomes eligible for cleanup after the reader closes it.
 
 ### Library and Reader
