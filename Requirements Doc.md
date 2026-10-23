@@ -30,7 +30,8 @@
 ### Migration and Export
 
 - The user can migrate to a new server or recover files without the Jumpstart apps.
-- Export media and documents in their retained file formats and export associated metadata in documented.
+- Export media and documents in their original retained formats, or documented common formats when the original is unavailable.
+- Export associated metadata in documented, widely readable sidecar files.
 - Export includes applicable metadata and user-created state:
   - Playlists and albums
   - Collections
@@ -76,7 +77,7 @@
 - Activity history records uploads, additions, renames, moves, reorders, modifications, and deletions for seven days.
 - History identifies the originating device and offers Undo for reversible actions.
 - Unresolved conflicts remain until resolved. Their seven-day history period begins after resolution.
-- History records actions but does not retain deleted file contents (deleted file contents are from **Recently Deleted**.
+- History records actions but does not retain deleted file contents; deleted file contents are retained through **Recently Deleted**.
 - Every server file has one owning app. Mass accesses other app libraries only as stated in the Mass requirements as READ only.
 - Files deleted from Muse, Photogenic, Mass, Bato, or Flex enter a shared server Recently Deleted area for 30 days and remain visible within the owning app.
 - Restoring an item returns its file and recoverable app metadata, annotations, bookmarks, watch state, and surviving album or collection membership.
@@ -86,8 +87,8 @@
 
 ### App and Server Management
 
-- One background daemon, `jumpstart-server`, manages the server database and filesystem.
-- Uploads, downloads, folder creation, and deletion occur through the five client apps communicating with the daemon.
+- One background daemon, `jumpstart-server`, manages the SQLite or PostgreSQL database and server filesystem.
+- Uploads, downloads, folder creation, moves, and deletions occur exclusively through client requests to the daemon. Clients do not modify server storage directly.
 - Worlds communicates with the daemon through its CLI.
 - Muse registers as an active Media Session on mobile. The other apps allow the operating system to manage P2P node lifecycles.
 - Desktop Ctrl/Cmd+Z triggers the latest reversible action, including rename, move, reorder, deletion, and playlist creation or editing.
@@ -135,6 +136,7 @@
 - Accept individual or playlist links from YouTube, YouTube Music, and Spotify.
 - Download audio as `.m4a`.
 - Resolve Spotify links through YouTube Music audio streams.
+- Migrate the existing Rust music-download CLI behavior into `jumpstart-server`.
 - A playlist import creates a same-named playlist in source order (with the audio files also downloaded individually in the library).
 - Successful tracks remain in the playlist. Failed tracks appear as retryable placeholders and are not redownloaded when the import is retried.
 - Report complete and partial download outcomes.
@@ -147,7 +149,7 @@
 - Embed song thumbnails, artist tags, and time-synchronized lyrics from LRCLIB.
 - Allow manual lyric correction and removal.
 - Missing lyrics are a valid state and do not prevent import or playback.
-- Search for (and download) new music through connected Spotify and YouTube accounts. When an item is found, open its link in their respective apps.
+- Search for and import new music within Muse through connected Spotify and YouTube accounts. Opening a result in its provider app remains optional.
 - Songs support search and sorting by Name, Last Played, and Track Artist.
 - Playlists support search and sorting by Name and playlist-specific Last Played.
 
@@ -168,6 +170,7 @@
 - Allow the same or different music to play on multiple devices through a user setting.
 - Handoff transfers playback and controls to an available device that has the song locally or can reach the server.
 - Keep playback active on the source until the destination confirms playback. A failed handoff leaves source playback unchanged.
+- After successful handoff, the user may control the active player from their other connected devices.
 
 ## Photogenic — Photo Storage and AI Gallery
 
@@ -293,7 +296,7 @@
 - Support local downloads, zoom, bookmarks, annotations, and reading progress.
 - Define progress separately for fixed-page books and EPUBs.
 - Support right-to-left CBZ pagination, vertical webtoon scrolling, and automatic double-page spread detection.
-- Allow automatic rotation of wide landscape images, with a remembered per-page override.
+- Automatically rotate wide landscape images 90 degrees to fill the vertical screen, with a remembered per-page override.
 - Allow the user to change reading direction and page pairing, including whether the first page stands alone.
 - Anchor EPUB progress and annotations using EPUB CFI.
 - Support vertical and horizontal scrolling.
@@ -326,9 +329,9 @@
 
 ### Disc Identification and Track Selection
 
-- For movies, use the disc volume label and track duration to propose the main movie track.
+- For movies, automatically select the longest track when it is the only plausible main feature.
 - If multiple plausible tracks or editions exist, require confirmation before encoding.
-- For television, suggest episode tracks using expected runtime, disc order, volume label, and TMDB duration data.
+- For television, automatically match standard episode tracks using the expected runtime window, disc order, volume label, and TMDB runtime data.
 - Keep tracks outside the normal episode-duration range available for review so shorts, specials, double-length episodes, and unusual premieres are not discarded.
 - Before encoding an ambiguous television disc, let the user confirm the season, ordering scheme, specials, and episode mapping.
 - Filter menu tracks and obvious non-content tracks by minimum runtime, but retain them for manual review when uncertain.
@@ -387,8 +390,8 @@
 - Back up immediately before Minecraft, Fabric, Fabric API, mod, or configuration changes.
 - A pre-change backup records the current Minecraft, Fabric, Fabric API, and mod configuration.
 - Create a daily backup only when world or player data changed since the last successful backup.
-- Keep the latest five unprotected scheduled backups.
-- Protected, pre-change, selected restore-source, and temporary safety backups do not count toward the five-backup limit until protection is removed.
+- Keep the latest five unprotected backups, including scheduled and pre-change backups.
+- User-protected backups do not count toward this limit. Selected restore-source and temporary safety backups are excluded only while restoration is active.
 - During a running-server backup:
   1. Warn connected players when configured.
   2. Temporarily pause world saving.
@@ -409,7 +412,7 @@
 - During restoration, temporarily protect the selected restore source and safety backup from cleanup.
 - The five-backup limit may be exceeded until restoration succeeds or is canceled.
 - A failed or interrupted restore leaves the existing world unchanged.
-- After restoration, compare the backup's recorded Minecraft, Fabric, and mod configuration with the active configuration.
+- After restoration, report which backup is active and compare its recorded Minecraft, Fabric, and mod configuration with the active configuration.
 - Offer to restore the matching recorded configuration or require explicit confirmation before starting with a mismatch.
 
 ### Fabric and Mod Management
@@ -439,6 +442,6 @@ The system-wide External Service Availability rules apply to every row below.
 | Spotify | Connected-account search and Spotify-link resolution | Ask the user to reconnect an expired account and preserve failed imports for retry. |
 | LRCLIB | Lyrics and synchronized lyric timing | Import music without lyrics, retain existing lyrics, retry later automatically, and offer manual retry. |
 | MangaDex and similar sources | Search, chapter lists, covers, metadata, and chapter downloads | Preserve interrupted work when resumable; otherwise explain restart. Never remove downloaded chapters because the source removed them. |
-| TMDB / AniList | Movie, television, and anime identification and metadata | Keep media playable with existing local metadata. Retry later and retain manual matching through the corresponding provider ID. |
+| TMDB / AniList | Movie, television, and anime identification and metadata | Display unmatched media using its filename and existing local metadata. Retry later without overwriting manual corrections, and retain manual matching through the corresponding provider ID. |
 | Mega and direct HTTP hosts | New and interrupted remote downloads | Show whether a renewed link, password, account access, decryption key, confirmation, or quota reset is required. Preserve progress only when supported. |
 | BitTorrent metadata sources, trackers, and peers | Torrent metadata retrieval, peer discovery, and active downloads | Keep the job visible, show waiting or availability status, retry discovery, and allow source replacement or cancellation. |
