@@ -42,6 +42,7 @@
   - Watch state
   - Worlds configurations and backups
 - Provide a documented server-migration process.
+- Migration and export produce a consistent, complete snapshot, identify every omitted or failed item, and leave the source unchanged until the user confirms successful recovery.
 
 ### Connectivity and Offline Use
 
@@ -55,6 +56,7 @@
 
 - The user can approve, name, recognize, and remove their own devices.
 - New devices require explicit pairing on the same local network.
+- Removing a device immediately revokes server access and rejects its queued operations. Removal does not delete server content or claim to erase copies already stored on that device.
 
 ### Offline Conflict Resolution
 
@@ -68,9 +70,11 @@
 - An offline deletion immediately hides the item on that device and becomes **Pending Deletion**.
 - On reconnection, Pending Deletion moves the server item to Recently Deleted and propagates to other devices.
 - Each device provides a Keep local download after library deletion setting. If enabled, deleting an item from the server library retains that device’s downloaded copy as a device-only item. Otherwise, the local download is removed when the deletion synchronizes.
+- When deletion conflicts with an offline content edit, deletion wins for the server item, but the edited content remains recoverable as a device-only copy that can be re-added.
 - Undo cancels a pending deletion, restores the item from Recently Deleted, or reverts the name change.
 - Conflict resolution does not rely on client-device clocks.
 - Online rename and reorder operations complete on the server or fail immediately. Offline changes complete locally as **Pending Sync**.
+- If another device changed an item after it was displayed, a later online rename, move, reorder, or edit does not silently replace the newer state. The app presents the conflict and requires a choice.
 
 ### History and File Lifecycle
 
@@ -92,6 +96,7 @@
 - Worlds communicates with the daemon through its CLI.
 - Muse registers as an active Media Session on mobile. The other apps allow the operating system to manage P2P node lifecycles.
 - Desktop Ctrl/Cmd+Z triggers the latest reversible action, including rename, move, reorder, deletion, and playlist creation or editing.
+- Ctrl/Cmd+Z applies to actions originating on the current device. Undoing another device's action requires selecting it explicitly from Activity History.
 
 ### Accessibility
 
@@ -143,6 +148,7 @@
 - Detect byte-identical duplicates using exact-file comparison.
 - Detect the same recording across different encoding, silence, or intros using audio-content comparison.
 - Present duplicate matches with **Keep Both** and **Use Existing** options.
+- Choosing **Use Existing** places the existing library track into every intended playlist position while preserving source order and retry placeholders.
 
 ### Metadata and Discovery
 
@@ -161,6 +167,7 @@
 - The Artists tab automatically creates and updates artist playlists from Track Artist metadata. Specific Albums are compiled in sub playlists.
 - Manually added artist-playlist tracks are marked as pinned and remain until manually removed.
 - Playlist artwork can use an uploaded image or cover art from up to four songs.
+- Deleting a playlist or removing a track from a playlist never deletes its library audio. Deleting library audio is a separate explicit action that identifies affected playlists.
 
 ### Client UI and Playback
 
@@ -171,6 +178,7 @@
 - Handoff transfers playback and controls to an available device that has the song locally or can reach the server.
 - Keep playback active on the source until the destination confirms playback. A failed handoff leaves source playback unchanged.
 - After successful handoff, the user may control the active player from their other connected devices.
+- A successful handoff preserves the current position, queue order, shuffle and repeat state, and upcoming-track context.
 
 ## Photogenic — Photo Storage and AI Gallery
 
@@ -188,6 +196,7 @@
 ### Live Photos
 
 - Store and link both the `.HEIC` and `.MOV` components as one Live Photo.
+- Backup, download, move, restore, and deletion treat both Live Photo components as one atomic item. Backup is complete only after both components are safely stored.
 
 ### Duplicate and Similar Photo Review
 
@@ -199,6 +208,7 @@
 - Only byte-identical files or confirmed identical decoded images may share one stored asset with multiple references.
 - Equivalent copies, edits, bursts, and similar photos retain separate files and are grouped for review.
 - Deletion is always a manual user choice.
+- Deleting one reference to a shared asset preserves the asset and every remaining reference. Permanent asset deletion requires removal of all references and explicit confirmation.
 
 ### Photo and Video Editing
 
@@ -214,6 +224,7 @@
 - Store capture date, capture time, time zone, location, frame rate, and capture device when available.
 - Allow reversible corrections to date, time, and location.
 - Support file duplication and album creation.
+- Removing an item from an album or deleting an album never deletes the underlying photo, video, or Live Photo.
 
 ### Server AI
 
@@ -249,6 +260,7 @@
 - Support random-access opening through a local chunk cache without requiring the complete library to be downloaded first.
 - Server saves and deletions are atomic; incomplete transfers never appear as completed files or deletions.
 - Hold interrupted client saves in the local cache and retry them after reconnection.
+- Unsynchronized client saves survive app, device, and server restarts. Cache cleanup never removes them; they remain visible until synchronized, exported, or explicitly discarded after a data-loss warning.
 - Expose Muse, Photogenic, Bato, and Flex files as read-only.
 
 ### Backups
@@ -260,11 +272,14 @@
 - Deleted or replaced backup versions remain in Backup History for 30 days before purge.
 - Show the last successful backup and latest verification.
 - Clearly identify missing, stale, full, or unreadable backup destinations.
+- Each recovery point contains a consistent set of file contents and associated app metadata, including organization, annotations, progress, and other user-created state. Disclose any excluded state before backup.
 - Support selected-file and selected-folder restore.
 - Support complete primary-drive recovery to a replacement drive.
+- Before a restore replaces or removes current data, show the affected items and retain the pre-restore state until the restored data is verified. A failed or interrupted restore leaves the prior state recoverable.
 - After server restart, completed backup work is not repeated. Incomplete output resumes when safe or is discarded and restarted.
 - Renaming a primary renames its backup immediately.
 - Replacing a primary preserves the existing backup.
+- When a replacement or empty primary is connected to an existing backup, require **Recover Existing Primary** or **Start as New Primary**. Do not mirror deletions into the existing backup before that choice and successful recovery verification.
 - Removing a primary archives its backup for 30 days and stops synchronization. The archive remains reversible until expiry, but the user may permanently purge it earlier after explicit confirmation.
 
 ## Bato — eReader and Manga Library
@@ -281,6 +296,7 @@
 - Provide a manually invoked MangaDex downloader and support similar sources.
 - Package downloaded chapters as individual `.cbz` files while preserving covers and metadata.
 - Preserve reading position and annotations across chapter removal, addition, replacement, or duplication.
+- If replacement invalidates a saved position, bookmark, or annotation anchor, preserve it as unresolved against the prior version. Never silently discard it or attach it to different content; allow the user to relocate or delete it.
 - Visibly flag chapter gaps and replacements.
 - At approximately 80% chapter progress, prefetch and append the next chapter for continuous reading.
 - Prefetch respects network and storage settings.
@@ -315,6 +331,7 @@
 - Bookmarks and annotations never change progress.
 - **Re-read** begins a new pass from the start, removes the active Finished status, and preserves prior completion history.
 - The user may manually mark an item Finished. Reaching 100% also marks it Finished.
+- If offline devices produce conflicting Saved Progress, Finished, or Re-read states, preserve each candidate and require the user to choose which state continues. Completion history is never discarded.
 
 ## Flex — Video Hub
 
@@ -325,6 +342,7 @@
 - Use `makemkvcon` and ffmpeg for disc ripping and AV1 encoding.
 - Automatically encode uploaded or ripped video into AV1 for storage.
 - Retain the original until the AV1 result is verified playable with every selected video, audio, subtitle, and chapter track.
+- Until verification succeeds, the original remains the playable library item with its metadata and watch state. Failure, cancellation, restart, or insufficient storage never exposes incomplete output or replaces the original.
 - Do not re-encode an AV1 file when all included tracks are supported.
 - Transcode AV1 for clients that cannot play it directly.
 
@@ -343,6 +361,7 @@
 - Use AniList's GraphQL API for anime metadata and TMDB for movie and television metadata.
 - Preserve existing thumbnails when available.
 - Fetch name, date, rating, genre, description, cast, artwork, and television episode descriptions.
+- Apply provider metadata and artwork automatically only when one candidate is uniquely confident. Low-confidence, tied, or conflicting matches remain **Unmatched** until the user confirms one.
 - Allow manual matching by TMDB or AniList ID.
 - Manual matches and edits remain locked until explicitly reset.
 - Use separate Anime, Movies, and TV folders.
@@ -389,6 +408,7 @@
 
 - Back up immediately before Minecraft, Fabric, Fabric API, mod, or configuration changes.
 - A pre-change backup records the current Minecraft, Fabric, Fabric API, and mod configuration.
+- Keep the pre-change backup and previous server/mod configuration protected from automatic cleanup until the user accepts the change or completes a rollback.
 - Create a daily backup only when world or player data changed since the last successful backup.
 - Keep the latest five unprotected backups, including scheduled and pre-change backups.
 - User-protected backups do not count toward this limit. Selected restore-source and temporary safety backups are excluded only while restoration is active.
@@ -408,7 +428,9 @@
 
 - List backups with their dates, versions, and status.
 - Require the Minecraft server to be stopped before restoration.
+- Immediately before restoration, revalidate the selected backup and show its world name, date, Minecraft version, and recorded configuration for confirmation. Failed validation aborts before the active world changes.
 - Before replacement, create a safety backup unless the user explicitly declines.
+- If the safety backup fails verification, do not begin restoration. Proceeding without it requires new explicit confirmation that no current-world recovery point exists.
 - During restoration, temporarily protect the selected restore source and safety backup from cleanup.
 - The five-backup limit may be exceeded until restoration succeeds or is canceled.
 - A failed or interrupted restore leaves the existing world unchanged.
@@ -445,3 +467,4 @@ The system-wide External Service Availability rules apply to every row below.
 | TMDB / AniList | Movie, television, and anime identification and metadata | Display unmatched media using its filename and existing local metadata. Retry later without overwriting manual corrections, and retain manual matching through the corresponding provider ID. |
 | Mega and direct HTTP hosts | New and interrupted remote downloads | Show whether a renewed link, password, account access, decryption key, confirmation, or quota reset is required. Preserve progress only when supported. |
 | BitTorrent metadata sources, trackers, and peers | Torrent metadata retrieval, peer discovery, and active downloads | Keep the job visible, show waiting or availability status, retry discovery, and allow source replacement or cancellation. |
+| Mojang/Minecraft, Fabric, Fabric API, and configured mod repositories | New installs, version checks, and updates | Keep the installed configuration unchanged and startable, retain completed downloads, report failed or pending updates, and retry without applying a partial update set. |
