@@ -57,6 +57,7 @@
 - The user can approve, name, recognize, and remove their own devices.
 - New devices require explicit pairing on the same local network.
 - Removing a device immediately revokes server access and rejects its queued operations. Removal does not delete server content or claim to erase copies already stored on that device.
+- If no approved device remains available, provide a server-authorized recovery pairing path that does not restore previously revoked devices.
 
 ### Offline Conflict Resolution
 
@@ -83,6 +84,7 @@
 - Every server file has one owning app. Mass accesses other app libraries only as stated in the Mass requirements as READ only.
 - Files deleted from Muse, Photogenic, Mass, Bato, or Flex enter a shared server Recently Deleted area for 30 days and remain visible within the owning app.
 - Restoring an item returns its file and recoverable app metadata, annotations, bookmarks, watch state, and surviving album or collection membership.
+- If an item's original name or location is occupied during restoration, offer **Restore as Copy**, **Replace Existing**, or **Cancel**; never overwrite automatically.
 - Permanent deletion removes the server file and its associated app metadata.
 - Backup history is separate from Activity History and Recently Deleted and retains deleted or replaced backup versions for 30 days.
 - Same-name uploads never silently overwrite an existing file. The user chooses **Replace**, **Keep Both**, or **Cancel**.
@@ -124,6 +126,8 @@
 - An external outage never removes completed local content or previously fetched metadata.
 - Failed work remains visible with its actual state.
 - Resume is offered only when the source supports continuation. Otherwise, the app explains that the work must restart.
+- Empty, truncated, malformed, sign-in, or otherwise invalid provider responses are failures rather than authoritative no-result or removal responses. Preserve prior content, metadata, matches, and queued work.
+- When reconnecting a linked service, identify the account being connected. If it differs from the account associated with pending work, require confirmation before migrating or canceling that work.
 
 ### Content Rights
 
@@ -139,9 +143,11 @@
 - Accept individual or playlist links from YouTube, YouTube Music, and Spotify.
 - Download audio as `.m4a`.
 - Resolve Spotify links through YouTube Music audio streams.
+- Import a Spotify match automatically only when one recording is uniquely confident. Ambiguous covers, live versions, remixes, and clean or explicit variants remain retryable placeholders until confirmed.
 - Migrate the existing Rust music-download CLI behavior into `jumpstart-server`.
 - A playlist import creates a same-named playlist in source order (with the audio files also downloaded individually in the library).
 - Successful tracks remain in the playlist. Failed tracks appear as retryable placeholders and are not redownloaded when the import is retried.
+- Retrying an unresolved import never substitutes a different recording for one previously selected or downloaded; a changed match requires confirmation.
 - Report complete and partial download outcomes.
 - Detect byte-identical duplicates using exact-file comparison.
 - Detect the same recording across different encoding, silence, or intros using audio-content comparison.
@@ -152,6 +158,7 @@
 
 - Embed song thumbnails, artist tags, and time-synchronized lyrics from LRCLIB.
 - Allow manual lyric correction and removal.
+- Automatic lyric fetching and refresh never overwrite a manual correction or restore manually removed lyrics unless the user explicitly requests replacement.
 - Missing lyrics are a valid state and do not prevent import or playback.
 - Search for and import new music within Muse through connected Spotify and YouTube accounts. Opening a result in its provider app remains optional.
 - Songs support search and sorting by Name, Last Played, and Track Artist.
@@ -190,6 +197,8 @@
 - With limited photo permission, back up all authorized photos, identify that access is limited, and provide a route to system settings. Do not report the complete camera roll as backed up.
 - Photogenic tracks which native Photos assets have been successfully backed up and links each one to its server item. Future backup scans skip unchanged assets already backed up.
 - Camera-roll backup history is stored on the server. After app reinstallation, device replacement, or local-data loss, Photogenic scans the authorized photo library and matches assets against existing server files. Confirmed matches are linked without re-uploading; incomplete items are retried, and modified assets are uploaded as related versions.
+- An authorized asset that is temporarily unavailable from cloud-optimized device storage remains **Waiting for Source** and is not counted as backed up. Retry respects the selected network and power settings.
+- Deleting a linked server item suppresses automatic re-upload of its unchanged native Photos asset. Offer **Back Up Again** explicitly; later native edits remain distinguishable as modified assets.
 
 ### Live Photos
 
@@ -244,6 +253,7 @@
 - Support server-side HTTP downloads, including Mega and direct links.
 - Support BitTorrent downloads with a seeding ratio of 0.
 - Remote jobs retain resumable progress when the source supports it.
+- Before resuming, verify that the remote source is unchanged. Never append data from a changed or unverified source to a partial file; retain the job and require a clean restart.
 - Show an actionable waiting state for credentials, decryption keys, renewed links, confirmations, provider limits, or other required input.
 - When a source cannot resume, retain the job and explain that retrieval must restart.
 
@@ -256,7 +266,9 @@
 - Generate `.jpg` video thumbnails using ffmpeg.
 - On macOS, Windows, and Linux, mount server storage as a native virtual drive.
 - Support random-access opening through a local chunk cache without requiring the complete library to be downloaded first.
+- When server content is unavailable and not fully cached, expose it as unavailable rather than as an empty, partial, or completed local file. Preserve its metadata and explain that opening requires reconnection or a completed download.
 - Server saves and deletions are atomic; incomplete transfers never appear as completed files or deletions.
+- A virtual-drive save is acknowledged only after it is durable in the local cache or committed to the server. Show durable but uncommitted saves as **Pending Sync**. If the server item changes or is deleted first, preserve the save as a conflict copy.
 - Hold interrupted client saves in the local cache and retry them after reconnection.
 - Unsynchronized client saves survive app, device, and server restarts. Cache cleanup never removes them; they remain visible until synchronized, exported, or explicitly discarded after a data-loss warning.
 - Expose Muse, Photogenic, Bato, and Flex files as read-only.
@@ -266,6 +278,7 @@
 - Allow the user to select another drive as backup storage for all six Jumpstart services.
 - One backup drive can back up multiple primary drives.
 - Each primary drive has its own backup folder.
+- Renaming or moving a primary preserves its existing Backup History. If a requested backup-folder name already exists, do not merge histories without explicit confirmation.
 - Primary additions, deletions, and recoveries mirror to the backup.
 - Deleted or replaced backup versions remain in Backup History for 30 days before purge.
 - Show the last successful backup and latest verification.
@@ -293,13 +306,16 @@
 - Support direct file uploads.
 - Provide a manually invoked MangaDex downloader and support similar sources.
 - Package downloaded chapters as individual `.cbz` files while preserving covers and metadata.
+- Identify chapters by source, language, edition or scan group, volume, and chapter number. Alternate releases remain separate and enter the default reading sequence only when selected; navigation and prefetch follow that sequence.
 - Preserve reading position and annotations across chapter removal, addition, replacement, or duplication.
 - If replacement invalidates a saved position, bookmark, or annotation anchor, preserve it as unresolved against the prior version. Never silently discard it or attach it to different content; allow the user to relocate or delete it.
 - Visibly flag chapter gaps and replacements.
 - At approximately 80% chapter progress, prefetch and append the next chapter for continuous reading.
 - Prefetch respects network and storage settings.
 - Label prefetch separately from explicit downloads.
+- Explicitly downloading a complete, verified prefetched chapter promotes the existing copy without downloading it again.
 - Prefetched chapters may be removed automatically when storage is needed. Explicit downloads are never removed automatically.
+- Content currently open in the reader is pinned and cannot be evicted until the reading session ends.
 
 ### Library and Reader
 
@@ -317,6 +333,7 @@
 - Support vertical and horizontal scrolling.
 - Optionally recognize text in image-only PDFs and CBZ pages so it can be selected and copied.
 - Preserve native text selection for EPUB and text-based PDF content.
+- If synchronization replaces or removes currently open content, keep the opened version readable for that session and notify the user. Apply the change on the next open rather than switching content underneath the reader.
 
 ### Reading Progress and Temporary Browsing
 
@@ -340,7 +357,9 @@
 - Use `makemkvcon` and ffmpeg for disc ripping and AV1 encoding.
 - Automatically encode uploaded or ripped video into AV1 for storage.
 - Retain the original until the AV1 result is verified playable with every selected video, audio, subtitle, and chapter track.
+- Before deleting the original, disclose every source video, audio, subtitle, or chapter track omitted from the AV1 result. Any omission requires explicit confirmation; otherwise retain the original.
 - Until verification succeeds, the original remains the playable library item with its metadata and watch state. Failure, cancellation, restart, or insufficient storage never exposes incomplete output or replaces the original.
+- Replacing the original with the verified AV1 version preserves item identity and watch history. Transfer resume positions and opening or ending markers only when they remain valid; otherwise retain them for review.
 - Do not re-encode an AV1 file when all included tracks are supported.
 - Transcode AV1 for clients that cannot play it directly.
 
@@ -362,6 +381,7 @@
 - Apply provider metadata and artwork automatically only when one candidate is uniquely confident. Low-confidence, tied, or conflicting matches remain **Unmatched** until the user confirms one.
 - Allow manual matching by TMDB or AniList ID.
 - Manual matches and edits remain locked until explicitly reset.
+- Provider changes to episode IDs, ordering, or runtimes never remap existing files or watch state automatically. Present the proposed remapping and preserve the prior mapping until accepted.
 - Use separate Anime, Movies, and TV folders.
 - Anime defaults to AniList; Movies and TV default to TMDB.
 - Moving an item between folders changes its default provider for future matching but does not overwrite locked manual metadata.
@@ -417,8 +437,10 @@
   4. Copy the world to the backup destination.
   5. Resume normal world saving.
 - If save confirmation or copying fails, mark the backup unsuccessful, discard incomplete output, and always resume normal world saving.
+- After any interrupted running-server backup, verify that world saving is enabled before normal play continues. If saving cannot resume, prominently warn the user and prevent silent continued play.
 - When the server is stopped, back up the world directly without starting it.
 - A successful backup is verified readable and records its date, world name, and Minecraft/Fabric configuration.
+- If a backup is presented as able to restore its recorded configuration, retain everything required for that restoration. Otherwise, disclose at creation which versions or mods are not recoverable.
 - Protected backups are excluded from automatic cleanup.
 - Low, failing, full, or disconnected backup storage produces a clear warning and does not delete protected backups.
 
