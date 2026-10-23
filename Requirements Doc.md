@@ -62,10 +62,8 @@
 
 - Offline operations retain the order in which they were performed on their device.
 - An offline change is applied automatically when the server copy has not changed since that device last synchronized.
-- If both copies changed, the offline operation does not silently overwrite the server copy.
 - Additions, bookmarks, and annotations are combined where possible.
 - Conflicting file edits are preserved as separate copies.
-- Conflicting renames, moves, and playlist reorders require the user to choose which version to keep.
 - Deletions take precedence, but discarded changes remain visible in conflict history.
 - An offline deletion immediately hides the item on that device and becomes **Pending Deletion**.
 - On reconnection, Pending Deletion moves the server item to Recently Deleted and propagates to other devices.
@@ -74,7 +72,7 @@
 - Undo cancels a pending deletion, restores the item from Recently Deleted, or reverts the name change.
 - Conflict resolution does not rely on client-device clocks.
 - Online rename and reorder operations complete on the server or fail immediately. Offline changes complete locally as **Pending Sync**.
-- If another device changed an item after it was displayed, a later online rename, move, reorder, or edit does not silently replace the newer state. The app presents the conflict and requires a choice.
+- If a device attempts to change an item that changed since it was last viewed or synchronized, combine compatible changes automatically. For incompatible changes, preserve the current server state and the conflicting device change. Continue using the server state while offering a non-blocking option to apply or dismiss the device change; never silently discard either version.
 
 ### History and File Lifecycle
 
@@ -331,7 +329,7 @@
 - Bookmarks and annotations never change progress.
 - **Re-read** begins a new pass from the start, removes the active Finished status, and preserves prior completion history.
 - The user may manually mark an item Finished. Reaching 100% also marks it Finished.
-- If offline devices produce conflicting Saved Progress, Finished, or Re-read states, preserve each candidate and require the user to choose which state continues. Completion history is never discarded.
+- Saved Reading Progress synchronizes across devices. If an offline device reconnects with a different position after the server position changed, keep the server position and offer **Continue from this device's position**. Finished and Re-read actions synchronize separately and never erase completion history.
 
 ## Flex — Video Hub
 
