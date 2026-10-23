@@ -249,6 +249,7 @@
 ### Server AI
 
 - Run face recognition, people clustering, and semantic photo search locally on the server.
+- Support optional server-local SDXL image generation and editing. Save generated or edited output as a new item by default, preserve the source image, and clearly identify AI-generated content.
 - **Merge People**, **Remove from Cluster**, and **Name Person** are reversible verified corrections.
 - Merged and named people become verified reference profiles that improve future face matching.
 - Future clustering respects these corrections and cannot rejoin manually separated faces unless the correction is reverted.
@@ -265,6 +266,7 @@
 - Support standard uploads and downloads.
 - Support server-side HTTP downloads, including Mega and direct links.
 - Support BitTorrent downloads with a seeding ratio of 0.
+- Provide a **Require VPN for BitTorrent** setting. When enabled, torrent metadata retrieval, peer connections, downloading, and uploading occur only while the selected VPN connection is active; stop torrent network activity if it disconnects and never fall back to a non-VPN connection.
 - Before resuming, verify that the remote source is unchanged. Never append data from a changed or unverified source to a partial file; retain the job and require a clean restart.
 - Do not mark an HTTP, Mega, or BitTorrent retrieval complete until it passes every available source identity and integrity check. Sign-in, quota, error, and interstitial pages are failures rather than downloaded content.
 - Show an actionable waiting state for credentials, decryption keys, renewed links, confirmations, provider limits, or other required input.
@@ -273,6 +275,7 @@
 ### Client Access and Virtual Drive
 
 - Provide a Google Drive-style interface on all platforms.
+- Provide optional server-local AI file search across filenames, metadata, and supported document contents. Never send file contents to an external AI service, and identify files that are unsupported or not yet indexed.
 - Support local downloads on mobile.
 - Block search indexers from automatically retrieving virtual-drive content.
 - Provide cached previews to the operating system without marking the original as downloaded or retrieving a complete server file solely to create a preview.
