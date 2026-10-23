@@ -4,7 +4,7 @@
 
 ### Target Environment
 
-- A headless Linux server runs one unified Rust backend daemon and primary storage.
+- A headless Linux server hosts primary storage.
 - Five standalone client apps connect to the server: Muse, Photogenic, Mass, Bato, and Flex.
 - The idle server minimizes CPU, memory, disk activity, and GPU use while preserving scheduled and background functions.
 
@@ -83,7 +83,7 @@
 - History identifies the originating device and offers Undo for reversible actions.
 - Unresolved conflicts remain until resolved. Their seven-day history period begins after resolution.
 - History records actions but does not retain deleted file contents; deleted file contents are retained through **Recently Deleted**.
-- Every server file has one owning app. Mass accesses other app libraries only as stated in the Mass requirements as READ only.
+- Every server file has one owning app.
 - Files deleted from Muse, Photogenic, Mass, Bato, or Flex enter a shared server Recently Deleted area for 30 days and remain visible within the owning app.
 - Restoring an item returns its file and recoverable app metadata, annotations, bookmarks, watch state, and surviving album or collection membership.
 - When restoring an item from Recently Deleted, if its original name or location is occupied, offer **Restore as Copy**, **Replace Existing**, or **Cancel**; never overwrite automatically.
@@ -112,7 +112,7 @@
 
 ### Long-Running Operations
 
-- Uploads, downloads, photo backup, disc ripping, encoding, decoding, prefetching, remote downloads, and other long-running jobs support pause and resume where the source permits it.
+- Uploads, downloads, photo backup, disc ripping, encoding, decoding, prefetching, remote downloads, and other long-running jobs support pause and resume when the source supports continuation. Otherwise, explain that the work must restart.
 - A job can be canceled before completion.
 - Canceling removes incomplete destination output unless the user retains a resumable job.
 - Completed files in a partial playlist or batch remain available and are reported separately.
@@ -128,7 +128,6 @@
 
 - An external outage never removes completed local content or previously fetched metadata.
 - Failed work remains visible with its actual state.
-- Resume is offered only when the source supports continuation. Otherwise, the app explains that the work must restart.
 - Empty, truncated, malformed, sign-in, or otherwise invalid provider responses are failures rather than authoritative no-result or removal responses. Preserve prior content, metadata, matches, and queued work.
 - Automatically retry short-lived failures, such as a lost connection, temporarily unavailable service, or provider rate limit, with increasing delays. Respect provider-requested wait periods and applicable network, power, and storage settings. Stop after a limited retry budget and notify the user only when input is required or that budget is exhausted.
 
@@ -161,8 +160,7 @@
 
 - Embed song thumbnails, artist tags, and time-synchronized lyrics from LRCLIB.
 - Allow corrections to title, artists, album, artwork, and track information. Automatic updates never overwrite corrected fields and remain available for optional review.
-- Allow manual lyric correction and removal.
-- Automatic lyric refresh never replaces manually edited or removed lyrics. Keep the manual state and expose the fetched version through a non-blocking **Review Update** action.
+- Allow manual lyric correction and removal. Automatic lyric updates preserve that manual state and remain available through a non-blocking **Review Update** action.
 - Missing lyrics are a valid state and do not prevent import or playback.
 - Search for and import new music within Muse through connected Spotify and YouTube accounts. Opening a result in its provider app remains optional.
 - Songs support search and sorting by Name, Last Played, and Track Artist.
@@ -199,8 +197,7 @@
 - Media downloaded from Photogenic remains linked to its server item and is not uploaded again as a new camera-roll item unless deliberately duplicated or imported.
 - Full photo-library permission is required to back up the complete camera roll.
 - With limited photo permission, back up all authorized photos, identify that access is limited, and provide a route to system settings. Do not report the complete camera roll as backed up.
-- Photogenic tracks which native Photos assets have been successfully backed up and links each one to its server item. Future backup scans skip unchanged assets already backed up.
-- Camera-roll backup history is stored on the server. After app reinstallation, device replacement, or local-data loss, Photogenic scans the authorized photo library and matches assets against existing server files. Confirmed matches are linked without re-uploading; incomplete items are retried, and modified assets are uploaded as related versions.
+- Store camera-roll backup history on the server and link each successfully backed-up native asset to its server item. During later scans, including after app reinstallation, device replacement, or local-data loss, link confirmed unchanged assets to existing server items without re-uploading, retry incomplete items, and upload modified assets as related versions.
 - An authorized asset that is temporarily unavailable from cloud-optimized device storage remains **Waiting for Source** and is not counted as backed up. Retry respects the selected network and power settings.
 - Deleting a linked server item suppresses automatic re-upload of its unchanged native Photos asset, including after app reinstallation, device replacement, or local asset-identifier changes. Offer **Back Up Again** explicitly; later native edits remain distinguishable as modified assets.
 - Mark an item **Backed Up** only after the server verifies a complete copy of the phone's original. If the source is unreadable or changes during transfer, show **Needs Attention** and retry safely.
@@ -260,7 +257,6 @@
 - Support standard uploads and downloads.
 - Support server-side HTTP downloads, including Mega and direct links.
 - Support BitTorrent downloads with a seeding ratio of 0.
-- Remote jobs retain resumable progress when the source supports it.
 - Before resuming, verify that the remote source is unchanged. Never append data from a changed or unverified source to a partial file; retain the job and require a clean restart.
 - Show an actionable waiting state for credentials, decryption keys, renewed links, confirmations, provider limits, or other required input.
 - When a source cannot resume, retain the job and explain that retrieval must restart.
@@ -276,9 +272,7 @@
 - Support random-access opening through a local chunk cache without requiring the complete library to be downloaded first.
 - When server content is unavailable and not fully cached, expose it as unavailable rather than as an empty, partial, or completed local file. Preserve its metadata and explain that opening requires reconnection or a completed download.
 - Server saves and deletions are atomic; incomplete transfers never appear as completed files or deletions.
-- When the user saves through the virtual drive while the server is unavailable, retain the saved version locally and show **Pending Sync**. If the server copy changes or is deleted before synchronization, preserve both versions rather than overwriting either one.
-- Hold interrupted client saves in the local cache and retry them after reconnection.
-- Unsynchronized client saves survive app, device, and server restarts. Cache cleanup never removes them; they remain visible until synchronized, exported, or explicitly discarded after a data-loss warning.
+- When a virtual-drive save occurs while the server is unavailable or is interrupted, retain the local version as **Pending Sync**, retry after reconnection, and preserve it across app, device, and server restarts and cache cleanup until synchronized, exported, or explicitly discarded after a data-loss warning. If the server copy changes or is deleted before synchronization, preserve both versions.
 - Expose Muse, Photogenic, Bato, and Flex files as read-only.
 - Copying from a read-only app library creates an independent Mass-owned copy. Later changes to the source or copy do not affect the other.
 
@@ -327,7 +321,6 @@
 - Explicitly downloading a complete, verified prefetched chapter promotes the existing copy without downloading it again.
 - Store chapter identity, bookmarks, annotations, unresolved anchors, and reading progress independently from cached chapter files so they survive cache cleanup.
 - Prefetched chapters may be removed automatically when storage is needed only when they are closed and the same release can be fetched again. When downloaded again, restore its saved state automatically. If the same release is unavailable or changed, keep the saved state unresolved rather than attaching it to different content. Explicit downloads are never removed automatically.
-- Do not automatically remove a prefetched chapter while it is open in the reader. It becomes eligible for cleanup after the reader closes it.
 
 ### Library and Reader
 
@@ -351,7 +344,7 @@
 
 - Track Saved Reading Progress separately from Current Viewing Location.
 - Normal sequential reading advances Saved Reading Progress.
-- Search, bookmarks, table of contents, chapter lists, and page scrubbing enter temporary browsing without changing Saved Reading Progress.
+- Search, bookmarks, table of contents, chapter lists, internal content links, and page scrubbing enter temporary browsing without changing Saved Reading Progress.
 - While temporarily browsing, show **Return to [saved location]**.
 - **Continue Reading from Here** deliberately replaces Saved Reading Progress.
 - Closing during temporary browsing preserves Saved Reading Progress.
@@ -402,7 +395,7 @@
 
 - Provide a PlayStation/Netflix-inspired interface with global search.
 - Support subtitles and Blu-ray subtitle formats.
-- Use GPU-accelerated AV1 playback and transcoding through libmpv.
+- Use libmpv for playback and ffmpeg for transcoding, with hardware acceleration when supported.
 - Save playback position periodically and on exit, synchronize the latest confirmed position across devices, and offer **Start Over**. Seeking or previewing alone does not replace the saved position.
 - Remember explicit per-title audio and subtitle choices separately from preferred languages and track roles. Never substitute commentary or descriptive audio for ordinary audio, or full subtitles for forced or signs-only subtitles, solely because the language matches.
 - Allow manual correction of language labels.
@@ -415,7 +408,6 @@
 - Mark a series watched when all required available seasons are watched.
 - A manual season or series watched status persists until the user changes it. New required episodes return only automatically watched titles to in-progress.
 - Metadata-only changes to episode order do not change watched status.
-- When no ending marker exists, use actual video completion or manual **Mark Watched**.
 
 ## Worlds — Minecraft Server CLI
 
@@ -441,10 +433,11 @@
 - Back up immediately before Minecraft, Fabric, Fabric API, mod, or configuration changes.
 - A pre-change backup records the current Minecraft, Fabric, Fabric API, and mod configuration.
 - A pre-change backup and previous server/mod configuration are protected from automatic cleanup and excluded from the five-backup limit until the user accepts the change or completes a rollback. After acceptance, the backup becomes unprotected and counts toward the limit.
+- List pending changes and provide explicit **Accept Change** and **Roll Back** commands.
 - Create a daily backup only when world or player data changed since the last successful backup.
 - Run the daily backup at a configurable local time. If that opportunity is missed, perform one backup at the next eligible time without stacking missed runs, and show the next attempt and last skip reason.
 - Keep the latest five unprotected backups.
-- User-protected backups do not count toward this limit. Selected restore-source and temporary safety backups are excluded only while restoration is active.
+- User-protected backups do not count toward this limit and are excluded from automatic cleanup. Selected restore-source and temporary safety backups are excluded only while restoration is active.
 - During a running-server backup:
   1. Warn connected players that a backup is beginning.
   2. Temporarily pause world saving.
@@ -457,7 +450,6 @@
 - When the server is stopped, back up the world directly without starting it.
 - A successful backup is verified readable and records its date, world name, and Minecraft/Fabric configuration.
 - If a backup is presented as able to restore its recorded configuration, retain everything required for that restoration. Otherwise, disclose at creation which versions or mods are not recoverable.
-- Protected backups are excluded from automatic cleanup.
 - Low, failing, full, or disconnected backup storage produces a clear warning and does not delete protected backups.
 
 ### Restoration
@@ -480,7 +472,7 @@
 - Before applying mod changes, show the complete add, remove, and version-change plan. Include unambiguous required dependencies automatically and do not apply a set with unresolved dependencies or known hard conflicts.
 - Warn when a mod appears incompatible with the selected Minecraft or Fabric version.
 - If the server fails after an update, allow rollback to the previous server and mod configuration.
-- Never upgrade or replace existing world data without a backup.
+- Never upgrade existing world data without a verified pre-change backup. Restoration follows the safety-backup policy above.
 - Warn that removing a mod may affect blocks, items, or world data created by that mod.
 
 ### Failure and Recovery
