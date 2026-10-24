@@ -547,8 +547,8 @@ All module RPC contracts below use the shared wire types: byte offsets/lengths, 
 
 Keep catalog lookup, recording selection, and audio acquisition as separate adapters. Spotify's official Web API supplies catalog and playback functions and prohibits downloading Spotify content; YouTube API policies prohibit downloading audiovisual content without approval and separating its audio. Neither API is an audio-download API. These constraints govern the requested Spotify-to-YouTube Music workflow. [Spotify track API](https://developer.spotify.com/documentation/web-api/reference/get-track), [YouTube policies](https://developers.google.com/youtube/terms/developer-policies)
 
-- `MusicCatalog.search/get_track/get_playlist` returns stable provider IDs, source revision, metadata, account/region availability, and attribution requirements.
-- `MusicAcquirer.probe/acquire/verify` returns an authorized source identity, format, resumability, required credentials, and verified output manifest.
+- The `MusicCatalog` adapter methods `search`, `get_track`, and `get_playlist` return stable provider IDs, source revision, metadata, account/region availability, and attribution requirements.
+- The `MusicAcquirer` adapter methods `probe`, `acquire`, and `verify` return an authorized source identity, format, resumability, required credentials, and verified output manifest.
 - The acquisition implementation wraps the existing Rust CLI behind this contract; use a supervised, pinned downloader worker such as yt-dlp only where that source and the user's rights permit the operation.
 - Connected-account search uses supported provider authorization and scopes; account linkage never implies permission or technical capability to acquire audio.
 - Enable each link-import capability only after its adapter passes source-policy, region, actual acquisition, account-expiry, and integrity gates. Otherwise retain the source entry as **Unsupported Source** or **Waiting for Input**, explain the limitation, and offer file upload or another authorized source.
@@ -1140,7 +1140,7 @@ A coordinated backup uses this protocol:
 
 An open SQLite read transaction may grow WAL retention. Bound the database-copy phase to 60 seconds by default; if it cannot finish under configured resource limits, abort the attempt, release the read transaction, and retry during a quiet window. The Worlds capture deadline remains independent and shorter. Backup-copy checkpoints contain immutable object identity, verified bytes/chunks, and manifest hash; after restart, revalidate before reuse. Completion markers require full closure verification even when transfer resumes.
 
-Newly copied bytes are read back before first successful publication. Previously verified immutable backup objects can be reused; their last verification remains visible rather than being rewritten as newly verified. Run a low-priority rolling full scrub within 30 days, and always fully verify selected objects before restore/export. A detected mismatch marks every affected point damaged, retains every available copy, and repairs only from a separately verified source. Do not delete a damaged copy merely because another copy is also unavailable.
+Newly copied bytes are read back before first successful publication. Previously verified immutable backup objects can be reused; their last verification remains visible rather than being rewritten as newly verified.
 
 ### 14.3 Mirroring, History, and Failure Isolation
 
@@ -1153,6 +1153,12 @@ Retain one current complete recovery generation plus superseded generations for 
 Removing a primary stops synchronization and archives its current recovery set for 30 days from removal. Unarchive within that interval restores its association after identity verification. At expiry, release only that archive's references; preserve any independently protected Worlds points and other recovery references. A user-requested early purge previews the associated items/history/protections and requires explicit confirmation. Temporary disconnection does not begin removal expiry.
 
 Use the shared per-volume warning and safety-reserve thresholds in §7.3 for primary and backup storage. Reserve the known destination and staging budget before work; refuse new bulk writes that would consume the safety reserve. ENOSPC pauses affected work and retains verified checkpoints. Report unique live/history/protected/staging bytes so the user can select an action; do not reclaim canonical, durable offline, or protected data as cache.
+
+Monitor every registered primary and backup volume through layered health evidence. Poll kernel/device I/O errors, disconnects, filesystem error or read-only state, capacity, and SMART/NVMe health at least daily. Where the device and bridge support them, schedule a short self-test weekly and an extended self-test monthly; unsupported or inaccessible health data is **Unknown**, never Healthy. Track changes in reallocated, pending, and uncorrectable sectors, media/data-integrity errors, unsafe shutdowns, temperature, and self-test results. SMART is predictive evidence only: a passing result never replaces content verification.
+
+Run a low-priority rolling hash scrub of canonical primary objects and complete backup generations within 30 online days, yielding to playback, interactive work, and scheduled backups. Persist the scrub cursor per volume so restarts or temporary disconnection resume rather than restart it. Verify object length and BLAKE3 identity, manifest closure, and a sampled filesystem read path; database integrity uses its separate SQLite checks. A restore or export still fully verifies every selected object regardless of its last scrub date.
+
+Repeated I/O failure, a failed self-test, filesystem corruption/read-only transition, or a content-hash mismatch marks the affected volume **Degraded**. Stop new writes, GC, retention cleanup, and destructive mirror propagation involving that volume; do not convert missing or unreadable files into deletions. Continue unrelated volumes and serve only separately verified copies. Preserve the suspect copy for diagnosis, identify affected items and recovery points, and repair only from another verified source onto healthy storage. Returning to Healthy requires stable identity, successful filesystem/device checks, and a complete verification of the repaired scope; clearing a SMART alert alone is insufficient.
 
 ### 14.4 Selective Restore and Full Recovery
 
@@ -1297,7 +1303,7 @@ Client local-schema updates likewise preserve the pre-update database and all pe
 
 ### 16.3 Diagnostics and Health
 
-Expose structured local health for database integrity/schema, volume identity and capacity, backups and last verification, provider capabilities, job queues, resource pressure, credential availability, and Minecraft lifecycle/saving state. APIs return component status, last success, current degradation, and next action; a healthy daemon process is not sufficient to mark every library healthy.
+Expose structured local health for database integrity/schema, volume identity and capacity, device/SMART evidence, filesystem and I/O errors, scrub progress/results, backups and last verification, provider capabilities, job queues, resource pressure, credential availability, and Minecraft lifecycle/saving state. APIs return component status, evidence availability, last success, current degradation, affected data, and next action; a healthy daemon process or passing SMART status is not sufficient to mark every library healthy.
 
 Correlate logs by request, operation, job/attempt, device installation, and component. Default debug logs rotate at 100 MiB total or seven days, whichever bound is reached first; allow an explicit temporary increase. Redact tokens, signed/credential-bearing URLs, filenames when sensitive, file contents, prompts, face data, and locations. Core dumps and external telemetry are disabled by default. Activity History remains its own seven-day product record and is not reconstructed from debug logs.
 
@@ -1308,6 +1314,8 @@ Diagnostics export shows the categories and time range, redacts by default, and 
 | Trigger | Automatic containment | Operator-visible next action |
 |---|---|---|
 | Primary missing or identity mismatch | Suspend its producers and backup deletion propagation | Reconnect the registered primary or choose explicit replacement recovery |
+| Primary or backup device warning | Preserve existing copies; increase visible warning and verification priority without claiming predicted failure | Inspect SMART/NVMe and filesystem evidence, run the supported self-test and verification, then replace suspect storage when indicated |
+| Primary or backup degraded/corrupt | Stop its writes, cleanup and destructive propagation; serve only separately verified copies | Replace or repair the volume from another verified source, then complete scoped verification |
 | Database unreadable/corrupt | Stop mutations; retain objects and verified backups | Run offline inspection and verified generation recovery |
 | Full destination | Pause affected producers; retain confirmed progress | Inspect capacity categories, free or add storage, then resume |
 | Provider invalid response/outage | Preserve earlier content/metadata and bounded retry | Renew input or retry after exhausted budget |
