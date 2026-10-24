@@ -3,7 +3,7 @@
 ## Document Status
 
 - Status: Complete version 1 implementation baseline, proposed for review.
-- Source of truth for product behavior: [Requirements Doc.md](<Requirements Doc.md>).
+- Source of truth for product behavior: [Requirements Doc.md](Requirements Doc.md).
 - Scope: Server, five native client applications, Worlds CLI, recovery tooling, and their persistence, protocol, security, and release contracts.
 - Design references checked: October 23, 2026. Exact shipped dependency/tool/model versions are recorded in lockfiles and each release manifest.
 - **Decision** identifies the selected baseline. A **release gate** is evidence required before enabling a capability; it does not claim an implemented or tested prototype.
@@ -309,6 +309,109 @@ All methods are versioned typed Rust request/reply structs with JSON schemas che
 | `Library` | `CollectionEdit/Reorder{collection_id,base_revision,entries}`; `MetadataEdit{entity_id,fields,base_revision}`; `Bookmark/AnnotationEdit{annotation_id,item_id,version_id,anchor,...}`; `ResolveConflict{conflict_id,choice,expected_revision}`; `Undo{activity_id,expected_revisions}`. |
 | `Playback/Progress` | `Checkpoint{item_id,content_version,generation,base_revision,location,reason}`; `Complete/ReRead/StartOver{item_id,base_revision}`; `HandoffPrepare/Commit/Abort{session_id,generation,target_device_id,...}`; `Command{session_id,generation,command_seq,target_device_id,action}`. |
 | `Backup/Worlds/Health` | `Backup.Plan/Run/Verify/Restore{scope,point_id?,confirmation_token?,base_revision}`; `Worlds.Status/Command{action,plan_id?,confirmation_token?}`; `Health.Get/DiagnosticsExport{scope}`. Destructive plans bind confirmation to exact identities/revisions and expire after 10 minutes. |
+
+#### RPC Argument Reference
+
+In the signatures above, `{...}` encloses a request or response, `[]` means a list, `?` marks an optional field, and `->` separates the request from its response. IDs are stable identifiers, not display names. A `base_revision` is the server revision the client observed; the server uses it to detect stale changes.
+
+**Catalog**
+
+- `owner`: owning app (`Muse`, `Photogenic`, `Mass`, `Bato`, or `Flex`).
+- `parent`: containing folder or organizational parent; absent means the owner's root.
+- `page_token`: opaque continuation token returned by a previous `List`.
+- `ids`: item IDs to retrieve; `missing` returns requested IDs that do not exist or are not visible.
+- `targets`: items affected by the operation.
+- `base_revisions`: expected current revision for each target.
+- `incarnation`: identity of the target's current live lifetime; prevents an old offline action from affecting a deleted-and-restored item.
+- `choice`: an explicit collision or destructive choice such as **Replace**, **Keep Both**, or **Cancel**.
+- `entity_ids`, `revisions`, `conflict_ids`: affected items, their new revisions, and any preserved conflicts.
+
+**Sync**
+
+- `epoch`: server synchronization generation. A mismatch requires a new snapshot rather than applying changes from another restored or replaced authority.
+- `after`: last change sequence durably applied by the client.
+- `limit`: maximum batches requested.
+- `batches`: complete ordered groups of committed changes.
+- `next`: cursor to use for the next pull.
+- `high_water`: newest sequence committed when the response was produced.
+- `minimum`: oldest sequence still available for incremental synchronization.
+- `through`: highest contiguous change or operation sequence durably reconciled by the client.
+- `instance_id`: one app installation/database identity and its independent operation sequence.
+- `owners`: app projections requested in a snapshot.
+- `snapshot_id`: identity of one fixed snapshot.
+- `watermark`: change sequence represented by that snapshot.
+- `expires_at`: deadline for completing the snapshot.
+- `sequences`: client-operation sequence numbers whose outcomes are requested.
+- `outcomes`: recorded accepted, applied, rejected, conflict, or job results.
+- `next_expected`: next operation sequence the server will accept from that client instance.
+
+**Transfer**
+
+- `primary_id`: destination primary storage identity.
+- `manifest`: declared resources, roles, lengths, hashes, source names, and destination intent.
+- `source_identity`: stable source observation used to detect a changed source during resume.
+- `transfer_id`: durable resumable transfer identity.
+- `job_id`: durable long-running operation identity.
+- `chunk_size`: server-selected ordinary chunk size.
+- `missing_ranges`: byte ranges not yet durably verified.
+- `resource_id`: component being transferred, such as the still or video part of a Live Photo.
+- `offset`, `length`: zero-based byte range.
+- `chunk_hash`: digest of the submitted chunk.
+- `manifest_hash`: digest proving that the committed manifest is the one used to begin the transfer.
+- `collision_choice`: **Replace**, **Keep Both**, or **Cancel** when the destination conflicts.
+- `item_id`, `version_id`: logical item and immutable content version to read.
+- `read_id`: authorized, revocable read-session identity.
+- `accepted_range`: exact range the server agreed to send.
+- `blob_id`: hash identity of the immutable bytes being read.
+
+**Devices and Pairing**
+
+- `device_id`: approved or revoked public-key identity being listed, renamed, or revoked.
+- `pairing_id`: one short-lived pairing window.
+- `request_id`: one pending client-key request within that window.
+- `transcript_digest`: hash binding approval to the exact server key, client key, token exchange, and confirmation phrase; approval cannot be reused for another request.
+
+**Jobs and Credentials**
+
+- `job_id`: operation being inspected or controlled.
+- `base_revision`: expected job revision; prevents a stale pause, retry, or cancellation from changing a newer attempt.
+- `retain_resumable`: whether verified partial state should be retained when the job supports later resume.
+- `input_kind`: requested input type, such as confirmation, password, decryption key, renewed link, or provider credential.
+- `nonsecret_value`: ordinary answer safe for the operation log.
+- `secret_ref`: identity of a value already placed in the encrypted server secret store.
+- `input_id`: immutable client-generated identity used to make a secret upload idempotent.
+- `secret_bytes`: credential value sent only through the private credential path.
+
+**Library**
+
+- `collection_id`: playlist, album, or collection being edited.
+- `entries`: complete ordered entries or the requested membership edit, including stable occurrence IDs.
+- `entity_id`: item or metadata record being changed.
+- `fields`: typed metadata values and their expected field revisions.
+- `annotation_id`: bookmark or annotation identity.
+- `anchor`: format-specific location tied to a content version.
+- `conflict_id`: preserved incompatible change under review.
+- `expected_revision`: current conflict or entity revision required before resolving or undoing it.
+- `activity_id`: Activity History record whose reversible effect will be compensated.
+
+**Playback and Progress**
+
+- `content_version`: exact book, recording, episode, or movie version to which the position applies.
+- `generation`: current reading pass or playback-session generation; delayed updates from an older generation cannot alter the new one.
+- `location`: typed page anchor, chapter/scroll anchor, or media timestamp.
+- `reason`: periodic progress, pause, seek, stop, ending marker, explicit completion, or another defined checkpoint cause.
+- `session_id`: independent playback session.
+- `target_device_id`: approved device expected to receive a handoff or command.
+- `command_seq`: monotonically increasing command order within the session generation.
+- `action`: typed play, pause, seek, queue, skip, stop, or volume operation supported by that player.
+
+**Backup, Worlds, and Health**
+
+- `scope`: exact apps, primaries, worlds, health components, or diagnostic categories included.
+- `point_id`: immutable backup or recovery-point identity.
+- `confirmation_token`: short-lived authorization bound to a previously displayed destructive plan and exact revisions.
+- `plan_id`: immutable proposed Worlds change being applied.
+- `action`: typed Worlds lifecycle, backup, restore, or configuration command.
 
 App-specific ingest, media matching, face correction, download, and mod operations use typed commands under the corresponding module and return the same entity/job/conflict envelopes. Daemon ownership checks apply to every mutation, including the virtual drive: only Mass-owned items are writable through drive-save methods. The server-local Worlds CLI uses the protected Unix socket and these same application services, not direct database or filesystem mutations.
 
