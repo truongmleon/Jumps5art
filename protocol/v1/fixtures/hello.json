@@ -1,0 +1,8 @@
+{
+  "major": 1,
+  "minor": 0,
+  "client_build": "0.1.0-fixture",
+  "client_instance_id": "123e4567-e89b-42d3-a456-426614174000",
+  "supported_features": ["control-json.v1", "bulk-bytes.v1", "optional-future.v3"],
+  "required_features": ["control-json.v1"]
+}
