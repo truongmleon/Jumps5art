@@ -3,6 +3,7 @@ members = [
     "crates/jumpstart-domain",
     "crates/jumpstart-protocol",
     "crates/jumpstart-storage",
+    "crates/jumpstart-server",
 ]
 resolver = "3"
 
@@ -26,6 +27,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 rustix = { version = "1.1", features = ["fs"] }
 fs2 = "0.4"
 tempfile = "3"
+clap = { version = "4", features = ["derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

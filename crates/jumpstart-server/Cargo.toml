@@ -1,0 +1,19 @@
+[package]
+name = "jumpstart-server"
+description = "Local metadata development commands for Jumpstart"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+jumpstart-storage.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
