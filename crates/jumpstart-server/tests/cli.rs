@@ -1,5 +1,6 @@
 use std::{fs, process::Command};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use serde_json::Value;
 use tempfile::TempDir;
 
