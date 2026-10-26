@@ -1,5 +1,9 @@
 //! Initial metadata-root creation and offline, non-mutating inspection.
 //!
+//! Metadata records the server identity and schema versions used by other layers.
+//! A shared creation and inspection API gives callers consistent checks and keeps
+//! diagnostic reads separate from operations that create a new installation.
+//!
 //! Initialization publishes a fully verified sibling staging directory using an
 //! atomic no-replace rename. Existing targets, including empty directories, are
 //! never adopted. Failed staging is retained for diagnosis rather than removed.

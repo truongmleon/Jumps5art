@@ -1,5 +1,9 @@
 //! Version 1 wire framing and handshake contracts, independent of any transport.
 //!
+//! A shared protocol boundary gives server and client code one definition of valid
+//! messages and compatibility rules. Transport adapters can reuse these contracts
+//! while keeping connection establishment and authorization in their own layers.
+//!
 //! No listener, authentication bypass, application RPC, or bulk transfer service is
 //! implemented here. Callers authenticate the transport before using regular frames.
 

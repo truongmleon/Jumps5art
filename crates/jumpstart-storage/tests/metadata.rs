@@ -1,6 +1,10 @@
 //! Linux and macOS integration tests for metadata-root creation and offline inspection.
 //! Checks identity and schema validation, preservation of existing files, locking,
 //! journal refusal, and concurrent initialization.
+//!
+//! Initialization must preserve existing targets, and inspection must leave stored
+//! data unchanged. Failure and race cases check these properties as the schema
+//! and filesystem implementation evolve.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 

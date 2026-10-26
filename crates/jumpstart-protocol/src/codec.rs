@@ -1,6 +1,10 @@
 //! Reads and writes length-prefixed JSON frames for the version 1 protocol.
 //! Enforces size and nesting limits, rejects duplicate keys and non-finite numbers,
 //! and converts validated JSON into typed messages.
+//!
+//! Byte streams can split messages across reads and carry ambiguous or oversized
+//! input. This boundary establishes complete, validated message bodies before
+//! application code interprets them, with explicit limits on body size and nesting.
 
 use std::collections::HashSet;
 use std::fmt;

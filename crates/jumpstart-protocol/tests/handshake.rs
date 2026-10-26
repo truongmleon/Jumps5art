@@ -1,5 +1,9 @@
 //! Integration tests for version 1 handshake validation and capability negotiation.
 //! Uses wire fixtures and invalid messages to check compatibility and field limits.
+//!
+//! Protocol changes must preserve optional-feature compatibility while rejecting
+//! unsupported requirements and invalid fields. Fixed wire examples and failure
+//! cases provide regression evidence for those decisions across future changes.
 
 use jumpstart_domain::{Counter, ServerId, SyncEpoch};
 use jumpstart_protocol::{

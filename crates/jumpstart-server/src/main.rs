@@ -1,6 +1,10 @@
 //! Command line entrypoint for local development metadata tools.
 //! Parses initialization and offline inspection commands, requires the development
 //! acknowledgment for initialization, and prints reports or errors.
+//!
+//! These commands give developers a direct way to create and inspect scratch
+//! metadata while the server is being built. Delegating to the storage crate
+//! keeps filesystem validation consistent with other callers.
 
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 

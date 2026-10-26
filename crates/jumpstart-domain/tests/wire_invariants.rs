@@ -1,5 +1,9 @@
 //! Integration tests for domain values at their text and JSON boundaries.
 //! Checks round trips, invalid inputs, integer limits, and stable blob hashing.
+//!
+//! Small parsing or serialization changes can break compatibility between components.
+//! These tests check accepted formats, rejected inputs, and boundary values so
+//! those changes can be reviewed against explicit examples.
 
 use jumpstart_domain::{
     BlobId, ClientInstanceId, Counter, DeviceId, ItemId, JobId, MAX_COUNTER_VALUE, OperationId,

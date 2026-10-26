@@ -1,6 +1,10 @@
 //! Integration tests that run the metadata CLI as a child process.
 //! Checks the development acknowledgment, JSON reports, and preservation of existing
 //! or missing paths; successful storage operations are tested on Linux and macOS.
+//!
+//! The CLI is also a process boundary: flag handling, exit status, and output are
+//! observable to people and scripts. Running the binary checks those behaviors
+//! alongside the storage library's validation.
 
 use std::{fs, process::Command};
 

@@ -1,5 +1,9 @@
 //! Counters that allow zero or require positive values, bounded by the signed 64-bit maximum.
 //! Validates numeric values and preserves them as canonical decimal strings.
+//!
+//! Stored and transmitted numbers need an agreed range and representation.
+//! These bounds keep values compatible with SQLite, while decimal strings avoid
+//! accidental precision loss when clients handle large protocol values.
 
 use std::{fmt, str::FromStr};
 

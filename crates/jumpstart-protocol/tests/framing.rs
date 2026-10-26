@@ -1,5 +1,9 @@
 //! Integration tests for bounded JSON encoding and length-prefixed frame I/O.
 //! Exercises malformed input, partial reads, custom serializers, and transport errors.
+//!
+//! Changes to parsing, buffering, or serialization must preserve rejection rules
+//! and stream boundaries. These failure cases check those contracts without
+//! requiring a running network service.
 
 use std::io::{self, Cursor, Read, Write};
 

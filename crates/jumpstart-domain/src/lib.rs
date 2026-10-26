@@ -1,5 +1,9 @@
 //! Shared domain types for Jumpstart's storage and protocol contracts.
 //! Exposes validated identities, counters, blob hashes, operation IDs, and owning apps.
+//!
+//! Centralizing these rules gives storage and protocol code one shared definition
+//! of valid values. This prevents components from interpreting the same identity,
+//! operation, or owning app differently.
 
 mod blob;
 mod counter;

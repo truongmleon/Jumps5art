@@ -1,5 +1,9 @@
 //! Distinct UUID identities for server authority, client installations, and library entities.
 //! Generates IDs and applies version and variant checks when accepting existing UUIDs.
+//!
+//! Servers, devices, and library items all use UUIDs but represent different things.
+//! Distinct types help catch accidental ID swaps, and shared validation prevents
+//! malformed identities from entering the domain through external input.
 
 use std::{fmt, str::FromStr};
 

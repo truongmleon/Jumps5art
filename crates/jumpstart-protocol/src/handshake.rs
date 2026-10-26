@@ -1,5 +1,9 @@
 //! Version 1 connection offers, welcome messages, capability negotiation, and errors.
 //! Validates message fields and peer compatibility using the shared domain types.
+//!
+//! Independently released peers can support different versions and wire features.
+//! This module gives the connection owner an explicit compatibility decision
+//! before application work begins, including refusal of unsupported requirements.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

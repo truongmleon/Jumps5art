@@ -1,5 +1,9 @@
 //! Content identities for exact file bytes using tagged BLAKE3 digests.
 //! Provides hashing, digest access, validated text parsing, and Serde encoding.
+//!
+//! Names and locations can change while file contents stay the same.
+//! A byte-based identity supports content verification and reuse without tying
+//! stored bytes to a particular library item or owning app.
 
 use std::{fmt, str::FromStr};
 

@@ -1,6 +1,10 @@
 //! Linux and macOS filesystem implementation of metadata initialization and inspection.
 //! Prepares and verifies SQLite metadata in staging, publishes without replacement,
 //! and checks offline roots under the maintenance lock.
+//!
+//! Creation depends on OS-specific locks, file handles, and rename guarantees.
+//! Keeping those details together makes the publication order visible and lets
+//! the public API refuse platforms without that implementation.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};

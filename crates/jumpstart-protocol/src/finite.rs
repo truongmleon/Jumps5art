@@ -1,6 +1,10 @@
 //! Preflight validation of outgoing values before the JSON encoder runs.
 //! Rejects non-finite numbers and bounds nesting and traversal with a shared budget;
 //! the codec separately checks the exact encoded size.
+//!
+//! JSON encoding can silently turn NaN and infinity into null, changing a value's
+//! meaning. This preliminary traversal catches those values and excessive structure
+//! before framing writes output, preserving the outgoing message contract.
 
 use std::cell::Cell;
 use std::fmt;
