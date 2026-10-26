@@ -1,3 +1,16 @@
+//! Tests preserving files while creating or inspecting server bookkeeping data.
+//!
+//! For example, initializing a folder containing original.txt must refuse and leave
+//! that file intact. Inspecting a missing database must fail without creating a new
+//! one. A format.json copied from another server must not match this database.
+//!
+//! These tests use temporary folders and real SQLite files on Linux and macOS.
+//! They compare contents, permissions, and modification times before/after inspection,
+//! and exercise locks, unfinished database writes, and competing initializers.
+//!
+//! Both return values and the files left behind matter: reporting the expected error
+//! would not be sufficient if the operation had changed existing data.
+
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::collections::BTreeMap;

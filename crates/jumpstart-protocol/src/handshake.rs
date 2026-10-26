@@ -1,3 +1,16 @@
+//! Checks the opening conversation between an app and a Jumpstart server.
+//! A "handshake" establishes which communication rules both sides understand.
+//!
+//! Hello is the app's offer: "I speak this version and understand these features."
+//! Welcome is the server's answer: "Use these shared features and these limits."
+//! A feature such as control-json.v1 names a supported message format. An older
+//! app and newer server can continue when optional features differ, but must refuse
+//! an exchange that requires a feature one side does not understand.
+//!
+//! This file validates messages and computes that compatibility decision. It also
+//! defines error messages for reporting failures. Opening connections, checking
+//! device credentials, and granting library access require separate code.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;

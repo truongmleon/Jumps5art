@@ -1,7 +1,18 @@
-//! Version 1 wire framing and handshake contracts, independent of any transport.
+//! Building blocks for messages exchanged between Jumpstart apps and the server.
+//! A "protocol" is the agreed format and rules for that conversation.
 //!
-//! No listener, authentication bypass, application RPC, or bulk transfer service is
-//! implemented here. Callers authenticate the transport before using regular frames.
+//! The initial messages implemented here are Hello and Welcome. An app would send
+//! Hello to describe its protocol version and supported features. The server would
+//! reply with Welcome describing the selected features, server ID, and limits.
+//!
+//! This Rust library defines those data types, checks compatibility, and converts
+//! messages to/from JSON bytes with a length marker. The codec handles the bytes;
+//! handshake code decides whether both sides understand compatible communication rules.
+//!
+//! The current implementation provides functions and tests, without a network
+//! listener. Pairing, app commands, and transferring raw song/photo/video bytes
+//! require additional implementation. Callers must authenticate a connection
+//! before using the regular protocol.
 
 mod codec;
 mod finite;

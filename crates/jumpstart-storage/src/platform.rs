@@ -1,3 +1,16 @@
+//! Performs metadata setup and checks using Linux and macOS filesystem operations.
+//! The metadata is server bookkeeping, such as its ID and database layout version.
+//!
+//! For initialization, this code prepares the SQLite database and format.json in
+//! a temporary working folder, called staging. After checking them, it renames the
+//! folder into the requested location without replacing anything already there.
+//! This keeps unfinished preparation separate from the final metadata root.
+//!
+//! For inspection, it checks existing files without repairing them. Locks coordinate
+//! inspection with cooperating writers. File handles, requests to flush changes
+//! to disk, and rename operations depend on the operating system, so they stay
+//! in this module behind the public initialize/inspect functions in lib.rs.
+
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};

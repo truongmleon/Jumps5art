@@ -1,3 +1,19 @@
+//! Checks exact whole numbers used to identify commands and describe amounts.
+//!
+//! For example, OperationId uses a positive sequence number to identify a command.
+//! The synchronization design also uses change numbers so an app can say "I have
+//! changes through 135" after reconnecting. The Welcome message type also uses
+//! these numbers for change positions and limits, such as a maximum message
+//! size of 1048576 bytes.
+//!
+//! Counter is a checked number type: this file validates a supplied value rather
+//! than counting events or automatically choosing the next sequence number.
+//! Counter allows zero; PositiveCounter starts at one.
+//!
+//! The shared upper limit keeps values representable in SQLite. JSON carries them
+//! as decimal strings, such as "42", so clients can preserve large numbers exactly.
+//! Assigning sequence numbers and synchronizing changes require separate code.
+
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

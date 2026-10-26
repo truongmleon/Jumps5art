@@ -1,4 +1,13 @@
-//! Initial metadata-root creation and offline, non-mutating inspection.
+//! Creates and checks the local folder that identifies a Jumpstart server.
+//!
+//! This folder holds bookkeeping data: the server ID, database layout versions,
+//! and a label that future apps can use to detect a restored or replaced server.
+//! These values appear in `format.json` and a SQLite database and must agree.
+//! Storing actual song/photo contents is separate work.
+//!
+//! `initialize` prepares a new folder; `inspect` checks an existing one without repair.
+//! Keeping these operations separate prevents a diagnostic read from creating a
+//! replacement database when the expected one is missing or unreadable.
 //!
 //! Initialization publishes a fully verified sibling staging directory using an
 //! atomic no-replace rename. Existing targets, including empty directories, are

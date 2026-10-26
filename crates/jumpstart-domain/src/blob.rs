@@ -1,3 +1,17 @@
+//! Identifies file contents by calculating a fingerprint from their bytes.
+//!
+//! A "blob" here means stored bytes, such as the contents of a song file or an
+//! original photo. BlobId is a hash: a fixed-size fingerprint calculated using
+//! BLAKE3. Two exact copies produce the same fingerprint even if filenames differ;
+//! renaming a file leaves its contents and fingerprint unchanged.
+//!
+//! The storage design uses these fingerprints to refer to file contents and check
+//! whether copied or downloaded bytes match what was expected. A song's library
+//! record has its own ItemId, separate from the bytes it refers to.
+//!
+//! This file calculates, reads, and formats fingerprints. It does not implement
+//! file uploads, disk storage, or duplicate-file handling.
+
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

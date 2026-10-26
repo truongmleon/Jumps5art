@@ -1,3 +1,17 @@
+//! Converts Jumpstart app/server messages between Rust values and JSON bytes.
+//! "Codec" here means encoder/decoder for messages, not a video-compression codec.
+//! For example, it can encode a Hello describing the versions an app understands,
+//! or decode a received Welcome into a Rust value that handshake code can check.
+//!
+//! A byte stream may deliver half a message in one read or several messages together.
+//! To mark message boundaries, each encoded message has a four-byte body length
+//! followed by that many JSON bytes. This package is called a "frame".
+//!
+//! These functions add/read the length, check size and JSON structure, and convert
+//! the message values. They use a supplied byte reader or writer; current tests
+//! use in-memory buffers. A future transport layer will carry the bytes between
+//! devices. This file does not compress media or transfer the actual media files.
+
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, Read, Write};

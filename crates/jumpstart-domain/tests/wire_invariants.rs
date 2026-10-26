@@ -1,3 +1,15 @@
+//! Tests the formats of small values shared by Jumpstart components.
+//!
+//! "Wire" means the form sent in messages between components. For example, a
+//! counter must appear in JSON as the string "1", rather than the number 1. These
+//! tests check that valid IDs and numbers survive encoding/decoding, while invalid
+//! values are rejected. They also check known file-content fingerprints and the
+//! allowed owning-app names.
+//!
+//! These examples protect compatibility when changing value formats. They test
+//! conversion and validation directly, without transferring files or running a
+//! server.
+
 use jumpstart_domain::{
     BlobId, ClientInstanceId, Counter, DeviceId, ItemId, JobId, MAX_COUNTER_VALUE, OperationId,
     Owner, PositiveCounter, ResourceId, ServerId, SyncEpoch, VersionId,

@@ -1,3 +1,14 @@
+//! Tests whether an app and server would agree on compatible communication rules.
+//!
+//! Fixed JSON files show an example Hello from an app and Welcome from a server.
+//! A test reads the Hello, supplies server settings, and checks the negotiated reply.
+//! Other examples require rejection of incompatible versions, unsupported required
+//! features, malformed IDs, or invalid field values.
+//!
+//! These tests protect conversations between different app/server versions. They
+//! call the protocol functions directly, without connecting two devices or testing
+//! device authentication, library commands, or file transfers.
+
 use jumpstart_domain::{Counter, ServerId, SyncEpoch};
 use jumpstart_protocol::{
     Capability, CodecError, ErrorCode, HandshakeValidationError, Hello, NegotiationError,

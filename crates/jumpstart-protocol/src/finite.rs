@@ -1,4 +1,17 @@
-//! A bounded, no-output traversal before JSON's non-finite-to-null conversion.
+//! Checks outgoing Rust values before the codec turns them into JSON text.
+//! It examines values already in memory; it does not parse incoming JSON.
+//!
+//! "Finite" means an ordinary floating-point number rather than infinity or NaN
+//! ("not a number", which can result from an invalid calculation). JSON cannot
+//! represent those as numbers. The encoder used here can turn them into null,
+//! so an invalid calculation could otherwise look like an intentional empty value.
+//! This check rejects them before any message bytes are written.
+//!
+//! It also rejects excessive nesting and values whose minimum encoded size
+//! already exceeds the message limit. The codec then creates JSON bytes and
+//! checks their exact size and structure.
+//! This is a helper for message validation; it does not process audio or video.
+
 use std::cell::Cell;
 use std::fmt;
 

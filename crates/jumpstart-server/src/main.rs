@@ -1,3 +1,15 @@
+//! Command-line program for trying out server bookkeeping storage locally.
+//!
+//! For example, `jumpstart-server init --metadata-root <new-folder> --development`
+//! creates scratch metadata. `jumpstart-server inspect --metadata-root <folder>`
+//! reports its verified ID and format.
+//! The program accepts these arguments, delegates file/database work to the storage
+//! library, and prints a report or exits with an error.
+//!
+//! This gives developers a direct way to exercise the storage foundation while the
+//! server is being built. Despite the binary's name, its current commands do not
+//! run a network server or offer music, photo, or other library features.
+
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
