@@ -22,6 +22,21 @@ const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version IN
 const STATE_TABLE: &str = "CREATE TABLE server_state (\n    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n    format_version INTEGER NOT NULL CHECK (format_version > 0),\n    server_id BLOB NOT NULL CHECK (length(server_id) = 16),\n    sync_epoch BLOB NOT NULL CHECK (length(sync_epoch) = 16)\n) STRICT";
 const MARKER_LIMIT: u64 = 64 * 1024;
 
+/// Create and verify a sibling staging root, then publish it without replacement.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` naming a new child of an existing parent directory.
+///
+/// # Returns
+///
+/// `Result<MetadataReport>` with the published root's path and verified identity.
+///
+/// # Errors
+///
+/// Propagates path, I/O, database, and verification failures. Failed staging is
+/// retained when present. If synchronizing the parent fails after publication,
+/// the destination remains in place even though this function returns an error.
 pub(super) fn initialize(root: &Path) -> Result<MetadataReport> {
     let (parent, name) = destination(root)?;
     let final_root = parent.join(&name);
@@ -75,6 +90,20 @@ pub(super) fn initialize(root: &Path) -> Result<MetadataReport> {
     })
 }
 
+/// Populate a private staging directory and verify it through offline inspection.
+///
+/// # Arguments
+///
+/// * `staging` — `&Path` of the newly created, empty staging directory.
+///
+/// # Returns
+///
+/// `Result<MetadataReport>` describing the verified staging root before publication.
+///
+/// # Errors
+///
+/// Propagates failures creating, locking, writing, synchronizing, or verifying the
+/// staged files. Partially prepared files remain available for diagnosis.
 fn prepare_staging(staging: &Path) -> Result<MetadataReport> {
     let lock_path = staging.join(LOCK_FILE);
     let lock = OpenOptions::new()
@@ -127,6 +156,22 @@ fn prepare_staging(staging: &Path) -> Result<MetadataReport> {
     inspect(staging)
 }
 
+/// Create the initial SQLite database, commit its schema and identity, and checkpoint it.
+///
+/// # Arguments
+///
+/// * `path` — `&Path` at which a new owner-only database file is reserved.
+/// * `marker` — `&FormatMarker` supplying the versions and identity stored in SQLite.
+///
+/// # Returns
+///
+/// `Result<()>` with `Ok(())` after verification, checkpointing, closure, and file sync.
+///
+/// # Errors
+///
+/// Returns a storage error for file creation or synchronization, SQLite operations,
+/// unapplied settings, verification failure, or an incomplete WAL checkpoint.
+/// This helper does not publish or clean up the enclosing staging directory.
 fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     // SQLite otherwise uses the process umask for its initial database. Reserve
     // the file exclusively with owner-only access before opening it without CREATE.
@@ -195,6 +240,21 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     Ok(())
 }
 
+/// Verify a checkpointed metadata root while holding a shared maintenance lock.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` to an existing offline metadata root.
+///
+/// # Returns
+///
+/// `Result<MetadataReport>` with the canonical path, matched identity, and versions.
+///
+/// # Errors
+///
+/// Rejects invalid paths/files, active exclusive writers, nonempty journals,
+/// unsupported versions, invalid SQLite headers, and inconsistent schema or identity.
+/// Propagates I/O and database failures without recovering or repairing the root.
 pub(super) fn inspect(root: &Path) -> Result<MetadataReport> {
     require_directory(root)?;
     let root =
@@ -290,6 +350,21 @@ pub(super) fn inspect(root: &Path) -> Result<MetadataReport> {
     })
 }
 
+/// Check SQLite integrity, exact schema and migration records, and marker identity.
+///
+/// # Arguments
+///
+/// * `connection` — `&Connection` whose existing database is queried for verification.
+/// * `marker` — `&FormatMarker` supplying the expected format and identity.
+///
+/// # Returns
+///
+/// `Result<()>` with `Ok(())` when all database checks match this binary and marker.
+///
+/// # Errors
+///
+/// Propagates query/conversion errors and rejects unsupported schemas, corruption,
+/// foreign-key violations, migration/schema mismatches, or differing identities.
 fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()> {
     let application: i32 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
     if application != APPLICATION_ID {
@@ -377,6 +452,11 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
     Ok(())
 }
 
+/// Hash the exact initial schema statements and separators used by this migration.
+///
+/// # Returns
+///
+/// An owned `String` containing `b3:` followed by the lowercase BLAKE3 digest.
 fn migration_checksum() -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(MIGRATIONS_TABLE.as_bytes());
@@ -386,6 +466,16 @@ fn migration_checksum() -> String {
     format!("b3:{}", hasher.finalize().to_hex())
 }
 
+/// Encode a filesystem path as a SQLite URI with read-only, immutable open flags.
+///
+/// # Arguments
+///
+/// * `path` — `&Path` whose Unix bytes are percent-encoded where necessary.
+///
+/// # Returns
+///
+/// An owned `String` beginning with `file:` and ending in `?mode=ro&immutable=1`.
+/// Reserved characters in the path cannot become additional URI parameters.
 fn readonly_uri(path: &Path) -> String {
     let mut uri = String::from("file:");
     for &byte in path.as_os_str().as_bytes() {
@@ -401,6 +491,21 @@ fn readonly_uri(path: &Path) -> String {
     uri
 }
 
+/// Resolve an initialization target into its existing parent and final entry name.
+///
+/// # Arguments
+///
+/// * `root` — requested `&Path`, either relative or absolute.
+///
+/// # Returns
+///
+/// `Result<(PathBuf, OsString)>` containing the canonical parent directory and owned
+/// final name; `OsString` is written as `std::ffi::OsString` in the signature.
+///
+/// # Errors
+///
+/// Rejects missing/invalid final names or a parent that cannot be resolved or verified
+/// as a directory. It does not create the parent or target.
 fn destination(root: &Path) -> Result<(PathBuf, std::ffi::OsString)> {
     let name = root.file_name().ok_or_else(|| StorageError::InvalidPath {
         path: root.to_path_buf(),
@@ -422,6 +527,21 @@ fn destination(root: &Path) -> Result<(PathBuf, std::ffi::OsString)> {
     Ok((parent, name.to_os_string()))
 }
 
+/// Require an initialization target to have no existing filesystem entry.
+///
+/// # Arguments
+///
+/// * `path` — `&Path` of the proposed final root.
+///
+/// # Returns
+///
+/// `Result<()>` with `Ok(())` only when the entry is absent.
+///
+/// # Errors
+///
+/// Returns `ExistingTarget` for any existing entry, including dangling symlinks,
+/// and an I/O error if the entry cannot be inspected. Publication separately uses
+/// an atomic no-replace rename to handle races after this preliminary check.
 fn reject_existing(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err(StorageError::ExistingTarget(path.to_path_buf())),
@@ -430,6 +550,19 @@ fn reject_existing(path: &Path) -> Result<()> {
     }
 }
 
+/// Verify that a path names a directory rather than a symlink or another entry type.
+///
+/// # Arguments
+///
+/// * `path` — `&Path` inspected without following its final symlink.
+///
+/// # Returns
+///
+/// `Result<()>` with `Ok(())` when the observed entry is a non-symlink directory.
+///
+/// # Errors
+///
+/// Returns an I/O error for failed metadata access or `InvalidPath` for a wrong type.
 fn require_directory(path: &Path) -> Result<()> {
     let metadata =
         fs::symlink_metadata(path).map_err(|source| io("inspect directory", path, source))?;
@@ -442,6 +575,20 @@ fn require_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Open a directory handle without following a final symlink or inheriting it on exec.
+///
+/// # Arguments
+///
+/// * `path` — `&Path` of the directory to open read-only.
+///
+/// # Returns
+///
+/// `Result<File>` containing the owned directory handle used for syncing or renaming.
+///
+/// # Errors
+///
+/// Returns a contextual I/O error if the directory cannot be opened with the required
+/// flags.
 fn open_directory(path: &Path) -> Result<File> {
     let descriptor = rustix::fs::open(
         path,
@@ -452,6 +599,19 @@ fn open_directory(path: &Path) -> Result<File> {
     Ok(File::from(descriptor))
 }
 
+/// Check a regular non-symlink file and open it read-only without following links.
+///
+/// # Arguments
+///
+/// * `path` — `&Path` of the existing file to inspect.
+///
+/// # Returns
+///
+/// `Result<File>` containing an owned read-only handle verified as a regular file.
+///
+/// # Errors
+///
+/// Rejects non-regular or symlink entries and propagates metadata/open failures.
 fn open_regular(path: &Path) -> Result<File> {
     let metadata =
         fs::symlink_metadata(path).map_err(|source| io("inspect regular file", path, source))?;
@@ -487,12 +647,36 @@ fn open_regular(path: &Path) -> Result<File> {
     Ok(file)
 }
 
+/// Open a directory and request synchronization of its metadata to storage.
+///
+/// # Arguments
+///
+/// * `path` — `&Path` of the directory whose entries need synchronization.
+///
+/// # Returns
+///
+/// `Result<()>` with `Ok(())` after the directory handle's `sync_all` succeeds.
+///
+/// # Errors
+///
+/// Propagates contextual errors from opening or synchronizing the directory.
 fn sync_directory(path: &Path) -> Result<()> {
     open_directory(path)?
         .sync_all()
         .map_err(|source| io("synchronize directory", path, source))
 }
 
+/// Attach an operation and owned path to an underlying filesystem error.
+///
+/// # Arguments
+///
+/// * `action` — `&'static str` describing the failed operation.
+/// * `path` — `&Path` copied into the returned error for later diagnosis.
+/// * `source` — owned `std::io::Error` retained as the underlying cause.
+///
+/// # Returns
+///
+/// A `StorageError::Io` value; this helper constructs an error without performing I/O.
 fn io(action: &'static str, path: &Path, source: std::io::Error) -> StorageError {
     StorageError::Io {
         action,

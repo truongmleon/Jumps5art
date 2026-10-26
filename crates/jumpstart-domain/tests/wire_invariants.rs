@@ -6,6 +6,17 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+/// Checks that JSON encoding followed by decoding preserves a test value.
+///
+/// # Arguments
+/// - `value`: an owned `T` supporting Serde encoding, owned decoding, equality,
+///   and debug formatting so failures can display the compared values.
+///
+/// # Returns
+/// Unit (`()`) after the decoded value equals the original.
+///
+/// # Panics
+/// Panics if either Serde operation fails or the decoded value differs.
 fn round_trip<T>(value: T)
 where
     T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
@@ -14,6 +25,8 @@ where
     assert_eq!(serde_json::from_str::<T>(&encoded).unwrap(), value);
 }
 
+/// Confirms that every generated identity uses its declared UUID version and
+/// preserves both its text and JSON representation through decoding.
 #[test]
 fn generated_ids_have_their_declared_version_and_wire_round_trip() {
     macro_rules! check {
@@ -35,6 +48,8 @@ fn generated_ids_have_their_declared_version_and_wire_round_trip() {
     check!(JobId, 7);
 }
 
+/// Exercises constructor and decoding rejection paths for nil UUIDs, wrong UUID
+/// versions or variants, malformed text, and JSON values of the wrong type.
 #[test]
 fn identity_validation_rejects_nil_wrong_version_and_wrong_variant() {
     let v4 = Uuid::new_v4();
@@ -62,6 +77,8 @@ fn identity_validation_rejects_nil_wrong_version_and_wrong_variant() {
     rejects!(JobId, v4, v7);
 }
 
+/// Checks zero, positive, large, and maximum counter values without JSON numeric
+/// precision loss, including positive-to-general conversion and named constants.
 #[test]
 fn counters_preserve_the_entire_signed_64_bit_range_as_strings() {
     for value in [0, 1, (1_u64 << 53) + 1, MAX_COUNTER_VALUE] {
@@ -85,6 +102,8 @@ fn counters_preserve_the_entire_signed_64_bit_range_as_strings() {
     assert_eq!(PositiveCounter::MAX.value(), MAX_COUNTER_VALUE);
 }
 
+/// Verifies that counters reject noncanonical decimal text, numeric JSON, overflow,
+/// and zero where a positive counter is required.
 #[test]
 fn counters_reject_numeric_json_and_noncanonical_or_out_of_range_text() {
     for invalid in [
@@ -129,6 +148,8 @@ fn counters_reject_numeric_json_and_noncanonical_or_out_of_range_text() {
     assert!(PositiveCounter::from_u64(u64::MAX).is_err());
 }
 
+/// Anchors hashing to the known empty-input BLAKE3 vector and checks that digest
+/// bytes, tagged text, and JSON preserve the same content identity.
 #[test]
 fn blob_ids_use_the_tagged_unkeyed_blake3_digest() {
     // The standard BLAKE3 empty-input vector detects an algorithm/encoding change.
@@ -142,6 +163,8 @@ fn blob_ids_use_the_tagged_unkeyed_blake3_digest() {
     round_trip(id);
 }
 
+/// Confirms that text and Serde parsing reject wrong tags, uppercase or invalid
+/// digits, wrong lengths, surrounding whitespace, and non-ASCII digest text.
 #[test]
 fn blob_id_parser_rejects_unversioned_uppercase_and_malformed_digests() {
     let valid = BlobId::hash_bytes(b"").to_string();
@@ -163,6 +186,8 @@ fn blob_id_parser_rejects_unversioned_uppercase_and_malformed_digests() {
     }
 }
 
+/// Checks that decoding an operation validates its nested identity and sequence
+/// types, rejecting a zero sequence or nil originating device.
 #[test]
 fn operation_identity_validates_nested_ids_and_positive_sequence() {
     let id = OperationId {
@@ -180,6 +205,8 @@ fn operation_identity_validates_nested_ids_and_positive_sequence() {
     assert!(serde_json::from_value::<OperationId>(encoded).is_err());
 }
 
+/// Confirms the five supported owning-app names round trip exactly and that
+/// arbitrary labels, different casing, and null cannot become an owner.
 #[test]
 fn owning_app_names_are_exact_and_do_not_accept_arbitrary_labels() {
     for (owner, name) in [

@@ -15,6 +15,11 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// Number of simultaneously open JSON containers; a root object has depth one.
 pub const MAX_JSON_DEPTH: usize = 32;
 
+/// Failures from framing, JSON validation, payload conversion, or transport I/O.
+///
+/// Variants retain the original I/O/JSON error where available. `FrameTooLarge`
+/// contains an observed size or a conservative lower bound from encoding;
+/// `InvalidEncoding` retains a custom serializer's diagnostic.
 #[derive(Debug, Error)]
 pub enum CodecError {
     #[error("frame I/O failed: {0}")]
@@ -42,6 +47,17 @@ pub enum CodecError {
 /// Read exactly one length-prefixed frame. An incomplete header/body is an I/O
 /// error, including clean EOF before a new header; callers own connection lifecycle.
 /// Reject the declared length before allocating or reading any body bytes.
+///
+/// # Arguments
+/// - `reader: &mut R`: a borrowed byte source implementing `Read`; reading advances it.
+/// - `T: DeserializeOwned`: the requested output type, which cannot borrow the local buffer.
+///
+/// # Returns
+/// `Result<T, CodecError>` containing one decoded payload; trailing frames remain unread.
+///
+/// # Errors
+/// Returns an error for incomplete I/O, invalid lengths, malformed JSON, or a payload
+/// that cannot become `T`. A failed read may already have consumed input bytes.
 pub fn read_frame<R: Read, T: DeserializeOwned>(reader: &mut R) -> Result<T, CodecError> {
     let mut prefix = [0; FRAME_PREFIX_BYTES];
     reader.read_exact(&mut prefix)?;
@@ -54,6 +70,17 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(reader: &mut R) -> Result<T, Cod
 
 /// Validate and encode before writing the prefix, so an invalid payload emits no
 /// partial frame. The caller is responsible for flushing its transport buffer.
+///
+/// # Arguments
+/// - `writer: &mut W`: the borrowed destination implementing `Write`.
+/// - `payload: &T`: a possibly unsized value implementing `Serialize`.
+///
+/// # Returns
+/// `Result<(), CodecError>`; `Ok(())` means the prefix and body were written, not flushed.
+///
+/// # Errors
+/// Validation/serialization errors occur before writing. An I/O error can occur after
+/// part of the frame reached the destination.
 pub fn write_frame<W: Write, T: Serialize + ?Sized>(
     writer: &mut W,
     payload: &T,
@@ -67,6 +94,17 @@ pub fn write_frame<W: Write, T: Serialize + ?Sized>(
 
 /// Decode a body received by a transport that already extracted its prefix.
 /// Reject duplicate keys before typed deserialization can ignore or overwrite them.
+///
+/// # Arguments
+/// - `body: &[u8]`: borrowed JSON bytes, excluding the four-byte frame prefix.
+/// - `T: DeserializeOwned`: the requested independently owned payload type.
+///
+/// # Returns
+/// `Result<T, CodecError>` containing the validated, typed payload.
+///
+/// # Errors
+/// Rejects empty/oversized input, invalid UTF-8/JSON, duplicate keys, excessive nesting,
+/// trailing values, and failure to deserialize the validated tree into `T`.
 pub fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, CodecError> {
     let value = validated_value(body)?;
     serde_json::from_value(value).map_err(CodecError::InvalidPayload)
@@ -75,6 +113,16 @@ pub fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, CodecError> {
 /// Serialize through a bounded sink. A finite-number preflight prevents serde_json
 /// from silently serializing NaN/infinity as null. Structural validation also runs
 /// on outgoing JSON, including custom Serialize implementations with duplicate keys.
+///
+/// # Arguments
+/// - `payload: &T`: a borrowed, possibly unsized `Serialize` value to traverse and encode.
+///
+/// # Returns
+/// `Result<Vec<u8>, CodecError>` containing bounded UTF-8 JSON without a frame prefix.
+///
+/// # Errors
+/// Rejects non-finite numbers, excessive depth/size, custom serialization failures,
+/// and invalid output such as duplicate keys before returning any body bytes.
 pub fn encode_body<T: Serialize + ?Sized>(payload: &T) -> Result<Vec<u8>, CodecError> {
     finite::check(payload).map_err(|error| match error {
         PreflightError::NonFinite => CodecError::NonFiniteNumber,
@@ -95,6 +143,16 @@ pub fn encode_body<T: Serialize + ?Sized>(payload: &T) -> Result<Vec<u8>, CodecE
     Ok(sink.bytes)
 }
 
+/// Check whether a frame-body size is within the accepted nonempty range.
+///
+/// # Arguments
+/// - `length: usize`: the advertised or measured number of body bytes.
+///
+/// # Returns
+/// `Result<(), CodecError>` with `Ok(())` for `1..=MAX_FRAME_BYTES`.
+///
+/// # Errors
+/// Returns `EmptyFrame` for zero or `FrameTooLarge` above the byte limit.
 fn validate_length(length: usize) -> Result<(), CodecError> {
     match length {
         0 => Err(CodecError::EmptyFrame),
@@ -103,6 +161,16 @@ fn validate_length(length: usize) -> Result<(), CodecError> {
     }
 }
 
+/// Parse a complete JSON body before any application-specific deserialization.
+///
+/// # Arguments
+/// - `body: &[u8]`: borrowed bytes whose length, encoding, keys, and nesting are checked.
+///
+/// # Returns
+/// `Result<Value, CodecError>` containing an owned JSON tree with unique keys per object.
+///
+/// # Errors
+/// Rejects invalid size/UTF-8/JSON, excessive depth, duplicate keys, or trailing data.
 fn validated_value(body: &[u8]) -> Result<Value, CodecError> {
     validate_length(body.len())?;
     std::str::from_utf8(body)?;
@@ -114,6 +182,10 @@ fn validated_value(body: &[u8]) -> Result<Value, CodecError> {
     Ok(value)
 }
 
+/// An in-memory `Write` destination that refuses bodies above the frame limit.
+///
+/// `bytes` owns accepted output; `exceeded_length` records a rejected attempted size
+/// so the encoder can distinguish a size failure from another serializer error.
 #[derive(Default)]
 struct BoundedBuffer {
     bytes: Vec<u8>,
@@ -121,6 +193,18 @@ struct BoundedBuffer {
 }
 
 impl Write for BoundedBuffer {
+    /// Append one serializer output slice without exceeding the frame-body limit.
+    ///
+    /// # Arguments
+    /// - `self: &mut BoundedBuffer`: the output and any recorded rejected size.
+    /// - `bytes: &[u8]`: the next borrowed bytes to append in full.
+    ///
+    /// # Returns
+    /// `io::Result<usize>` containing `bytes.len()` when all bytes were appended.
+    ///
+    /// # Errors
+    /// Returns an I/O error and records the attempted size if appending would exceed
+    /// `MAX_FRAME_BYTES`; the previously accepted bytes remain unchanged.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let length = self.bytes.len().saturating_add(bytes.len());
         if length > MAX_FRAME_BYTES {
@@ -131,11 +215,19 @@ impl Write for BoundedBuffer {
         Ok(bytes.len())
     }
 
+    /// Complete the `Write` interface for an in-memory destination.
+    ///
+    /// `self: &mut BoundedBuffer` is borrowed but unchanged. Returns `io::Result<()>`
+    /// with `Ok(())`; there is no external buffer or disk to flush.
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
 
+/// State passed into each recursive JSON deserialization step.
+///
+/// `depth: usize` counts already-open enclosing containers, starting at zero for
+/// the root. Each child array/object receives a seed at the next depth.
 struct JsonSeed {
     depth: usize,
 }
@@ -143,16 +235,36 @@ struct JsonSeed {
 impl<'de> DeserializeSeed<'de> for JsonSeed {
     type Value = Value;
 
+    /// Transfer the current nesting state into Serde's JSON-value visitor.
+    ///
+    /// # Arguments
+    /// - `self: JsonSeed`: consumed state for this value's enclosing depth.
+    /// - `deserializer: D`: a `Deserializer<'de>` supplying the next input value.
+    ///
+    /// # Returns
+    /// `Result<Value, D::Error>` containing an owned JSON value.
+    ///
+    /// # Errors
+    /// Propagates syntax/input errors and the visitor's depth or duplicate-key failures.
     fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
         deserializer.deserialize_any(JsonVisitor { depth: self.depth })
     }
 }
 
+/// Build an owned JSON tree while enforcing container depth and unique object keys.
+///
+/// `depth: usize` counts the enclosing containers before the current value opens
+/// one. The `'de` trait lifetime describes input; returned strings are owned.
 struct JsonVisitor {
     depth: usize,
 }
 
 impl JsonVisitor {
+    /// Decide whether one additional array or object may open at this depth.
+    ///
+    /// `self: &JsonVisitor` supplies the enclosing depth; `E: de::Error` is the caller's
+    /// parser error type. Returns `Result<(), E>` with `Ok(())` while opening another
+    /// container stays within `MAX_JSON_DEPTH`, or a custom `E` when it would exceed it.
     fn check_container<E: de::Error>(&self) -> Result<(), E> {
         if self.depth >= MAX_JSON_DEPTH {
             Err(E::custom("JSON nesting exceeds 32 containers"))
@@ -165,40 +277,89 @@ impl JsonVisitor {
 impl<'de> Visitor<'de> for JsonVisitor {
     type Value = Value;
 
+    /// Describe acceptable input when Serde needs a type-mismatch diagnostic.
+    ///
+    /// `self: &JsonVisitor` is borrowed; `formatter: &mut fmt::Formatter<'_>` receives
+    /// the description. Returns `fmt::Result`, propagating any formatting failure.
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a JSON value with unique object keys and bounded nesting")
     }
 
+    /// Convert a JSON boolean into the owned JSON tree.
+    ///
+    /// `self: JsonVisitor` is consumed and `value: bool` is supplied by the parser.
+    /// Returns `Result<Value, E>` with the corresponding JSON value; this conversion
+    /// itself does not produce the generic parser error `E`.
     fn visit_bool<E: de::Error>(self, value: bool) -> Result<Value, E> {
         Ok(Value::Bool(value))
     }
 
+    /// Convert a signed JSON integer into the owned JSON tree.
+    ///
+    /// `self: JsonVisitor` is consumed and `value: i64` is supplied by the parser.
+    /// Returns `Result<Value, E>` with the corresponding JSON value; this conversion
+    /// itself does not produce the generic parser error `E`.
     fn visit_i64<E: de::Error>(self, value: i64) -> Result<Value, E> {
         Ok(Value::Number(value.into()))
     }
 
+    /// Convert an unsigned JSON integer into the owned JSON tree.
+    ///
+    /// `self: JsonVisitor` is consumed and `value: u64` is supplied by the parser.
+    /// Returns `Result<Value, E>` with the corresponding JSON value; this conversion
+    /// itself does not produce the generic parser error `E`.
     fn visit_u64<E: de::Error>(self, value: u64) -> Result<Value, E> {
         Ok(Value::Number(value.into()))
     }
 
+    /// Convert a finite floating-point number into the owned JSON tree.
+    ///
+    /// `self: JsonVisitor` is consumed; `value: f64` is the parser's numeric value.
+    /// Returns `Result<Value, E>` containing a JSON number, or a custom `E: de::Error`
+    /// when the value is NaN or infinite.
     fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
         Number::from_f64(value)
             .map(Value::Number)
             .ok_or_else(|| E::custom("non-finite JSON number"))
     }
 
+    /// Copy a transient parser string so the resulting tree does not borrow it.
+    ///
+    /// `self: JsonVisitor` is consumed; `value: &str` is the borrowed text supplied by
+    /// Serde. Returns `Result<Value, E>` with an owned JSON string; this conversion
+    /// itself does not return the generic parser error `E`.
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Value, E> {
         Ok(Value::String(value.to_owned()))
     }
 
+    /// Move an already owned parser string into the resulting JSON tree.
+    ///
+    /// `self: JsonVisitor` and `value: String` are consumed. Returns `Result<Value, E>`
+    /// with the JSON string without cloning its text; this conversion itself does not
+    /// return the generic parser error `E`.
     fn visit_string<E: de::Error>(self, value: String) -> Result<Value, E> {
         Ok(Value::String(value))
     }
 
+    /// Represent Serde's unit value as JSON null.
+    ///
+    /// Consumes `self: JsonVisitor` and returns `Result<Value, E>` containing
+    /// `Value::Null`; no additional argument or parser error is needed for this case.
     fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
         Ok(Value::Null)
     }
 
+    /// Read every array element with a deeper seed and preserve its order.
+    ///
+    /// # Arguments
+    /// - `self: JsonVisitor`: consumed state containing the enclosing container depth.
+    /// - `sequence: A`: a `SeqAccess<'de>` cursor advanced until no elements remain.
+    ///
+    /// # Returns
+    /// `Result<Value, A::Error>` containing an owned JSON array.
+    ///
+    /// # Errors
+    /// Propagates element/input errors and rejects excessive depth or invalid nested values.
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Value, A::Error> {
         self.check_container()?;
         let mut values = Vec::new();
@@ -210,6 +371,18 @@ impl<'de> Visitor<'de> for JsonVisitor {
         Ok(Value::Array(values))
     }
 
+    /// Read an object while rejecting duplicate keys after JSON escape decoding.
+    ///
+    /// # Arguments
+    /// - `self: JsonVisitor`: consumed state containing the enclosing container depth.
+    /// - `map: A`: a `MapAccess<'de>` cursor supplying string keys and child values.
+    ///
+    /// # Returns
+    /// `Result<Value, A::Error>` containing an owned JSON object with unique keys.
+    ///
+    /// # Errors
+    /// Rejects excessive depth and repeated decoded keys, and propagates child/input errors.
+    /// Duplicate-key diagnostics omit the potentially private key text.
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
         self.check_container()?;
         let mut keys = HashSet::new();

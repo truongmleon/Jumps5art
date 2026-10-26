@@ -10,12 +10,48 @@ const WELCOME: &[u8] = include_bytes!("../../../protocol/v1/fixtures/welcome.jso
 const UNSUPPORTED: &[u8] =
     include_bytes!("../../../protocol/v1/fixtures/unsupported-required-feature.json");
 
+/// Create a validated capability used by handshake test fixtures.
+///
+/// # Arguments
+///
+/// - `value`: the `&str` feature spelling expected to be valid in the test.
+///
+/// # Returns
+///
+/// A `Capability` parsed through the production constructor.
+///
+/// # Panics
+///
+/// Panics when the fixture spelling is invalid, identifying a test setup error.
 fn feature(value: &str) -> Capability {
     value.parse().unwrap()
 }
+/// Create a domain counter for a known-valid numeric test fixture.
+///
+/// # Arguments
+///
+/// - `value`: the `u64` number to wrap using the production range check.
+///
+/// # Returns
+///
+/// A `Counter` with the supplied value and decimal-string wire encoding.
+///
+/// # Panics
+///
+/// Panics when the fixture number is outside the domain counter range.
 fn counter(value: u64) -> Counter {
     Counter::from_u64(value).unwrap()
 }
+/// Build the local server configuration shared by handshake tests.
+///
+/// # Returns
+///
+/// A `ServerHandshake` with fixed typed authority/epoch IDs, two supported wire
+/// features, default limits, and the change-feed range matching the JSON fixture.
+///
+/// # Panics
+///
+/// Panics if a hard-coded ID, feature, or counter fixture is invalid.
 fn server() -> ServerHandshake {
     ServerHandshake {
         server_id: "a2c3e4f5-1234-4abc-8def-0123456789ab"
@@ -32,6 +68,9 @@ fn server() -> ServerHandshake {
     }
 }
 
+/// Check that version-one JSON fixtures negotiate the expected server reply.
+/// Also verify sorted capabilities, validation against the original offer, and
+/// string-encoded counters after an encode/decode round trip.
 #[test]
 fn version_one_fixtures_negotiate_and_preserve_counter_strings() {
     let hello: Hello = decode_body(HELLO).unwrap();
@@ -49,6 +88,9 @@ fn version_one_fixtures_negotiate_and_preserve_counter_strings() {
     assert_eq!(encoded, serde_json::from_slice::<Value>(WELCOME).unwrap());
 }
 
+/// Check that unknown optional fields and a newer offered minor remain compatible.
+/// The reply still selects the implemented minor and excludes unsupported optional
+/// features while remaining valid for the original client offer.
 #[test]
 fn optional_unknown_fields_and_features_do_not_break_older_peers() {
     let mut hello_json: Value = serde_json::from_slice(HELLO).unwrap();
@@ -68,6 +110,9 @@ fn optional_unknown_fields_and_features_do_not_break_older_peers() {
     decoded.validate_for(&hello).unwrap();
 }
 
+/// Check that an unsupported required feature rejects negotiation before a welcome.
+/// Verify the feature appears in the typed, non-retryable error and that the error
+/// matches its fixture through serialization and deserialization.
 #[test]
 fn unknown_required_feature_returns_typed_unsupported_without_welcome() {
     let mut hello: Hello = decode_body(HELLO).unwrap();
@@ -87,6 +132,8 @@ fn unknown_required_feature_returns_typed_unsupported_without_welcome() {
     );
 }
 
+/// Check that a different protocol major produces a typed compatibility failure.
+/// Verify the client/server major values and the resulting `Unsupported` wire code.
 #[test]
 fn major_mismatch_does_not_fall_back_to_an_accepted_session() {
     let mut hello: Hello = decode_body(HELLO).unwrap();
@@ -102,6 +149,9 @@ fn major_mismatch_does_not_fall_back_to_an_accepted_session() {
     assert_eq!(ProtocolError::from(error).code, ErrorCode::Unsupported);
 }
 
+/// Check that the client rejects server selections outside its exact offer.
+/// Exercise an unoffered feature, a missing required feature, a mismatched major,
+/// and an unsupported selected minor using independent welcome copies.
 #[test]
 fn client_checks_the_actual_server_selection_against_its_hello() {
     let hello: Hello = decode_body(HELLO).unwrap();
@@ -134,6 +184,9 @@ fn client_checks_the_actual_server_selection_against_its_hello() {
     ));
 }
 
+/// Check that duplicate JSON keys are rejected even inside an ignored future field.
+/// The escaped spelling represents the same key, so decoding must fail before
+/// handshake deserialization can discard that unknown field.
 #[test]
 fn duplicate_keys_inside_unknown_fields_cannot_evade_validation() {
     let hello = std::str::from_utf8(HELLO).unwrap().trim_end();
@@ -147,6 +200,9 @@ fn duplicate_keys_inside_unknown_fields_cannot_evade_validation() {
     ));
 }
 
+/// Check malformed client offers through the real JSON decoding boundary.
+/// Reject invalid build text/IDs, duplicate or oversized feature lists, invalid
+/// feature spellings, and required features absent from the supported list.
 #[test]
 fn hello_deserialization_validates_bounds_ids_and_feature_relations() {
     let original: Value = serde_json::from_slice(HELLO).unwrap();
@@ -193,6 +249,9 @@ fn hello_deserialization_validates_bounds_ids_and_feature_relations() {
     }
 }
 
+/// Check that constructors and Serde enforce the same capability-name rules.
+/// Exercise invalid spellings and the 128-byte boundary, then verify borrowed
+/// access to a valid stored name.
 #[test]
 fn capability_names_are_bounded_and_deserialization_uses_the_constructor() {
     for name in [
@@ -211,6 +270,9 @@ fn capability_names_are_bounded_and_deserialization_uses_the_constructor() {
     assert_eq!(feature("control-json.v1").as_str(), "control-json.v1");
 }
 
+/// Check decimal-string counter decoding and change-feed bounds in server replies.
+/// Reject JSON numbers, noncanonical strings, overflow, and an impossible minimum;
+/// accept the explicitly tested empty-feed zero range.
 #[test]
 fn welcome_rejects_numeric_noncanonical_and_out_of_range_counters() {
     let original: Value = serde_json::from_slice(WELCOME).unwrap();
@@ -234,6 +296,9 @@ fn welcome_rejects_numeric_noncanonical_and_out_of_range_counters() {
     assert!(decode_body::<Welcome>(&serde_json::to_vec(&value).unwrap()).is_ok());
 }
 
+/// Check that decoded limits cannot raise codec ceilings or advertise zero budgets.
+/// Also verify that invalid local server configuration produces an `InvalidLimits`
+/// negotiation error before a welcome is returned.
 #[test]
 fn limit_overrides_cannot_raise_codec_caps_or_make_zero_budgets() {
     let original: Value = serde_json::from_slice(WELCOME).unwrap();
@@ -258,6 +323,9 @@ fn limit_overrides_cannot_raise_codec_caps_or_make_zero_budgets() {
     ));
 }
 
+/// Check wire-error decoding, bounds, and retry consistency.
+/// Accept optional future fields and a string-encoded retry delay; reject numeric
+/// delays, delays on non-retryable errors, unknown codes, and oversized messages.
 #[test]
 fn errors_are_typed_bounded_and_use_decimal_retry_delays() {
     let mut value: Value = serde_json::from_slice(UNSUPPORTED).unwrap();

@@ -3,6 +3,8 @@ use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand};
 use jumpstart_storage::{MetadataReport, initialize, inspect};
 
+/// Parsed options with `command: Command` selecting one local metadata operation.
+/// No network listener is configured or started by this development tool.
 #[derive(Parser)]
 #[command(
     version,
@@ -13,6 +15,9 @@ struct Cli {
     command: Command,
 }
 
+/// Local metadata commands: `Init` creates a development root and `Inspect`
+/// verifies an offline root. Each owns a `PathBuf` and a `bool` for JSON output;
+/// `Init` additionally carries the development acknowledgment as a `bool`.
 #[derive(Subcommand)]
 enum Command {
     /// Initialize a new scratch metadata root. Existing paths are never adopted.
@@ -34,6 +39,13 @@ enum Command {
     },
 }
 
+/// Parse process arguments, execute the command, and report failures to stderr.
+///
+/// # Returns
+///
+/// `ExitCode::SUCCESS` after a successful operation and report, or
+/// `ExitCode::FAILURE` after an execution error. Clap handles argument errors and
+/// help/version requests during parsing before execution begins.
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -44,6 +56,21 @@ fn main() -> ExitCode {
     }
 }
 
+/// Execute a parsed metadata operation and print its verified report.
+///
+/// # Arguments
+///
+/// * `cli` — owned `Cli` selecting the operation and its arguments.
+///
+/// # Returns
+///
+/// `Result<(), Box<dyn Error>>`, with `Ok(())` after the report is flushed.
+///
+/// # Errors
+///
+/// Refuses initialization without the development acknowledgment and propagates
+/// storage, serialization, or output errors. Output failure does not undo storage
+/// changes already completed by initialization.
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let (report, json) = match cli.command {
         Command::Init {
@@ -64,6 +91,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     print_report(&report, json)
 }
 
+/// Write a verified metadata report to stdout and flush the output.
+///
+/// # Arguments
+///
+/// * `report` — borrowed `&MetadataReport` to serialize and display.
+/// * `json` — `bool` selecting pretty JSON when true, or labeled text when false.
+///
+/// # Returns
+///
+/// `Result<(), Box<dyn Error>>`, with `Ok(())` after a successful flush.
+///
+/// # Errors
+///
+/// Propagates serialization and stdout write/flush errors. Output may already
+/// contain part of the report when an I/O error occurs.
 fn print_report(report: &MetadataReport, json: bool) -> Result<(), Box<dyn Error>> {
     let value = serde_json::to_value(report)?;
     let mut output = std::io::stdout().lock();

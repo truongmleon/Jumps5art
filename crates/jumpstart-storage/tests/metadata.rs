@@ -15,6 +15,16 @@ use jumpstart_storage::{
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+/// Create a temporary parent and initialize a fresh metadata root for a test.
+///
+/// # Returns
+///
+/// `(TempDir, PathBuf, MetadataReport)` containing the lifetime guard, root path, and
+/// initial report. Keeping the `TempDir` alive preserves the fixture on disk.
+///
+/// # Panics
+///
+/// Panics if temporary-directory creation or metadata initialization fails.
 fn fixture() -> (TempDir, PathBuf, MetadataReport) {
     let parent = tempfile::tempdir().expect("temporary parent");
     let root = parent.path().join("metadata");
@@ -22,10 +32,30 @@ fn fixture() -> (TempDir, PathBuf, MetadataReport) {
     (parent, root, report)
 }
 
+/// Build the database file path inside a test root.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` of the fixture's metadata root.
+///
+/// # Returns
+///
+/// An owned `PathBuf` naming the SQLite file without accessing the filesystem.
 fn database(root: &Path) -> PathBuf {
     root.join(DATABASE_DIRECTORY).join(DATABASE_FILE)
 }
 
+/// Apply SQL to a fixture and checkpoint the result before offline inspection.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` of the initialized fixture root.
+/// * `sql` — `&str` containing test-only SQL that changes the database.
+///
+/// # Panics
+///
+/// Panics if opening, modifying, checkpointing, or closing the fixture fails.
+/// The function returns `()` after successful mutation.
 fn change_database(root: &Path, sql: &str) {
     let connection = Connection::open(database(root)).expect("open fixture database");
     connection
@@ -37,6 +67,17 @@ fn change_database(root: &Path, sql: &str) {
     connection.close().expect("close fixture database");
 }
 
+/// Read, edit, and replace a fixture's JSON format marker.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` of the initialized fixture root.
+/// * `edit` — `impl FnOnce(&mut serde_json::Value)` that mutates the decoded marker.
+///
+/// # Panics
+///
+/// Panics on fixture read, JSON conversion, or write failure. Returns `()` after the
+/// edited marker is written.
 fn change_marker(root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
     let path = root.join(FORMAT_FILE);
     let mut value: serde_json::Value =
@@ -49,6 +90,10 @@ fn change_marker(root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
     .expect("write fixture marker");
 }
 
+/// Snapshot of one fixture entry used to detect inspection side effects.
+///
+/// `permissions` stores Unix mode bits as `u32`, `modified` stores `SystemTime`, and
+/// `bytes: Option<Vec<u8>>` contains file contents or `None` for a directory.
 #[derive(Debug, Eq, PartialEq)]
 struct FileState {
     permissions: u32,
@@ -56,7 +101,31 @@ struct FileState {
     bytes: Option<Vec<u8>>,
 }
 
+/// Snapshot every entry beneath a fixture root for before/after comparison.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` of the tree to traverse, including the root entry itself.
+///
+/// # Returns
+///
+/// A `BTreeMap<PathBuf, FileState>` keyed by paths relative to the root.
+///
+/// # Panics
+///
+/// Panics if fixture metadata, directory entries, timestamps, or files cannot be read.
 fn fingerprint(root: &Path) -> BTreeMap<PathBuf, FileState> {
+    /// Recursively record one fixture entry and its children in a fingerprint map.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` — `&Path` stripped from each recorded path.
+    /// * `path` — `&Path` of the current entry.
+    /// * `state` — `&mut BTreeMap<PathBuf, FileState>` receiving the snapshots.
+    ///
+    /// # Panics
+    ///
+    /// Panics on fixture access failures or if a path lies outside `root`; returns `()`.
     fn visit(root: &Path, path: &Path, state: &mut BTreeMap<PathBuf, FileState>) {
         let metadata = fs::symlink_metadata(path).expect("read tree metadata");
         let bytes = if metadata.is_file() {
@@ -85,6 +154,8 @@ fn fingerprint(root: &Path) -> BTreeMap<PathBuf, FileState> {
     state
 }
 
+/// Verify initialization and reopening agree on identity, versions, integrity, and
+/// owner-only root/database permissions. Assertion or fixture failures panic.
 #[test]
 fn initialized_metadata_reopens_with_same_identity_and_verified_schema() {
     let (_parent, root, initial) = fixture();
@@ -112,6 +183,8 @@ fn initialized_metadata_reopens_with_same_identity_and_verified_schema() {
     );
 }
 
+/// Verify repeated offline inspection preserves the fixture's entry fingerprints,
+/// including contents, permissions, and modification times. Failures panic.
 #[test]
 fn offline_inspection_does_not_create_modify_or_remove_any_tree_entry() {
     let (_parent, root, _) = fixture();
@@ -121,6 +194,8 @@ fn offline_inspection_does_not_create_modify_or_remove_any_tree_entry() {
     assert_eq!(before, fingerprint(&root));
 }
 
+/// Verify initialization refuses both occupied and empty existing directories and
+/// preserves their fingerprints. Assertion or fixture failures panic.
 #[test]
 fn existing_content_and_empty_directories_are_never_adopted() {
     let parent = tempfile::tempdir().expect("parent");
@@ -139,6 +214,8 @@ fn existing_content_and_empty_directories_are_never_adopted() {
     }
 }
 
+/// Verify a second initialization refuses an existing root while preserving its
+/// contents and original verified identity. Assertion or fixture failures panic.
 #[test]
 fn initialized_root_is_not_replaced_or_reinitialized() {
     let (_parent, root, report) = fixture();
@@ -151,6 +228,8 @@ fn initialized_root_is_not_replaced_or_reinitialized() {
     assert_eq!(report, inspect(&root).expect("unchanged root"));
 }
 
+/// Verify initialization refuses existing files and dangling symlinks while retaining
+/// their contents or entry type. Assertion or fixture failures panic.
 #[test]
 fn files_and_dangling_symlinks_are_existing_targets() {
     let parent = tempfile::tempdir().expect("parent");
@@ -175,6 +254,8 @@ fn files_and_dangling_symlinks_are_existing_targets() {
     );
 }
 
+/// Verify offline inspection rejects a symlink used as the root or format marker.
+/// Assertion or fixture failures panic.
 #[test]
 fn inspection_rejects_root_and_marker_symlinks() {
     let (parent, root, _) = fixture();
@@ -193,6 +274,8 @@ fn inspection_rejects_root_and_marker_symlinks() {
     ));
 }
 
+/// Verify inspecting a missing root or database fails without creating a root or
+/// changing the remaining entries. Assertion or fixture failures panic.
 #[test]
 fn inspection_of_missing_paths_never_initializes_them() {
     let parent = tempfile::tempdir().expect("parent");
@@ -206,6 +289,8 @@ fn inspection_of_missing_paths_never_initializes_them() {
     assert_eq!(before, fingerprint(&root));
 }
 
+/// Verify future marker/database versions are rejected with typed errors and leave
+/// fixture fingerprints unchanged. Assertion or fixture failures panic.
 #[test]
 fn future_format_and_schema_versions_fail_without_mutation() {
     for target in ["format_version", "schema_version"] {
@@ -230,6 +315,8 @@ fn future_format_and_schema_versions_fail_without_mutation() {
     assert_eq!(before, fingerprint(&root));
 }
 
+/// Verify an incorrect SQLite application ID or migration checksum prevents a
+/// successful inspection. Assertion or fixture failures panic.
 #[test]
 fn wrong_application_identity_and_migration_checksums_are_rejected() {
     let (_parent, root, _) = fixture();
@@ -247,6 +334,8 @@ fn wrong_application_identity_and_migration_checksums_are_rejected() {
     ));
 }
 
+/// Verify an extra schema object is rejected even when the stored migration record
+/// has not changed. Assertion or fixture failures panic.
 #[test]
 fn unexpected_schema_changes_are_not_hidden_by_a_correct_migration_record() {
     let (_parent, root, _) = fixture();
@@ -257,6 +346,8 @@ fn unexpected_schema_changes_are_not_hidden_by_a_correct_migration_record() {
     ));
 }
 
+/// Verify a marker copied from another root is rejected without further changes to
+/// the crossed fixture. Assertion or fixture failures panic.
 #[test]
 fn crossed_marker_and_database_identities_are_rejected() {
     let (_parent, root, _) = fixture();
@@ -270,6 +361,8 @@ fn crossed_marker_and_database_identities_are_rejected() {
     assert_eq!(before, fingerprint(&root));
 }
 
+/// Verify a damaged SQLite header is rejected and offline inspection leaves the
+/// damaged fixture unchanged. Assertion or fixture failures panic.
 #[test]
 fn corrupted_database_is_not_repaired_by_inspection() {
     let (_parent, root, _) = fixture();
@@ -288,6 +381,8 @@ fn corrupted_database_is_not_repaired_by_inspection() {
     assert_eq!(before, fingerprint(&root));
 }
 
+/// Verify nonempty WAL or rollback-journal sidecars require recovery and are preserved
+/// by inspection. Assertion or fixture failures panic.
 #[test]
 fn nonempty_wal_and_rollback_journals_require_explicit_recovery() {
     for suffix in ["-wal", "-journal"] {
@@ -307,6 +402,8 @@ fn nonempty_wal_and_rollback_journals_require_explicit_recovery() {
     }
 }
 
+/// Verify inspection refuses a real live WAL without changing it, and observes the
+/// changed identity after the writer checkpoints on close. Failures panic.
 #[test]
 fn committed_live_wal_is_never_silently_ignored_or_modified() {
     let (_parent, root, _) = fixture();
@@ -336,6 +433,8 @@ fn committed_live_wal_is_never_silently_ignored_or_modified() {
     ));
 }
 
+/// Verify inspection returns `InUse` without mutation while an exclusive maintenance
+/// lock is held and succeeds after the handle is dropped. Failures panic.
 #[test]
 fn exclusive_writer_lock_blocks_inspection() {
     let (_parent, root, _) = fixture();
@@ -348,6 +447,8 @@ fn exclusive_writer_lock_blocks_inspection() {
     inspect(&root).expect("inspection after writer exits");
 }
 
+/// Race eight initializers and verify exactly one succeeds with the identity later
+/// read from the complete published root. Assertion or thread/fixture failures panic.
 #[test]
 fn concurrent_initializers_publish_exactly_one_complete_root() {
     let parent = tempfile::tempdir().expect("parent");
@@ -376,6 +477,8 @@ fn concurrent_initializers_publish_exactly_one_complete_root() {
     assert_eq!(actual, winner);
 }
 
+/// Verify a new initialization leaves unrelated interrupted staging untouched and
+/// publishes a separately verified root. Assertion or fixture failures panic.
 #[test]
 fn interrupted_staging_is_preserved_and_never_treated_as_an_existing_installation() {
     let parent = tempfile::tempdir().expect("parent");
@@ -389,6 +492,8 @@ fn interrupted_staging_is_preserved_and_never_treated_as_an_existing_installatio
     inspect(&root).expect("published new metadata");
 }
 
+/// Verify URI-reserved characters in a root path are escaped so inspection succeeds
+/// without changing the root. Assertion or fixture failures panic.
 #[test]
 fn uri_reserved_characters_in_paths_do_not_change_inspection_flags() {
     let parent = tempfile::tempdir().expect("parent");
