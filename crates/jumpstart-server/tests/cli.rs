@@ -1,10 +1,13 @@
-//! Integration tests that run the metadata CLI as a child process.
-//! Checks the development acknowledgment, JSON reports, and preservation of existing
-//! or missing paths; successful storage operations are tested on Linux and macOS.
+//! Runs the metadata command-line program and checks its observable results.
 //!
-//! The CLI is also a process boundary: flag handling, exit status, and output are
-//! observable to people and scripts. Running the binary checks those behaviors
-//! alongside the storage library's validation.
+//! For example, init without --development must exit with an error and leave the
+//! requested folder absent. A successful init followed by inspect must print the
+//! same server ID in its JSON report. Existing files must remain untouched.
+//!
+//! These tests check argument handling, exit status, reports, and filesystem results
+//! together. Storage-library tests alone do not exercise that program boundary.
+//! The successful storage cases run on Linux and macOS; these tests do not start
+//! a network service or test library media features.
 
 use std::{fs, process::Command};
 

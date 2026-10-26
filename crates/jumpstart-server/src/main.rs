@@ -1,10 +1,14 @@
-//! Command line entrypoint for local development metadata tools.
-//! Parses initialization and offline inspection commands, requires the development
-//! acknowledgment for initialization, and prints reports or errors.
+//! Command-line program for trying out server bookkeeping storage locally.
 //!
-//! These commands give developers a direct way to create and inspect scratch
-//! metadata while the server is being built. Delegating to the storage crate
-//! keeps filesystem validation consistent with other callers.
+//! For example, `jumpstart-server init --metadata-root <new-folder> --development`
+//! creates scratch metadata. `jumpstart-server inspect --metadata-root <folder>`
+//! reports its verified ID and format.
+//! The program accepts these arguments, delegates file/database work to the storage
+//! library, and prints a report or exits with an error.
+//!
+//! This gives developers a direct way to exercise the storage foundation while the
+//! server is being built. Despite the binary's name, its current commands do not
+//! run a network server or offer music, photo, or other library features.
 
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 

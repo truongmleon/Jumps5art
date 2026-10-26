@@ -1,9 +1,18 @@
-//! Counters that allow zero or require positive values, bounded by the signed 64-bit maximum.
-//! Validates numeric values and preserves them as canonical decimal strings.
+//! Checks exact whole numbers used to identify commands and describe amounts.
 //!
-//! Stored and transmitted numbers need an agreed range and representation.
-//! These bounds keep values compatible with SQLite, while decimal strings avoid
-//! accidental precision loss when clients handle large protocol values.
+//! For example, OperationId uses a positive sequence number to identify a command.
+//! The synchronization design also uses change numbers so an app can say "I have
+//! changes through 135" after reconnecting. The Welcome message type also uses
+//! these numbers for change positions and limits, such as a maximum message
+//! size of 1048576 bytes.
+//!
+//! Counter is a checked number type: this file validates a supplied value rather
+//! than counting events or automatically choosing the next sequence number.
+//! Counter allows zero; PositiveCounter starts at one.
+//!
+//! The shared upper limit keeps values representable in SQLite. JSON carries them
+//! as decimal strings, such as "42", so clients can preserve large numbers exactly.
+//! Assigning sequence numbers and synchronizing changes require separate code.
 
 use std::{fmt, str::FromStr};
 

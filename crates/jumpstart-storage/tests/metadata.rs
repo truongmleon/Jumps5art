@@ -1,10 +1,15 @@
-//! Linux and macOS integration tests for metadata-root creation and offline inspection.
-//! Checks identity and schema validation, preservation of existing files, locking,
-//! journal refusal, and concurrent initialization.
+//! Tests preserving files while creating or inspecting server bookkeeping data.
 //!
-//! Initialization must preserve existing targets, and inspection must leave stored
-//! data unchanged. Failure and race cases check these properties as the schema
-//! and filesystem implementation evolve.
+//! For example, initializing a folder containing original.txt must refuse and leave
+//! that file intact. Inspecting a missing database must fail without creating a new
+//! one. A format.json copied from another server must not match this database.
+//!
+//! These tests use temporary folders and real SQLite files on Linux and macOS.
+//! They compare contents, permissions, and modification times before/after inspection,
+//! and exercise locks, unfinished database writes, and competing initializers.
+//!
+//! Both return values and the files left behind matter: reporting the expected error
+//! would not be sufficient if the operation had changed existing data.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 

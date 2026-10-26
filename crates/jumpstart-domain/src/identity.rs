@@ -1,9 +1,15 @@
-//! Distinct UUID identities for server authority, client installations, and library entities.
-//! Generates IDs and applies version and variant checks when accepting existing UUIDs.
+//! Creates and checks identifiers for servers, devices, and library records.
 //!
-//! Servers, devices, and library items all use UUIDs but represent different things.
-//! Distinct types help catch accidental ID swaps, and shared validation prevents
-//! malformed identities from entering the domain through external input.
+//! An identifier answers "which one?" even when display names are the same or
+//! change. These identifiers use UUIDs, a standard ID format. Distinct Rust types
+//! such as DeviceId and ItemId help prevent mixing up different kinds of ID.
+//!
+//! In the library design, renaming a song keeps its ItemId. Its audio file's bytes
+//! are identified separately by their BlobId fingerprint, so a library record and
+//! one particular set of file contents are not treated as the same thing.
+//!
+//! This file generates IDs and checks supplied IDs against the required UUID rules.
+//! Pairing devices and creating library records require separate code.
 
 use std::{fmt, str::FromStr};
 

@@ -1,9 +1,13 @@
-//! Shared domain types for Jumpstart's storage and protocol contracts.
-//! Exposes validated identities, counters, blob hashes, operation IDs, and owning apps.
+//! Common data types that Jumpstart components use to describe the same things.
 //!
-//! Centralizing these rules gives storage and protocol code one shared definition
-//! of valid values. This prevents components from interpreting the same identity,
-//! operation, or owning app differently.
+//! For example, a song's library record has an ItemId, while the audio file's
+//! contents have a separate BlobId fingerprint. OperationId identifies a command,
+//! and Owner identifies the app responsible for an item, such as Muse.
+//!
+//! This file makes those types available and defines their validation errors.
+//! Sharing them keeps stored data and app/server messages consistent. The types
+//! check values; library updates, file storage, and device communication need
+//! separate implementation.
 
 mod blob;
 mod counter;

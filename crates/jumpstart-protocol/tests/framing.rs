@@ -1,9 +1,16 @@
-//! Integration tests for bounded JSON encoding and length-prefixed frame I/O.
-//! Exercises malformed input, partial reads, custom serializers, and transport errors.
+//! Tests reading and writing the bytes of Jumpstart's JSON messages.
 //!
-//! Changes to parsing, buffering, or serialization must preserve rejection rules
-//! and stream boundaries. These failure cases check those contracts without
-//! requiring a running network service.
+//! Here "frame" means a packaged app/server message, not an image in a video.
+//! Its format is `[four-byte JSON length][JSON message]`. Messages such as an app's
+//! Hello and a server's Welcome can be packaged this way.
+//!
+//! These tests write example JSON to memory buffers, then read it back. Readers that
+//! return only a few bytes at a time simulate a message arriving in pieces. Two
+//! messages placed together check that reading one leaves the next one untouched.
+//! Other cases test invalid JSON, message limits, and read/write failures.
+//!
+//! The I/O is of encoded message bytes. The tests do not open network connections,
+//! read media files, or transfer song/photo/video contents.
 
 use std::io::{self, Cursor, Read, Write};
 
