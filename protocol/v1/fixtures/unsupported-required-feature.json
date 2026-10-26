@@ -1,0 +1,7 @@
+{
+  "code": "unsupported",
+  "state": "rejected",
+  "message": "required wire features are unsupported",
+  "retryable": false,
+  "details": { "required_features": ["future-required.v2"] }
+}
