@@ -1,3 +1,7 @@
+//! Reads and writes length-prefixed JSON frames for the version 1 protocol.
+//! Enforces size and nesting limits, rejects duplicate keys and non-finite numbers,
+//! and converts validated JSON into typed messages.
+
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, Read, Write};

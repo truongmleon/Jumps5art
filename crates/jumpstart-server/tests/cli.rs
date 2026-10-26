@@ -1,3 +1,7 @@
+//! Integration tests that run the metadata CLI as a child process.
+//! Checks the development acknowledgment, JSON reports, and preservation of existing
+//! or missing paths; successful storage operations are tested on Linux and macOS.
+
 use std::{fs, process::Command};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -1,3 +1,6 @@
+//! Integration tests for version 1 handshake validation and capability negotiation.
+//! Uses wire fixtures and invalid messages to check compatibility and field limits.
+
 use jumpstart_domain::{Counter, ServerId, SyncEpoch};
 use jumpstart_protocol::{
     Capability, CodecError, ErrorCode, HandshakeValidationError, Hello, NegotiationError,

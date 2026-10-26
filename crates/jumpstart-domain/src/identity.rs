@@ -1,3 +1,6 @@
+//! Distinct UUID identities for server authority, client installations, and library entities.
+//! Generates IDs and applies version and variant checks when accepting existing UUIDs.
+
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

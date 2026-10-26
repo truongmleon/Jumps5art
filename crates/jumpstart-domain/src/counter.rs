@@ -1,3 +1,6 @@
+//! Counters that allow zero or require positive values, bounded by the signed 64-bit maximum.
+//! Validates numeric values and preserves them as canonical decimal strings.
+
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

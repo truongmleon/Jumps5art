@@ -1,4 +1,7 @@
-//! A bounded, no-output traversal before JSON's non-finite-to-null conversion.
+//! Preflight validation of outgoing values before the JSON encoder runs.
+//! Rejects non-finite numbers and bounds nesting and traversal with a shared budget;
+//! the codec separately checks the exact encoded size.
+
 use std::cell::Cell;
 use std::fmt;
 

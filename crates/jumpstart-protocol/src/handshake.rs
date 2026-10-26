@@ -1,3 +1,6 @@
+//! Version 1 connection offers, welcome messages, capability negotiation, and errors.
+//! Validates message fields and peer compatibility using the shared domain types.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;

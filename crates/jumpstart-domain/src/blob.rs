@@ -1,3 +1,6 @@
+//! Content identities for exact file bytes using tagged BLAKE3 digests.
+//! Provides hashing, digest access, validated text parsing, and Serde encoding.
+
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

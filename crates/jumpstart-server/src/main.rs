@@ -1,3 +1,7 @@
+//! Command line entrypoint for local development metadata tools.
+//! Parses initialization and offline inspection commands, requires the development
+//! acknowledgment for initialization, and prints reports or errors.
+
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};

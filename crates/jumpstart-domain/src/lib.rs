@@ -1,4 +1,5 @@
-//! Shared identities and value types with the version 1 storage and wire invariants.
+//! Shared domain types for Jumpstart's storage and protocol contracts.
+//! Exposes validated identities, counters, blob hashes, operation IDs, and owning apps.
 
 mod blob;
 mod counter;

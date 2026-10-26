@@ -1,3 +1,7 @@
+//! Linux and macOS integration tests for metadata-root creation and offline inspection.
+//! Checks identity and schema validation, preservation of existing files, locking,
+//! journal refusal, and concurrent initialization.
+
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::collections::BTreeMap;

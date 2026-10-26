@@ -1,3 +1,6 @@
+//! Integration tests for domain values at their text and JSON boundaries.
+//! Checks round trips, invalid inputs, integer limits, and stable blob hashing.
+
 use jumpstart_domain::{
     BlobId, ClientInstanceId, Counter, DeviceId, ItemId, JobId, MAX_COUNTER_VALUE, OperationId,
     Owner, PositiveCounter, ResourceId, ServerId, SyncEpoch, VersionId,
