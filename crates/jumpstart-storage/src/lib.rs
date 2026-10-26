@@ -29,16 +29,26 @@ pub const DATABASE_FILE: &str = "jumpstart.sqlite";
 /// encryption guarantee is implied by successful initialization or inspection.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MetadataReport {
+    /// Absolute path of the verified metadata root.
     pub root: PathBuf,
+    /// Persistent server authority read from both the marker and SQLite.
     pub server_id: ServerId,
+    /// Persistent synchronization epoch shared by the marker and SQLite.
     pub sync_epoch: SyncEpoch,
+    /// Supported version of the metadata directory format.
     pub format_version: u32,
+    /// Verified SQLite schema version.
     pub schema_version: u32,
     /// Persistent SQLite header mode, not the inspection connection's mode.
     pub journal_mode: String,
+    /// Successful SQLite integrity-check result, currently `"ok"`.
     pub integrity_check: String,
 }
 
+/// On-disk JSON marker containing the format versions and server identity.
+///
+/// Its version and identity fields must agree with the SQLite database before
+/// inspection can return a [`MetadataReport`]. Unknown JSON fields are rejected.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +59,10 @@ struct FormatMarker {
     sync_epoch: SyncEpoch,
 }
 
+/// Failure to create or verify a metadata root, including paths and causes.
+///
+/// `StagingRetained` identifies incomplete work left for diagnosis. An error
+/// after publication can leave a complete root at the requested destination.
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error(
@@ -92,17 +106,46 @@ pub enum StorageError {
     UnsupportedPlatform,
 }
 
+/// Result of a storage operation: a value of type `T` or a [`StorageError`].
 pub type Result<T> = std::result::Result<T, StorageError>;
 
 /// Create a new metadata root without adopting or overwriting any existing path.
 /// The parent directory must already exist. A failed operation can leave an
 /// explicitly identified staging directory; it never deletes an existing root.
+///
+/// # Arguments
+///
+/// * `root` — borrowed `&Path` naming a new child of an existing directory.
+///
+/// # Returns
+///
+/// `Result<MetadataReport>` containing the verified, published root and identity.
+///
+/// # Errors
+///
+/// Returns a [`StorageError`] for existing targets, invalid paths, failed I/O or
+/// verification, or unsupported platforms. A failure after publication does not
+/// remove the published root; inspect it before retrying initialization.
 pub fn initialize(root: &Path) -> Result<MetadataReport> {
     platform::initialize(root)
 }
 
 /// Inspect a checkpointed metadata root without changing any files within it.
 /// Refuses an active writer and nonempty WAL/rollback journals; does not recover.
+///
+/// # Arguments
+///
+/// * `root` — borrowed `&Path` of an existing, offline metadata root.
+///
+/// # Returns
+///
+/// `Result<MetadataReport>` containing the verified identity, versions, and path.
+///
+/// # Errors
+///
+/// Returns a [`StorageError`] for missing or invalid files, incompatible versions,
+/// inconsistent identities or schema, active writers, pending recovery, failed
+/// I/O, or unsupported platforms. It does not repair the root on failure.
 pub fn inspect(root: &Path) -> Result<MetadataReport> {
     platform::inspect(root)
 }
@@ -114,10 +157,28 @@ mod platform;
 mod platform {
     use super::{MetadataReport, Path, Result, StorageError};
 
+    /// Refuse initialization on a platform without the filesystem implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `_root` — requested `&Path`; unused because no filesystem work is done.
+    ///
+    /// # Returns
+    ///
+    /// `Result<MetadataReport>`, always `Err(StorageError::UnsupportedPlatform)`.
     pub fn initialize(_root: &Path) -> Result<MetadataReport> {
         Err(StorageError::UnsupportedPlatform)
     }
 
+    /// Refuse inspection on a platform without the filesystem implementation.
+    ///
+    /// # Arguments
+    ///
+    /// * `_root` — requested `&Path`; unused because no filesystem work is done.
+    ///
+    /// # Returns
+    ///
+    /// `Result<MetadataReport>`, always `Err(StorageError::UnsupportedPlatform)`.
     pub fn inspect(_root: &Path) -> Result<MetadataReport> {
         Err(StorageError::UnsupportedPlatform)
     }

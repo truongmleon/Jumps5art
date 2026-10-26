@@ -4,10 +4,17 @@ use std::{fs, process::Command};
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// Create a process command targeting Cargo's built `jumpstart-server` test binary.
+///
+/// # Returns
+///
+/// A `std::process::Command` ready for arguments; no child process is started yet.
 fn command() -> Command {
     Command::new(env!("CARGO_BIN_EXE_jumpstart-server"))
 }
 
+/// Verify initialization without `--development` fails, explains the acknowledgment,
+/// and leaves the requested root absent. Assertion or fixture failures panic.
 #[test]
 fn initialization_requires_explicit_development_acknowledgment() {
     let parent = TempDir::new().unwrap();
@@ -23,6 +30,8 @@ fn initialization_requires_explicit_development_acknowledgment() {
     assert!(!root.exists());
 }
 
+/// Verify acknowledged initialization and offline inspection emit JSON reports with
+/// the same string-encoded authority and epoch. Assertion or fixture failures panic.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn init_then_inspect_preserves_authority_and_reports_json() {
@@ -56,6 +65,8 @@ fn init_then_inspect_preserves_authority_and_reports_json() {
     assert_eq!(initial["sync_epoch"], inspected["sync_epoch"]);
 }
 
+/// Verify the CLI refuses an existing directory and preserves its sentinel contents
+/// and entry count. Assertion or fixture failures panic.
 #[test]
 fn existing_content_is_not_adopted_or_changed() {
     let root = TempDir::new().unwrap();
@@ -71,6 +82,8 @@ fn existing_content_is_not_adopted_or_changed() {
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
 }
 
+/// Verify the CLI fails when inspecting a missing root and does not create it.
+/// Assertion or fixture failures panic.
 #[test]
 fn inspecting_missing_storage_does_not_initialize_it() {
     let parent = TempDir::new().unwrap();
