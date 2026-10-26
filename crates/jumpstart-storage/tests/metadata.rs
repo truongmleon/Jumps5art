@@ -347,16 +347,20 @@ fn wrong_application_identity_and_migration_checksums_are_rejected() {
     ));
 }
 
-/// Verify an extra schema object is rejected even when the stored migration record
-/// has not changed. Assertion or fixture failures panic.
+/// Verify extra schema objects, including names resembling SQLite internals,
+/// are rejected with an unchanged migration record and source tree. Failures panic.
 #[test]
 fn unexpected_schema_changes_are_not_hidden_by_a_correct_migration_record() {
-    let (_parent, root, _) = fixture();
-    change_database(&root, "CREATE TABLE unexpected (value TEXT) STRICT");
-    assert!(matches!(
-        inspect(&root),
-        Err(StorageError::MigrationMismatch)
-    ));
+    for table in ["unexpected", "sqliteXhidden"] {
+        let (_parent, root, _) = fixture();
+        change_database(&root, &format!("CREATE TABLE {table} (value TEXT) STRICT"));
+        let before = fingerprint(&root);
+        assert!(matches!(
+            inspect(&root),
+            Err(StorageError::MigrationMismatch)
+        ));
+        assert_eq!(before, fingerprint(&root));
+    }
 }
 
 /// Verify a marker copied from another root is rejected without further changes to
