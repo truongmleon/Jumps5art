@@ -8,7 +8,7 @@
 - Design references checked: October 23, 2026. Exact shipped dependency/tool/model versions are recorded in lockfiles and each release manifest.
 - **Decision** identifies the selected baseline. A **release gate** is evidence required before enabling a capability; it does not claim an implemented or tested prototype.
 
-This document specifies the implementation to build. The repository currently contains documentation, so example schemas, commands, budgets, and state machines are contracts rather than existing executable functionality. Requirements take precedence; changing a selected baseline or relaxing a gate requires an explicit reviewed design change.
+This document specifies the implementation to build. Implementation proceeds in slices; [CONTRIBUTING.md](CONTRIBUTING.md) lists the commands currently available and their limitations. Example schemas, commands, budgets, and state machines below remain implementation contracts unless that progress documentation identifies them as implemented. Requirements take precedence; changing a selected baseline or relaxing a gate requires an explicit reviewed design change.
 
 ## 1. Design Goals
 
