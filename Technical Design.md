@@ -1291,7 +1291,7 @@ jumpstart-server update plan|apply|rollback
 jumpstart-server recovery list|inspect|verify|export|plan|apply|reconcile
 ```
 
-These are implementation contracts, not commands already available in this documentation-only repository. Initialization inventories non-empty locations and never adopts them implicitly. Registering or replacing a volume requires a plan bound to its stable identity and fingerprint. Before serving mutations, startup verifies the format/schema and registered roots, runs publication/job/restore reconciliation, then publishes capability and health state. A missing primary degrades only its items; a missing metadata database enters recovery mode without initializing a replacement.
+This list defines the planned administrative surface. See [CONTRIBUTING.md](CONTRIBUTING.md) for the currently implemented development commands and their limitations. Initialization inventories non-empty locations and never adopts them implicitly. Registering or replacing a volume requires a plan bound to its stable identity and fingerprint. Before serving mutations, startup verifies the format/schema and registered roots, runs publication/job/restore reconciliation, then publishes capability and health state. A missing primary degrades only its items; a missing metadata database enters recovery mode without initializing a replacement.
 
 ### 16.2 Upgrade and Rollback
 
