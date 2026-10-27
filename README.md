@@ -45,7 +45,7 @@ Files from Muse, Photogenic, Bato, and Flex appear in Mass as read-only. Copy on
 |---|---|
 | What should the product do? | [Requirements Doc.md](<Requirements Doc.md>). Start with “System-Wide Foundation,” then the app you care about. The external-service table is at the end. |
 | How will it be built? | [Technical Design.md](<Technical Design.md>). Requirements win if the two documents disagree. |
-| What can I run today? | This repository. The apps, server, and Worlds command are still design. |
+| What commands can I run today? | [jumpstart-server commands](docs/CLI/README.md). The apps, daemon, and Worlds command are still design. |
 
 ## Development
 
@@ -57,4 +57,4 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Shared library work is starting in `crates/`. Passing those checks does not mean a platform can run the future server, native apps, or virtual drive.
+Shared library work is starting in `crates/`. Passing those checks does not mean a platform can run the future server, native apps, or virtual drive. The commands the `jumpstart-server` binary accepts today are listed in [docs/CLI/README.md](docs/CLI/README.md).

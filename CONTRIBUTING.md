@@ -16,7 +16,7 @@ PR descriptions identify implemented behavior, validation, remaining dependencie
 
 ## Metadata development preview
 
-The `jumpstart-server` binary offers local initialization, offline metadata inspection, verified bootstrap metadata snapshots, and point-in-time filesystem capacity observations. It does not start a daemon, pair devices, open a listener or manage a library.
+The `jumpstart-server` binary offers local initialization, offline metadata inspection, verified bootstrap metadata snapshots, and point-in-time filesystem capacity observations. [docs/CLI/README.md](docs/CLI/README.md) lists each command, its arguments, and the report it prints. The binary does not start a daemon, pair devices, open a listener, or manage a library.
 
 On Linux or macOS, select a new child path of an existing scratch directory:
 
