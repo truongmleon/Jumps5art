@@ -16,7 +16,7 @@ PR descriptions identify implemented behavior, validation, remaining dependencie
 
 ## Metadata development preview
 
-The `jumpstart-server` binary currently offers local initialization and offline inspection only. It does not start a daemon, pair devices, open a listener or manage a library.
+The `jumpstart-server` binary offers local initialization, offline inspection, and verified bootstrap metadata snapshots. It does not start a daemon, pair devices, open a listener or manage a library.
 
 On Linux or macOS, select a new child path of an existing scratch directory:
 
@@ -29,4 +29,19 @@ Initialization refuses every existing target, including an empty directory or sy
 
 Offline inspection takes the existing shared maintenance lock and uses SQLite read-only immutable mode only after ruling out uncheckpointed WAL/rollback-journal data. It creates no files and performs no repair. Future writers must hold the exclusive maintenance lock for their connection lifetime. Active or interrupted writers require separate recovery work, not an inspection fallback.
 
-The explicit `--development` flag acknowledges that encryption checks, volume registration, Linux filesystem qualification, sustained writing, backups, migrations and power-loss fault injection remain unimplemented. Storage functions return UnsupportedPlatform on Windows; portable domain/protocol tests still run there. Development smoke tests and the bundled SQLite tests do not establish production durability.
+The explicit `--development` flag acknowledges that encryption checks, volume registration, Linux filesystem qualification, sustained writing, complete server backups, restoration, migrations and power-loss fault injection remain unimplemented. Storage functions return UnsupportedPlatform on Windows; portable domain/protocol tests still run there. Development smoke tests and the bundled SQLite tests do not establish production durability.
+
+## Local bootstrap metadata snapshots
+
+On Linux or macOS, create a snapshot from an initialized, offline metadata root into a **new** directory outside the source tree. The output's parent directory must already exist. Select fresh scratch paths if the examples have been run before:
+
+```sh
+cargo run -p jumpstart-server -- snapshot create --metadata-root /tmp/jumpstart-metadata-demo --output /tmp/jumpstart-metadata-snapshot-demo --development --json
+cargo run -p jumpstart-server -- snapshot verify --snapshot-root /tmp/jumpstart-metadata-snapshot-demo --json
+```
+
+Creation reads the source under its shared maintenance lock and copies its SQLite bookkeeping through SQLite's Online Backup API. The source must be checkpointed, with no active exclusive writer or nonempty WAL/rollback journal. The operation verifies the copied database and manifest before publishing a separate bundle containing only `snapshot.json` and `metadata.sqlite`; an existing output is never replaced. Verification reads the bundle without changing it and does not require the original source or `--development`.
+
+Reports explicitly identify the scope as `bootstrap_metadata`. They include the source server ID and synchronization epoch, metadata/schema versions, database size as a decimal string, and a tagged BLAKE3 digest. `change_seq` is `null` because schema 1 does not store a change-feed watermark; it is unavailable, rather than a fabricated sequence of zero.
+
+This bundle captures the current bootstrap bookkeeping only. It excludes media/object contents, Worlds data and backups, secrets and keys, logs, server settings, and device-only or unsynchronized work. It is not a restorable metadata root, a complete server backup, or an implemented recovery/migration workflow. Keeping the snapshot on the source's physical disk does not protect either copy against that disk failing. The full backup requirements and independent-storage recovery gates in [Technical Design.md](<Technical Design.md>) remain separate work.
