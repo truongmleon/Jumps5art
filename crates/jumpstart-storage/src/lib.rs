@@ -9,6 +9,11 @@
 //! Keeping these operations separate prevents a diagnostic read from creating a
 //! replacement database when the expected one is missing or unreadable.
 //!
+//! `create_snapshot` makes a separate verified copy of this bookkeeping database;
+//! `verify_snapshot` checks that copy even when its original source is unavailable.
+//! This development snapshot excludes media, Worlds, and secrets, and is not a
+//! complete server backup or a way to restore an installation.
+//!
 //! Initialization publishes a fully verified sibling staging directory using an
 //! atomic no-replace rename. Existing targets, including empty directories, are
 //! never adopted. Failed staging is retained for diagnosis rather than removed.
@@ -22,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use jumpstart_domain::{ServerId, SyncEpoch};
+use jumpstart_domain::{BlobId, Counter, ServerId, SyncEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -33,6 +38,12 @@ pub const FORMAT_FILE: &str = "format.json";
 pub const LOCK_FILE: &str = "metadata.lock";
 pub const DATABASE_DIRECTORY: &str = "database";
 pub const DATABASE_FILE: &str = "jumpstart.sqlite";
+/// Current version of the separate bootstrap metadata snapshot format.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+/// JSON manifest naming a verified local metadata snapshot's contents.
+pub const SNAPSHOT_MANIFEST_FILE: &str = "snapshot.json";
+/// Standalone SQLite database stored inside a metadata snapshot directory.
+pub const SNAPSHOT_DATABASE_FILE: &str = "metadata.sqlite";
 
 /// Verified metadata identity and on-disk format. No filesystem qualification or
 /// encryption guarantee is implied by successful initialization or inspection.
@@ -52,6 +63,49 @@ pub struct MetadataReport {
     pub journal_mode: String,
     /// Successful SQLite integrity-check result, currently `"ok"`.
     pub integrity_check: String,
+}
+
+/// The data covered by a snapshot, so a metadata copy cannot imply a full backup.
+///
+/// Bootstrap metadata contains the server identity and initial database layout.
+/// Media files, Worlds, secrets, and application/device state are outside its scope.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotScope {
+    /// Initial server bookkeeping before sequenced library changes exist.
+    BootstrapMetadata,
+}
+
+/// Verified identity and contents of one standalone bootstrap metadata snapshot.
+///
+/// The database's size and fingerprint detect accidental changes to the artifact;
+/// they do not authenticate a snapshot supplied by an untrusted person. Verification
+/// works without the source root, but no restore or activation operation is provided.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SnapshotReport {
+    /// Absolute path of the verified snapshot directory.
+    pub root: PathBuf,
+    /// Version of the snapshot manifest and artifact layout.
+    pub snapshot_format_version: u32,
+    /// Explicit limit on the data included in this artifact.
+    pub scope: SnapshotScope,
+    /// Server identity captured from the source database and format marker.
+    pub server_id: ServerId,
+    /// Captured label identifying the source's synchronization history.
+    pub sync_epoch: SyncEpoch,
+    /// Source metadata-directory format version.
+    pub format_version: u32,
+    /// Source SQLite schema version, checked again inside the copy.
+    pub schema_version: u32,
+    /// Captured change sequence, unavailable (`None`) in the bootstrap schema.
+    ///
+    /// Schema 1 has no stored change sequence. This snapshot cannot be used as a
+    /// synchronization starting point; a later schema must capture its real value.
+    pub change_seq: Option<Counter>,
+    /// Exact byte length of the standalone SQLite artifact.
+    pub database_bytes: Counter,
+    /// BLAKE3 fingerprint of the verified standalone SQLite artifact.
+    pub database_hash: BlobId,
 }
 
 /// On-disk JSON marker containing the format versions and server identity.
@@ -105,12 +159,24 @@ pub enum StorageError {
     InUse,
     #[error("metadata needs recovery before offline inspection: {0}")]
     NeedsRecovery(&'static str),
-    #[error("initialization did not complete; staging is retained at {staging}: {source}")]
+    #[error("metadata operation did not complete; staging is retained at {staging}: {source}")]
     StagingRetained {
         staging: PathBuf,
         #[source]
         source: Box<StorageError>,
     },
+    /// The snapshot manifest or database does not satisfy the supported contract.
+    #[error("invalid metadata snapshot: {0}")]
+    InvalidSnapshot(&'static str),
+    /// Snapshot manifest JSON could not be decoded into its required shape.
+    #[error("invalid metadata snapshot manifest: {0}")]
+    InvalidSnapshotManifest(#[source] serde_json::Error),
+    /// Snapshot layout comes from a different, unsupported format version.
+    #[error("unsupported metadata snapshot format {found}; this binary supports {supported}")]
+    UnsupportedSnapshotFormat { found: u32, supported: u32 },
+    /// Snapshot creation could not finish within its bounded copy workflow.
+    #[error("metadata snapshot could not be completed: {0}")]
+    SnapshotUnavailable(&'static str),
     #[error("metadata storage is currently supported only on Linux and macOS")]
     UnsupportedPlatform,
 }
@@ -159,12 +225,53 @@ pub fn inspect(root: &Path) -> Result<MetadataReport> {
     platform::inspect(root)
 }
 
+/// Create a verified standalone copy of an offline bootstrap metadata database.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` of the existing, checkpointed metadata root.
+/// * `output` — `&Path` naming a new directory outside `root`, under an existing parent.
+///
+/// # Returns
+///
+/// `Result<SnapshotReport>` describing the published copy's identity and contents.
+/// The source remains unchanged and is locked against cooperating writers during capture.
+///
+/// # Errors
+///
+/// Rejects invalid or active sources, pending recovery, overlapping paths, existing
+/// destinations, unsupported platforms, and failed copying or verification. Failed
+/// staging is retained for diagnosis. An error after publication can leave the
+/// verified destination in place; verify it before retrying.
+pub fn create_snapshot(root: &Path, output: &Path) -> Result<SnapshotReport> {
+    platform::create_snapshot(root, output)
+}
+
+/// Verify a bootstrap metadata snapshot without its original source or file changes.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` of the snapshot directory containing its manifest and database.
+///
+/// # Returns
+///
+/// `Result<SnapshotReport>` after checking the manifest, database size/fingerprint,
+/// schema, integrity, and captured identities. This does not restore the snapshot.
+///
+/// # Errors
+///
+/// Rejects missing, corrupt, inconsistent, or unsupported snapshots, unexpected
+/// contents, unsafe paths, and unsupported platforms. It does not repair failures.
+pub fn verify_snapshot(root: &Path) -> Result<SnapshotReport> {
+    platform::verify_snapshot(root)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
-    use super::{MetadataReport, Path, Result, StorageError};
+    use super::{MetadataReport, Path, Result, SnapshotReport, StorageError};
 
     /// Refuse initialization on a platform without the filesystem implementation.
     ///
@@ -189,6 +296,33 @@ mod platform {
     ///
     /// `Result<MetadataReport>`, always `Err(StorageError::UnsupportedPlatform)`.
     pub fn inspect(_root: &Path) -> Result<MetadataReport> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse snapshot creation before filesystem work on unsupported platforms.
+    ///
+    /// # Arguments
+    ///
+    /// * `_root` — unused source `&Path`.
+    /// * `_output` — unused destination `&Path`.
+    ///
+    /// # Returns
+    ///
+    /// `Result<SnapshotReport>`, always `Err(StorageError::UnsupportedPlatform)`.
+    pub fn create_snapshot(_root: &Path, _output: &Path) -> Result<SnapshotReport> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse snapshot verification before filesystem work on unsupported platforms.
+    ///
+    /// # Arguments
+    ///
+    /// * `_root` — unused snapshot `&Path`.
+    ///
+    /// # Returns
+    ///
+    /// `Result<SnapshotReport>`, always `Err(StorageError::UnsupportedPlatform)`.
+    pub fn verify_snapshot(_root: &Path) -> Result<SnapshotReport> {
         Err(StorageError::UnsupportedPlatform)
     }
 }

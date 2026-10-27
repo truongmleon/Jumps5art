@@ -10,7 +10,7 @@ publish.workspace = true
 blake3.workspace = true
 fs2.workspace = true
 jumpstart-domain = { path = "../jumpstart-domain" }
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

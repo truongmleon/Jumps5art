@@ -10,6 +10,9 @@
 //! inspection with cooperating writers. File handles, requests to flush changes
 //! to disk, and rename operations depend on the operating system, so they stay
 //! in this module behind the public initialize/inspect functions in lib.rs.
+//!
+//! The snapshot submodule reuses the checked reader and its lock to copy this
+//! bookkeeping into a separate verified bundle, without copying library media.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -30,10 +33,30 @@ use super::{
     LOCK_FILE, MetadataReport, Result, SCHEMA_VERSION, StorageError,
 };
 
+mod snapshot;
+
+pub(super) use snapshot::{create_snapshot, verify_snapshot};
+
 const MIGRATION_NAME: &str = "initial_metadata";
 const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version INTEGER PRIMARY KEY CHECK (version > 0),\n    name TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL\n) STRICT";
 const STATE_TABLE: &str = "CREATE TABLE server_state (\n    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n    format_version INTEGER NOT NULL CHECK (format_version > 0),\n    server_id BLOB NOT NULL CHECK (length(server_id) = 16),\n    sync_epoch BLOB NOT NULL CHECK (length(sync_epoch) = 16)\n) STRICT";
 const MARKER_LIMIT: u64 = 64 * 1024;
+
+/// An offline metadata database kept verified and locked for the caller's work.
+///
+/// Holding this value keeps the shared maintenance lock alive while a snapshot
+/// reads the same checked connection. Cooperating writers must take the exclusive
+/// lock before opening a writable connection.
+struct VerifiedMetadata {
+    /// Checked source identity, versions, and canonical root path.
+    report: MetadataReport,
+    /// Checked format marker used when validating the copied database.
+    marker: FormatMarker,
+    /// Read-only immutable connection, safe only for this protected offline source.
+    connection: Connection,
+    /// Owned lock handle retained until capture or inspection finishes.
+    _lock: File,
+}
 
 /// Create and verify a sibling staging root, then publish it without replacement.
 ///
@@ -269,6 +292,34 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
 /// unsupported versions, invalid SQLite headers, and inconsistent schema or identity.
 /// Propagates I/O and database failures without recovering or repairing the root.
 pub(super) fn inspect(root: &Path) -> Result<MetadataReport> {
+    let VerifiedMetadata {
+        report,
+        connection,
+        _lock,
+        ..
+    } = open_verified_metadata(root)?;
+    connection
+        .close()
+        .map_err(|(_, error)| StorageError::Database(error))?;
+    Ok(report)
+}
+
+/// Open and validate an offline source while retaining its maintenance lock.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` of an existing, checkpointed metadata root.
+///
+/// # Returns
+///
+/// `Result<VerifiedMetadata>` owning the checked marker, report, connection, and
+/// shared lock. The caller must retain the guard while reading/copying the source.
+///
+/// # Errors
+///
+/// Returns the same path, version, recovery, integrity, I/O, and SQLite failures
+/// as offline inspection. It never opens an active WAL database as immutable.
+fn open_verified_metadata(root: &Path) -> Result<VerifiedMetadata> {
     require_directory(root)?;
     let root =
         fs::canonicalize(root).map_err(|source| io("resolve metadata root", root, source))?;
@@ -348,18 +399,21 @@ pub(super) fn inspect(root: &Path) -> Result<MetadataReport> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     connection.busy_timeout(Duration::from_secs(5))?;
+    connection.pragma_update(None, "trusted_schema", false)?;
     verify_database(&connection, &marker)?;
-    connection
-        .close()
-        .map_err(|(_, error)| StorageError::Database(error))?;
-    Ok(MetadataReport {
-        root,
-        server_id: marker.server_id,
-        sync_epoch: marker.sync_epoch,
-        format_version: marker.format_version,
-        schema_version: marker.schema_version,
-        journal_mode: "wal".to_owned(),
-        integrity_check: "ok".to_owned(),
+    Ok(VerifiedMetadata {
+        report: MetadataReport {
+            root,
+            server_id: marker.server_id,
+            sync_epoch: marker.sync_epoch,
+            format_version: marker.format_version,
+            schema_version: marker.schema_version,
+            journal_mode: "wal".to_owned(),
+            integrity_check: "ok".to_owned(),
+        },
+        marker,
+        connection,
+        _lock: lock,
     })
 }
 
@@ -425,7 +479,7 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
         }
     }
     let schema_objects: i64 = connection.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+        "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
         [],
         |row| row.get(0),
     )?;
