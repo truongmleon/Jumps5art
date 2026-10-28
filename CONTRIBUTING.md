@@ -44,6 +44,12 @@ cargo run -p jumpstart-server -- snapshot verify --snapshot-root /tmp/jumpstart-
 
 Creation reads the source under its shared maintenance lock and copies its SQLite bookkeeping through SQLite's Online Backup API. The source must be checkpointed, with no active exclusive writer or nonempty WAL/rollback journal. The operation verifies the copied database and manifest before publishing a separate bundle containing only `snapshot.json` and `metadata.sqlite`; an existing output is never replaced. Verification reads the bundle without changing it and does not require the original source or `--development`.
 
-Reports explicitly identify the scope as `bootstrap_metadata`. They include the source server ID and synchronization epoch, metadata/schema versions, database size as a decimal string, and a tagged BLAKE3 digest. `change_seq` is `null` because schema 1 does not store a change-feed watermark; it is unavailable, rather than a fabricated sequence of zero.
+Reports explicitly identify the scope as `bootstrap_metadata`. They include the source server ID and synchronization epoch, metadata/schema versions, database size as a decimal string, and a tagged BLAKE3 digest. Schema 1 reports `change_seq` as `null` because the value is unavailable. Schema 2 captures the actual stored value, initially the decimal string `"0"`. An unavailable position and a stored zero remain distinct.
 
 This bundle captures the current bootstrap bookkeeping only. It excludes media/object contents, Worlds data and backups, secrets and keys, logs, server settings, and device-only or unsynchronized work. It is not a restorable metadata root, a complete server backup, or an implemented recovery/migration workflow. Keeping the snapshot on the source's physical disk does not protect either copy against that disk failing. The full backup requirements and independent-storage recovery gates in [Technical Design.md](<Technical Design.md>) remain separate work.
+
+## Versioned metadata preview
+
+New roots use schema 2, which stores a nonnegative change high-water mark for future mutation bookkeeping. Existing schema 1 roots remain readable and can still be snapshotted without modification. Each supported schema is checked against its exact table definitions and sequential migration checksums. Snapshots independently compare the captured position with their copied database.
+
+This prerequisite does not silently upgrade an existing root or implement a change-feed service. The explicit recoverable upgrade is supplied by the dependent migration PR; production durability and full-server recovery remain separate gates.

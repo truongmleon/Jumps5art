@@ -27,6 +27,8 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+mod support;
+
 /// Creates a source root beneath a temporary directory kept alive by its guard.
 ///
 /// # Returns
@@ -186,10 +188,7 @@ fn snapshot_preserves_authority_and_verifies_after_source_is_gone() {
     assert_eq!(created.sync_epoch, initial.sync_epoch);
     assert_eq!(created.format_version, initial.format_version);
     assert_eq!(created.schema_version, initial.schema_version);
-    assert_eq!(
-        created.change_seq, None,
-        "schema 1 has no stored change sequence"
-    );
+    assert_eq!(created.change_seq.map(|value| value.value()), Some(0));
 
     let database = fs::read(output.join(SNAPSHOT_DATABASE_FILE)).expect("snapshot database");
     assert_eq!(created.database_bytes.value(), database.len() as u64);
@@ -226,8 +225,51 @@ fn snapshot_preserves_authority_and_verifies_after_source_is_gone() {
     assert_eq!(verified.sync_epoch, created.sync_epoch);
     assert_eq!(verified.database_hash, created.database_hash);
     assert_eq!(verified.database_bytes, created.database_bytes);
-    assert_eq!(verified.change_seq, None);
+    assert_eq!(verified.change_seq, created.change_seq);
     assert_eq!(before, fingerprint(&output));
+}
+
+/// Preserve the old null-watermark snapshot format using independently frozen data.
+#[test]
+fn original_schema1_snapshot_still_verifies_after_its_source_is_removed() {
+    let parent = tempfile::tempdir().unwrap();
+    let source = parent.path().join("old-source");
+    let original = support::create_schema1(&source);
+    let before = fingerprint(&source);
+    let output = parent.path().join("old-snapshot");
+    let created = create_snapshot(&source, &output).unwrap();
+    assert_eq!(fingerprint(&source), before);
+    assert_eq!(created.server_id, original.server_id);
+    assert_eq!(created.sync_epoch, original.sync_epoch);
+    assert_eq!(created.schema_version, 1);
+    assert_eq!(created.change_seq, None);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(output.join(SNAPSHOT_MANIFEST_FILE)).unwrap()).unwrap();
+    assert!(manifest.get("change_seq").unwrap().is_null());
+    fs::remove_dir_all(source).unwrap();
+    assert_eq!(verify_snapshot(&output).unwrap(), created);
+    edit_manifest(&output, |manifest| manifest["change_seq"] = json!("0"));
+    rejected_without_mutation(&output);
+}
+
+/// Capture an actual nonzero stored watermark and compare it with the copied database.
+#[test]
+fn schema2_snapshot_preserves_the_actual_stored_change_sequence() {
+    let (parent, source, _) = source_fixture();
+    let connection = Connection::open(source.join(DATABASE_DIRECTORY).join(DATABASE_FILE)).unwrap();
+    connection
+        .execute_batch("UPDATE server_state SET change_seq = 42; PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    connection.close().unwrap();
+    let before = fingerprint(&source);
+    let output = parent.path().join("sequenced-snapshot");
+    let report = create_snapshot(&source, &output).unwrap();
+    assert_eq!(report.schema_version, 2);
+    assert_eq!(report.change_seq.map(|value| value.value()), Some(42));
+    assert_eq!(verify_snapshot(&output).unwrap(), report);
+    assert_eq!(fingerprint(&source), before);
+    edit_manifest(&output, |manifest| manifest["change_seq"] = json!("43"));
+    rejected_without_mutation(&output);
 }
 
 /// Ensures snapshot creation leaves source contents, permissions, and timestamps
@@ -418,7 +460,7 @@ fn tampered_snapshot_database_is_rejected_without_repair() {
 }
 
 /// Checks validly encoded but inconsistent manifest hashes, identities, and change
-/// sequences are rejected; schema 1 has no stored sequence, including zero.
+/// sequences are rejected even when the schema-2 watermark is well-formed text.
 #[test]
 fn inconsistent_manifest_values_do_not_override_database_verification() {
     for (field, value) in [
@@ -427,7 +469,8 @@ fn inconsistent_manifest_values_do_not_override_database_verification() {
             json!(BlobId::hash_bytes(b"wrong content").to_string()),
         ),
         ("server_id", json!(ServerId::new().to_string())),
-        ("change_seq", json!("0")),
+        ("change_seq", json!("1")),
+        ("change_seq", json!(null)),
     ] {
         let (_parent, root) = snapshot_fixture();
         edit_manifest(&root, |manifest| manifest[field] = value);
@@ -435,8 +478,8 @@ fn inconsistent_manifest_values_do_not_override_database_verification() {
     }
 }
 
-/// Requires the manifest to explicitly declare that no change sequence is available,
-/// instead of accepting a missing field as an implicit default.
+/// Requires an explicitly declared change sequence instead of accepting a missing
+/// field as an implicit default for either supported schema.
 #[test]
 fn missing_change_sequence_is_rejected_without_mutation() {
     let (_parent, root) = snapshot_fixture();
@@ -457,7 +500,7 @@ fn missing_change_sequence_is_rejected_without_mutation() {
 /// updating the manifest to match the altered bytes.
 #[test]
 fn matching_digest_does_not_hide_database_identity_or_schema_tampering() {
-    for mutation in ["identity", "schema", "sqlite_like_schema"] {
+    for mutation in ["identity", "schema", "sqlite_like_schema", "watermark"] {
         let (_parent, root) = snapshot_fixture();
         let database_path = root.join(SNAPSHOT_DATABASE_FILE);
         let connection = Connection::open(&database_path).expect("open snapshot fixture");
@@ -481,6 +524,11 @@ fn matching_digest_does_not_hide_database_identity_or_schema_tampering() {
                     .execute_batch("CREATE TABLE sqliteXhidden(value TEXT) STRICT")
                     .expect("add a table resembling SQLite internals");
             }
+            "watermark" => {
+                connection
+                    .execute_batch("UPDATE server_state SET change_seq = 7")
+                    .expect("change the captured high-water mark");
+            }
             _ => unreachable!(),
         }
         connection.close().expect("close altered snapshot fixture");
@@ -495,6 +543,7 @@ fn matching_digest_does_not_hide_database_identity_or_schema_tampering() {
             "schema" | "sqlite_like_schema" => {
                 assert!(matches!(error, StorageError::MigrationMismatch));
             }
+            "watermark" => assert!(matches!(error, StorageError::InvalidSnapshot(_))),
             _ => unreachable!(),
         }
     }

@@ -201,7 +201,7 @@ fn snapshot_create_and_verify_report_scope_and_survive_source_removal() {
     assert_eq!(created["format_version"], initial["format_version"]);
     assert_eq!(created["schema_version"], initial["schema_version"]);
     assert!(created.as_object().unwrap().contains_key("change_seq"));
-    assert_eq!(created["change_seq"], Value::Null);
+    assert_eq!(created["change_seq"], "0");
     assert_eq!(
         created["database_bytes"],
         fs::metadata(destination.join("metadata.sqlite"))
