@@ -6,6 +6,9 @@
 //! through SQLite into a separate verified bundle; `snapshot verify` checks the
 //! bundle without needing the original folder. These snapshots contain no library
 //! files, Worlds data, or secrets and cannot restore a server on their own.
+//! `migrate` upgrades an older bookkeeping schema after saving a verified copy.
+//! Its journal lets the same command finish an interrupted upgrade instead of
+//! replacing a server's identity or silently starting again with an empty database.
 //! The program accepts these arguments, delegates file/database work to the storage
 //! library, and prints a report or exits with an error.
 //!
@@ -16,7 +19,7 @@
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use jumpstart_storage::{create_snapshot, initialize, inspect, verify_snapshot};
+use jumpstart_storage::{create_snapshot, initialize, inspect, migrate, verify_snapshot};
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
 /// No network listener is configured or started by this development tool.
@@ -32,6 +35,7 @@ struct Cli {
 
 /// Local metadata commands: `Init` creates a development root and `Inspect`
 /// verifies an offline root. `Snapshot` selects a nested create/verify command.
+/// `Migrate` upgrades existing bookkeeping while retaining a pre-upgrade snapshot.
 /// Root paths are owned `PathBuf` values and output selection uses a `bool`.
 #[derive(Subcommand)]
 enum Command {
@@ -49,6 +53,22 @@ enum Command {
     Inspect {
         #[arg(long)]
         metadata_root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Upgrade offline metadata, retaining a verified pre-upgrade snapshot.
+    Migrate {
+        /// Existing offline metadata root to upgrade, preserving its server identity.
+        #[arg(long)]
+        metadata_root: PathBuf,
+        /// New directory outside the source for its pre-upgrade snapshot.
+        /// Retrying an interrupted upgrade must supply the same path.
+        /// A clean, current root leaves this path untouched.
+        #[arg(long)]
+        snapshot_output: PathBuf,
+        /// Acknowledge the development preview and limited metadata-only recovery copy.
+        #[arg(long)]
+        development: bool,
         #[arg(long)]
         json: bool,
     },
@@ -115,10 +135,12 @@ fn main() -> ExitCode {
 ///
 /// # Errors
 ///
-/// Refuses initialization or snapshot creation without the development
+/// Refuses initialization, migration, or snapshot creation without the development
 /// acknowledgment before invoking storage. Propagates storage, serialization, or
 /// output errors; an output failure does not undo an already-published root or
-/// snapshot. Verification and inspection do not require that acknowledgment.
+/// snapshot. A migration error may leave its journal for a retry with the same
+/// paths; this command never deletes it as a workaround. Verification and
+/// inspection do not require that acknowledgment.
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let (report, json, title) = match cli.command {
         Command::Init {
@@ -143,6 +165,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             json,
             "Verified offline development metadata:",
         ),
+        Command::Migrate {
+            metadata_root,
+            snapshot_output,
+            development,
+            json,
+        } => {
+            if !development {
+                return Err("metadata migration is a development preview; use --development to acknowledge the schema upgrade and its recovery copy of bootstrap metadata".into());
+            }
+            (
+                serde_json::to_value(migrate(&metadata_root, &snapshot_output)?)?,
+                json,
+                "Verified offline development metadata migration:",
+            )
+        }
         Command::Snapshot { command } => match command {
             SnapshotCommand::Create {
                 metadata_root,
@@ -172,7 +209,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     print_report(&report, title, json)
 }
 
-/// Write a verified metadata or snapshot report to stdout and flush the output.
+/// Write a verified metadata, migration, or snapshot report and flush the output.
 ///
 /// # Arguments
 ///

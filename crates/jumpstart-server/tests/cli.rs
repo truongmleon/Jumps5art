@@ -6,6 +6,8 @@
 //! development acknowledgment, preserve existing destinations, and report its
 //! limited scope. Verification must work after the source is removed and fail
 //! without modifying a damaged bundle. Existing files must remain untouched.
+//! Migration also requires acknowledgment before storage access. An already-current
+//! root must report a no-op without creating or changing a recovery snapshot.
 //!
 //! These tests check argument handling, exit status, reports, and filesystem results
 //! together. Storage-library tests alone do not exercise that program boundary.
@@ -113,7 +115,7 @@ fn inspecting_missing_storage_does_not_initialize_it() {
     assert!(!root.exists());
 }
 
-/// Initialize a source root through the CLI for a snapshot test.
+/// Initialize a source root through the CLI for a local metadata command test.
 ///
 /// # Arguments
 ///
@@ -388,5 +390,196 @@ fn snapshot_commands_report_unsupported_platform_without_creating_paths() {
         );
         assert!(output.stdout.is_empty());
     }
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Require acknowledgment before migration can inspect unavailable paths or create
+/// a missing parent. Assertion or fixture failures panic.
+#[test]
+fn migration_requires_acknowledgment_before_storage_io() {
+    let parent = TempDir::new().unwrap();
+    let missing_parent = parent.path().join("missing-parent");
+    let source = missing_parent.join("source");
+    let snapshot = missing_parent.join("before-upgrade");
+    let output = command()
+        .args(["migrate", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("--development"), "{error}");
+    assert!(error.contains("migration"), "{error}");
+    assert!(output.stdout.is_empty());
+    assert!(!missing_parent.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Verify migration of current schema 2 reports a no-op, preserves identity and
+/// database bytes, and does not create a recovery artifact. Fixture failures panic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn migration_of_current_schema_reports_json_noop_without_creating_snapshot() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    let snapshot = parent.path().join("unused-snapshot");
+    let initial = initialize_source(&source);
+    assert_eq!(initial["schema_version"], 2);
+    let marker_before = fs::read(source.join("format.json")).unwrap();
+    let database_before = fs::read(source.join("database/jumpstart.sqlite")).unwrap();
+    let output = command()
+        .args(["migrate", "--development", "--json", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["metadata"], initial);
+    assert_eq!(report["from_schema_version"], 2);
+    assert_eq!(report["to_schema_version"], 2);
+    assert_eq!(report["backup"], Value::Null);
+    assert_eq!(report["resumed"], false);
+    assert_eq!(fs::read(source.join("format.json")).unwrap(), marker_before);
+    assert_eq!(
+        fs::read(source.join("database/jumpstart.sqlite")).unwrap(),
+        database_before
+    );
+    assert!(!source.join("migration.json").exists());
+    assert!(!snapshot.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 1);
+}
+
+/// Verify a current root does not adopt or overwrite an existing snapshot-output
+/// directory when migration has nothing to do. Assertion or fixture failures panic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn migration_noop_preserves_existing_snapshot_output() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    initialize_source(&source);
+    let snapshot = parent.path().join("occupied-output");
+    fs::create_dir(&snapshot).unwrap();
+    let sentinel = snapshot.join("original.txt");
+    fs::write(&sentinel, b"preserve occupied output").unwrap();
+    let output = command()
+        .args(["migrate", "--development", "--json", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["backup"], Value::Null);
+    assert_eq!(fs::read(sentinel).unwrap(), b"preserve occupied output");
+    assert_eq!(fs::read_dir(snapshot).unwrap().count(), 1);
+}
+
+/// Keep migration's human-readable no-op report explicit about versions and the
+/// absent recovery snapshot. Assertion or fixture failures panic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn migration_noop_text_reports_versions_and_absent_backup() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    initialize_source(&source);
+    let snapshot = parent.path().join("unused-snapshot");
+    let output = command()
+        .args(["migrate", "--development", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.starts_with("Verified offline development metadata migration:\n"));
+    assert!(text.contains("  from_schema_version: 2\n"));
+    assert!(text.contains("  to_schema_version: 2\n"));
+    assert!(text.contains("  backup: null\n"));
+    assert!(text.contains("  resumed: false\n"));
+    assert!(!snapshot.exists());
+}
+
+/// Refuse a missing source without creating a replacement root or snapshot.
+/// Assertion or fixture failures panic.
+#[test]
+fn migration_of_missing_root_does_not_initialize_it() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("missing-source");
+    let snapshot = parent.path().join("snapshot");
+    let output = command()
+        .args(["migrate", "--development", "--json", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!source.exists());
+    assert!(!snapshot.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Refuse an unrelated existing directory and leave its contents untouched rather
+/// than adopting it as an old metadata root. Assertion or fixture failures panic.
+#[test]
+fn migration_does_not_adopt_existing_user_content() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("existing-folder");
+    fs::create_dir(&source).unwrap();
+    let sentinel = source.join("original.txt");
+    fs::write(&sentinel, b"keep unrelated contents").unwrap();
+    let snapshot = parent.path().join("snapshot");
+    let output = command()
+        .args(["migrate", "--development", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(fs::read(sentinel).unwrap(), b"keep unrelated contents");
+    assert_eq!(fs::read_dir(source).unwrap().count(), 1);
+    assert!(!snapshot.exists());
+}
+
+/// Require unsupported platforms to fail explicitly before creating either path.
+/// Assertion or fixture failures panic.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn migration_reports_unsupported_platform_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    let snapshot = parent.path().join("snapshot");
+    let output = command()
+        .args(["migrate", "--development", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("supported only on Linux and macOS"));
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
