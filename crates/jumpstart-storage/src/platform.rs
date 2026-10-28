@@ -33,8 +33,10 @@ use super::{
     LOCK_FILE, MIGRATION_FILE, MetadataReport, Result, SCHEMA_VERSION, StorageError,
 };
 
+mod migration;
 mod snapshot;
 
+pub(super) use migration::migrate;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};
 
 const MIGRATION_NAME: &str = "initial_metadata";

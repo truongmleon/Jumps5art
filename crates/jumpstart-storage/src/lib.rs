@@ -14,6 +14,10 @@
 //! This development snapshot excludes media, Worlds, and secrets, and is not a
 //! complete server backup or a way to restore an installation.
 //!
+//! `migrate` upgrades an existing root after saving a verified snapshot. A retained
+//! journal bridges the database commit and the separate format-marker replacement,
+//! so an interrupted upgrade can be finished explicitly instead of guessed at by
+//! inspection. Schema 2 stores a change position for future mutation bookkeeping.
 //!
 //! Initialization publishes a fully verified sibling staging directory using an
 //! atomic no-replace rename. Existing targets, including empty directories, are
@@ -25,6 +29,10 @@
 //! opens SQLite with `mode=ro&immutable=1`. It never creates journal sidecars or
 //! repairs a database. Linux and macOS implement the filesystem boundary; other
 //! platforms return an explicit unsupported error.
+
+// Reuse the frozen schema-1 fixture from both unit and integration tests.
+#[cfg(test)]
+extern crate self as jumpstart_storage;
 
 use std::path::{Path, PathBuf};
 
@@ -116,6 +124,26 @@ pub struct SnapshotReport {
     pub database_hash: BlobId,
 }
 
+/// Describes an explicit metadata upgrade and where its prior state was preserved.
+///
+/// For example, upgrading a scratch schema-1 root first saves a verified snapshot,
+/// then updates the database and format marker. Callers need both the checked new
+/// metadata and the old snapshot's location to understand that result. This report
+/// also distinguishes a resumed upgrade from a clean root that needed no change.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MigrationReport {
+    /// Checked metadata after the upgrade or already-current no-op.
+    pub metadata: MetadataReport,
+    /// Schema before this upgrade, or the current schema for a no-op.
+    pub from_schema_version: u32,
+    /// Supported schema selected by this binary.
+    pub to_schema_version: u32,
+    /// Independently verified pre-upgrade snapshot; absent for a clean no-op.
+    pub backup: Option<SnapshotReport>,
+    /// Whether a previously published migration journal was resumed.
+    pub resumed: bool,
+}
+
 /// On-disk JSON marker containing the format versions and server identity.
 ///
 /// Its version and identity fields must agree with the SQLite database before
@@ -185,6 +213,12 @@ pub enum StorageError {
     /// Snapshot creation could not finish within its bounded copy workflow.
     #[error("metadata snapshot could not be completed: {0}")]
     SnapshotUnavailable(&'static str),
+    /// The retained journal or its recovery snapshot disagrees with this upgrade.
+    #[error("invalid metadata migration: {0}")]
+    InvalidMigration(&'static str),
+    /// A migration journal is not strict, bounded JSON of the supported shape.
+    #[error("invalid metadata migration journal: {0}")]
+    InvalidMigrationJournal(#[source] serde_json::Error),
     #[error("metadata storage is currently supported only on Linux and macOS")]
     UnsupportedPlatform,
 }
@@ -274,12 +308,45 @@ pub fn verify_snapshot(root: &Path) -> Result<SnapshotReport> {
     platform::verify_snapshot(root)
 }
 
+/// Upgrade offline metadata after saving a verified copy of its previous database.
+///
+/// # Arguments
+///
+/// * `root` — `&Path` of an existing metadata root; this operation holds its
+///   exclusive maintenance lock until all database and marker work is finished.
+/// * `snapshot_output` — `&Path` for a new pre-upgrade snapshot outside `root`.
+///   Resume uses the same path recorded in the retained migration journal.
+///
+/// # Returns
+///
+/// `Result<MigrationReport>` with checked metadata and its recovery snapshot.
+/// A clean, current root is a no-op and does not create `snapshot_output`.
+///
+/// # Errors
+///
+/// Refuses active readers/writers, invalid roots or recovery artifacts, unsupported
+/// schemas, existing first-use snapshot outputs, and unsafe paths. Failures after
+/// journal publication retain it; rerun this operation with the same paths to
+/// finish. Inspection never performs this recovery implicitly. An error after
+/// journal removal can leave a completed upgrade; inspect before retrying.
+pub fn migrate(root: &Path, snapshot_output: &Path) -> Result<MigrationReport> {
+    platform::migrate(root, snapshot_output)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
-    use super::{MetadataReport, Path, Result, SnapshotReport, StorageError};
+    use super::{MetadataReport, MigrationReport, Path, Result, SnapshotReport, StorageError};
+
+    /// Refuse upgrades without touching paths on unsupported storage platforms.
+    ///
+    /// `root` and `snapshot_output` are borrowed `&Path` requests. Returns
+    /// `Result<MigrationReport>`, always `Err(StorageError::UnsupportedPlatform)`.
+    pub fn migrate(_root: &Path, _snapshot_output: &Path) -> Result<MigrationReport> {
+        Err(StorageError::UnsupportedPlatform)
+    }
 
     /// Refuse initialization on a platform without the filesystem implementation.
     ///
