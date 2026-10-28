@@ -8,16 +8,22 @@
 //! Sharing them keeps stored data and app/server messages consistent. The types
 //! check values; library updates, file storage, and device communication need
 //! separate implementation.
+//!
+//! JobLifecycle also checks the permitted states of long-running work. Its
+//! numbered worker attempts let cancellation reject an older worker's late result
+//! before application code considers publishing that output.
 
 mod blob;
 mod counter;
 mod identity;
+mod jobs;
 
 pub use blob::BlobId;
 pub use counter::{Counter, MAX_COUNTER_VALUE, PositiveCounter};
 pub use identity::{
     ClientInstanceId, DeviceId, ItemId, JobId, ResourceId, ServerId, SyncEpoch, VersionId,
 };
+pub use jobs::{JobLifecycle, JobState, JobTransitionError};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
