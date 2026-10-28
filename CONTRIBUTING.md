@@ -1,5 +1,7 @@
 # Development
 
+Start with [why the Rust types exist](docs/Development/README.md) when reading these crates. It explains each type's purpose and the problem it addresses, with a worked `JobLifecycle` example and an index of the newer and earlier types. It marks types described from open feature PRs separately from the code available on this branch.
+
 Install [rustup](https://rustup.rs/). The compiler and tools are pinned in `rust-toolchain.toml`, and `Cargo.lock` pins dependencies.
 
 ```sh

@@ -49,6 +49,8 @@ Files from Muse, Photogenic, Bato, and Flex appear in Mass as read-only. Copy on
 
 ## Development
 
+[Why the Rust types exist](docs/Development/README.md) explains their purpose using concrete examples, starting with cancellation and `JobLifecycle`. It also covers retries, snapshots, capacity reports, IDs, counters, and messages.
+
 Install [rustup](https://rustup.rs/). The compiler is pinned in `rust-toolchain.toml`.
 
 ```sh
