@@ -36,12 +36,16 @@ const COPY_TIMEOUT: Duration = Duration::from_secs(60);
 const COPY_PAGES_PER_STEP: i32 = 128;
 const COPY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
-/// The strict, source-independent description of a published two-file snapshot.
+/// The description saved with a snapshot so a later verifier knows what to check.
 ///
-/// Identity and schema fields describe the captured database. `database_bytes`
-/// and `database_hash` verify its retained bytes. `scope` must be bootstrap
-/// metadata. `change_seq` is explicitly null for schema 1 or the captured stored
-/// counter for schema 2, including zero before sequenced mutations exist.
+/// A moved bundle or a lost source must still be identifiable. `snapshot.json`
+/// therefore retains the captured identity, schema, scope, size, and fingerprint.
+/// The verifier compares those claims with the retained database before returning
+/// a `SnapshotReport`. The report additionally names the bundle's current local
+/// path; that path does not belong in this portable saved description.
+///
+/// `scope` must be bootstrap metadata and `change_seq` must be present as JSON null
+/// because schema 1 has no synchronization watermark.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotManifest {

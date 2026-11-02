@@ -1,5 +1,7 @@
 # Development
 
+Start with [why the Rust types exist](docs/Development/README.md) when reading these crates. It explains each type's purpose and the problem it addresses, with a worked `JobLifecycle` example and an index of the newer and earlier types. It marks types described from open feature PRs separately from the code available on this branch.
+
 Install [rustup](https://rustup.rs/). The compiler and tools are pinned in `rust-toolchain.toml`, and `Cargo.lock` pins dependencies.
 
 ```sh
@@ -18,7 +20,7 @@ PR descriptions identify implemented behavior, validation, remaining dependencie
 
 ## Metadata development preview
 
-The `jumpstart-server` binary offers local initialization, offline inspection, verified bootstrap metadata snapshots, and a recoverable metadata schema upgrade. It does not start a daemon, pair devices, open a listener or manage a library.
+The `jumpstart-server` binary offers local initialization, offline metadata inspection, verified bootstrap metadata snapshots, and point-in-time filesystem capacity observations. [docs/CLI/README.md](docs/CLI/README.md) lists each command, its arguments, and the report it prints. The binary does not start a daemon, pair devices, open a listener, or manage a library.
 
 On Linux or macOS, select a new child path of an existing scratch directory:
 
@@ -74,8 +76,19 @@ The journal is needed because a SQLite transaction and a separate `format.json` 
 
 A clean schema 2 root returns a successful no-op: both versions are 2, `backup` is `null`, and `resumed` is false. It creates no snapshot and leaves an existing snapshot-output path untouched. Supplying `--snapshot-output` is still required by the command so its invocation can also describe a real or resumed upgrade.
 
-If an upgrade is interrupted after its journal has been recorded, retain the root, journal, and snapshot, then retry **the same command with the same paths**. Migration checks the recorded identities and retained snapshot before continuing; it does not silently select a different copy. Do not delete the journal, edit the marker, or remove SQLite sidecars to bypass a refusal.
+## Storage capacity observations
 
-There is one earlier interruption case: a snapshot may have been published before the journal was recorded. The schema 1 source is still unchanged, and that snapshot remains intact. Because an existing output is never reused for a new migration, select another new snapshot-output path for that attempt. A completed migration with no remaining journal simply returns the schema 2 no-op on later calls.
+On Linux or macOS, observe the filesystem containing an existing directory, for example before planning a large import. The positional path identifies an ordinary directory; it does not need to be a Jumpstart metadata root:
 
-This is a development upgrade for bootstrap metadata only. It supplies recovery of its interrupted upgrade steps, not a full backup restore, whole-library migration, durable scheduler, or production filesystem qualification. Existing schema 1 snapshots remain verifiable without upgrading them.
+```sh
+cargo run -p jumpstart-server -- storage inspect .
+cargo run -p jumpstart-server -- storage inspect . --json
+```
+
+This read-only command needs no `--development` acknowledgment and creates no metadata. It refuses missing paths, regular files, and a final directory symlink. Other platforms, including Windows, return an explicit unsupported-platform error. The separate `inspect --metadata-root ...` command continues to verify offline metadata identity and format.
+
+The text heading identifies a **Storage capacity observation (not disk health or write approval)**. JSON reports use `scope: "capacity_only"`, a canonical directory path, and decimal strings for `total_bytes`, `free_bytes`, and `available_bytes`. The nested assessment reports warning and safety-reserve thresholds, available bytes above the reserve, and whether this observation crosses either threshold.
+
+The default warning threshold is 10% of total capacity, rounded up to a whole byte; for filesystems of at least 50 GiB it is also at least 5 GiB. The safety reserve is the smaller of 256 MiB and 1% of total capacity, rounded down. This reserve marks space that future write admission should leave for recording failures, shutting down safely, and preserving recovery state as ordinary imports fill a volume.
+
+These values are a point-in-time filesystem observation and may change immediately. The assessment does not reserve space or enforce admission. It provides no SMART or disk-health diagnosis, encryption check, registered-volume identity verification, quota or permission approval, or assurance that a write will succeed. Those storage qualification and reservation requirements remain separate work.

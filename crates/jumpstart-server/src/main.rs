@@ -1,4 +1,4 @@
-//! Command-line program for trying out server bookkeeping storage locally.
+//! Command-line tools for local server bookkeeping and storage observations.
 //!
 //! For example, `jumpstart-server init --metadata-root <new-folder> --development`
 //! creates scratch metadata. `jumpstart-server inspect --metadata-root <folder>`
@@ -6,9 +6,9 @@
 //! through SQLite into a separate verified bundle; `snapshot verify` checks the
 //! bundle without needing the original folder. These snapshots contain no library
 //! files, Worlds data, or secrets and cannot restore a server on their own.
-//! `migrate` upgrades an older bookkeeping schema after saving a verified copy.
-//! Its journal lets the same command finish an interrupted upgrade instead of
-//! replacing a server's identity or silently starting again with an empty database.
+//! `storage inspect <folder>` observes filesystem capacity, for example before
+//! planning a large import. That point-in-time report checks neither disk health
+//! nor whether Jumpstart may safely write there.
 //! The program accepts these arguments, delegates file/database work to the storage
 //! library, and prints a report or exits with an error.
 //!
@@ -19,14 +19,14 @@
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use jumpstart_storage::{create_snapshot, initialize, inspect, migrate, verify_snapshot};
+use jumpstart_storage::{create_snapshot, initialize, inspect, inspect_capacity, verify_snapshot};
 
-/// Parsed options with `command: Command` selecting one local metadata operation.
+/// Parsed options with `command: Command` selecting a local storage operation.
 /// No network listener is configured or started by this development tool.
 #[derive(Parser)]
 #[command(
     version,
-    about = "Jumpstart local metadata development tools; no network listener"
+    about = "Jumpstart local storage development tools; no network listener"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -35,8 +35,8 @@ struct Cli {
 
 /// Local metadata commands: `Init` creates a development root and `Inspect`
 /// verifies an offline root. `Snapshot` selects a nested create/verify command.
-/// `Migrate` upgrades existing bookkeeping while retaining a pre-upgrade snapshot.
-/// Root paths are owned `PathBuf` values and output selection uses a `bool`.
+/// `Storage` observes directory capacity separately from metadata inspection.
+/// Paths are owned `PathBuf` values and output selection uses a `bool`.
 #[derive(Subcommand)]
 enum Command {
     /// Initialize a new scratch metadata root. Existing paths are never adopted.
@@ -77,6 +77,11 @@ enum Command {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
+    /// Observe existing-directory storage capacity without approving writes.
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
+    },
 }
 
 /// Snapshot operations: `Create` owns source/output paths and an acknowledgment;
@@ -106,6 +111,23 @@ enum SnapshotCommand {
     },
 }
 
+/// Read-only filesystem observations, separate from verifying a metadata root.
+///
+/// `Inspect` owns an existing directory's positional `PathBuf` and a `bool`
+/// selecting JSON output. Its capacity observation checks neither disk health
+/// nor encryption, registered identity, reservations, or write authorization.
+#[derive(Subcommand)]
+enum StorageCommand {
+    /// Observe point-in-time capacity; this is not disk health or write approval.
+    Inspect {
+        /// Existing directory to observe; missing paths, files, and final symlinks fail.
+        path: PathBuf,
+        /// Print the capacity-only report as JSON, with byte counts as decimal strings.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Parse process arguments, execute the command, and report failures to stderr.
 ///
 /// # Returns
@@ -123,7 +145,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Execute a parsed metadata operation and print its verified report.
+/// Execute a parsed local storage operation and print its scoped report.
 ///
 /// # Arguments
 ///
@@ -138,9 +160,9 @@ fn main() -> ExitCode {
 /// Refuses initialization, migration, or snapshot creation without the development
 /// acknowledgment before invoking storage. Propagates storage, serialization, or
 /// output errors; an output failure does not undo an already-published root or
-/// snapshot. A migration error may leave its journal for a retry with the same
-/// paths; this command never deletes it as a workaround. Verification and
-/// inspection do not require that acknowledgment.
+/// snapshot. Verification, metadata inspection, and read-only capacity observation
+/// do not require that acknowledgment. Capacity observations are point-in-time
+/// measurements, not disk-health checks or permission to write.
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let (report, json, title) = match cli.command {
         Command::Init {
@@ -205,16 +227,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 "Verified local bootstrap metadata snapshot (not a full backup):",
             ),
         },
+        Command::Storage { command } => match command {
+            StorageCommand::Inspect { path, json } => (
+                serde_json::to_value(inspect_capacity(&path)?)?,
+                json,
+                "Storage capacity observation (not disk health or write approval):",
+            ),
+        },
     };
     print_report(&report, title, json)
 }
 
-/// Write a verified metadata, migration, or snapshot report and flush the output.
+/// Write a metadata, snapshot, or capacity report to stdout and flush the output.
 ///
 /// # Arguments
 ///
 /// * `report` — borrowed `&serde_json::Value` containing the serialized report.
-/// * `title` — `&str` heading describing the verified report's scope in text mode.
+/// * `title` — `&str` heading describing the report's scope in text mode.
 /// * `json` — `bool` selecting pretty JSON when true, or labeled text when false.
 ///
 /// # Returns
@@ -232,14 +261,46 @@ fn print_report(report: &serde_json::Value, title: &str, json: bool) -> Result<(
     } else {
         writeln!(output, "{title}")?;
         if let serde_json::Value::Object(fields) = report {
-            for (name, value) in fields {
-                match value {
-                    serde_json::Value::String(text) => writeln!(output, "  {name}: {text}")?,
-                    other => writeln!(output, "  {name}: {other}")?,
-                }
-            }
+            print_fields(&mut output, fields, 2)?;
         }
     }
     output.flush()?;
+    Ok(())
+}
+
+/// Print nested report objects as indented labels for people reading the terminal.
+///
+/// For example, capacity thresholds appear under `assessment` on separate lines
+/// instead of being squeezed into a JSON object inside the text report.
+///
+/// # Arguments
+///
+/// * `output` — mutable borrowed writer receiving the report's text fields.
+/// * `fields` — borrowed JSON object produced from a typed local storage report.
+/// * `indent` — `usize` number of leading spaces for fields at this object level.
+///
+/// # Returns
+///
+/// `std::io::Result<()>` after writing this object and its nested objects.
+///
+/// # Errors
+///
+/// Propagates write failures; output may already contain part of the report.
+fn print_fields(
+    output: &mut impl Write,
+    fields: &serde_json::Map<String, serde_json::Value>,
+    indent: usize,
+) -> std::io::Result<()> {
+    for (name, value) in fields {
+        write!(output, "{blank:indent$}{name}:", blank = "")?;
+        match value {
+            serde_json::Value::Object(nested) => {
+                writeln!(output)?;
+                print_fields(output, nested, indent + 2)?;
+            }
+            serde_json::Value::String(text) => writeln!(output, " {text}")?,
+            other => writeln!(output, " {other}")?,
+        }
+    }
     Ok(())
 }

@@ -14,10 +14,10 @@
 //! This development snapshot excludes media, Worlds, and secrets, and is not a
 //! complete server backup or a way to restore an installation.
 //!
-//! `migrate` upgrades an existing root after saving a verified snapshot. A retained
-//! journal bridges the database commit and the separate format-marker replacement,
-//! so an interrupted upgrade can be finished explicitly instead of guessed at by
-//! inspection. Schema 2 stores a change position for future mutation bookkeeping.
+//! `inspect_capacity` observes how much space an existing directory's filesystem
+//! reports as available to ordinary users. For example, it can explain why a
+//! future import should wait for storage. It reports the default warning and
+//! safety-reserve thresholds without registering a volume or accepting writes.
 //!
 //! Initialization publishes a fully verified sibling staging directory using an
 //! atomic no-replace rename. Existing targets, including empty directories, are
@@ -40,6 +40,12 @@ use jumpstart_domain::{BlobId, Counter, ServerId, SyncEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod capacity;
+
+pub use capacity::{
+    CapacityAssessment, CapacityReport, CapacityScope, assess_capacity, inspect_capacity,
+};
+
 pub const FORMAT_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 2;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
@@ -56,8 +62,13 @@ pub const SNAPSHOT_MANIFEST_FILE: &str = "snapshot.json";
 /// Standalone SQLite database stored inside a metadata snapshot directory.
 pub const SNAPSHOT_DATABASE_FILE: &str = "metadata.sqlite";
 
-/// Verified metadata identity and on-disk format. No filesystem qualification or
-/// encryption guarantee is implied by successful initialization or inspection.
+/// The answer to "which server bookkeeping root did this operation check?"
+///
+/// Initialization and inspection return its path, identity, versions, and database
+/// check results together so the CLI can describe the checked installation. For
+/// example, a matching folder name alone would not reveal that a different server's
+/// database had been placed there. The report records successful checks; it does
+/// not retain a database connection or lock, qualify a filesystem, or verify encryption.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MetadataReport {
     /// Absolute path of the verified metadata root.
@@ -81,10 +92,13 @@ pub struct MetadataReport {
     pub integrity_check: String,
 }
 
-/// The data covered by a snapshot, so a metadata copy cannot imply a full backup.
+/// Labels which data a snapshot includes, so callers can explain what was protected.
 ///
-/// Bootstrap metadata contains the server identity and initial database layout.
-/// Media files, Worlds, secrets, and application/device state are outside its scope.
+/// For example, copying the initial bookkeeping database does not copy a music
+/// library's audio files. The current `BootstrapMetadata` choice gives that limited
+/// copy an explicit, machine-readable scope instead of relying on a folder name
+/// or an ambiguous "backup succeeded" message. It covers server identity and the
+/// initial database layout; media, Worlds, secrets, and app/device state are excluded.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotScope {
@@ -92,11 +106,17 @@ pub enum SnapshotScope {
     BootstrapMetadata,
 }
 
-/// Verified identity and contents of one standalone bootstrap metadata snapshot.
+/// The answer to "which snapshot was checked, and what database did it capture?"
 ///
-/// The database's size and fingerprint detect accidental changes to the artifact;
-/// they do not authenticate a snapshot supplied by an untrusted person. Verification
-/// works without the source root, but no restore or activation operation is provided.
+/// Creation and verification return the bundle's path, source identity, versions,
+/// scope, byte count, and fingerprint together. This lets a caller identify a copy
+/// after moving it or losing its original source, rather than receiving only a
+/// success flag. The saved `SnapshotManifest` supplies the comparison data on disk;
+/// this report describes the operation's result at its current local path.
+///
+/// Size and fingerprint checks detect changed artifact bytes against the manifest;
+/// they do not authenticate an untrusted supplier. Constructing a report does not
+/// run verification. No restore or activation operation is provided.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SnapshotReport {
     /// Absolute path of the verified snapshot directory.
@@ -213,13 +233,10 @@ pub enum StorageError {
     /// Snapshot creation could not finish within its bounded copy workflow.
     #[error("metadata snapshot could not be completed: {0}")]
     SnapshotUnavailable(&'static str),
-    /// The retained journal or its recovery snapshot disagrees with this upgrade.
-    #[error("invalid metadata migration: {0}")]
-    InvalidMigration(&'static str),
-    /// A migration journal is not strict, bounded JSON of the supported shape.
-    #[error("invalid metadata migration journal: {0}")]
-    InvalidMigrationJournal(#[source] serde_json::Error),
-    #[error("metadata storage is currently supported only on Linux and macOS")]
+    /// Filesystem measurements cannot produce a valid bounded capacity report.
+    #[error("storage capacity observation is invalid: {0}")]
+    InvalidCapacity(&'static str),
+    #[error("storage operations are currently supported only on Linux and macOS")]
     UnsupportedPlatform,
 }
 
