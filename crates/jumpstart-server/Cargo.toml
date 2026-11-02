@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+jumpstart-domain.workspace = true
 jumpstart-storage.workspace = true
 serde_json.workspace = true
 

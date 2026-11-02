@@ -9,6 +9,10 @@
 //! `migrate` upgrades an older bookkeeping schema after saving a verified copy.
 //! Its journal lets the same command finish an interrupted upgrade instead of
 //! replacing a server's identity or silently starting again with an empty database.
+//! `jobs` retains a snapshot request and its outcome in SQLite, so a later command
+//! can inspect what happened after the original command exits. Running one job
+//! performs the existing snapshot operation synchronously; recovery records an
+//! interrupted run as failed rather than assuming that an output file means success.
 //! The program accepts these arguments, delegates file/database work to the storage
 //! library, and prints a report or exits with an error.
 //!
@@ -19,7 +23,11 @@
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use jumpstart_storage::{create_snapshot, initialize, inspect, migrate, verify_snapshot};
+use jumpstart_domain::{JobId, JobState, PositiveCounter};
+use jumpstart_storage::{
+    cancel_job, create_snapshot, enqueue_snapshot_job, initialize, inspect, inspect_job, list_jobs,
+    migrate, recover_jobs, run_snapshot_job, verify_snapshot,
+};
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
 /// No network listener is configured or started by this development tool.
@@ -36,6 +44,7 @@ struct Cli {
 /// Local metadata commands: `Init` creates a development root and `Inspect`
 /// verifies an offline root. `Snapshot` selects a nested create/verify command.
 /// `Migrate` upgrades existing bookkeeping while retaining a pre-upgrade snapshot.
+/// `Jobs` administers persisted requests for the existing snapshot operation.
 /// Root paths are owned `PathBuf` values and output selection uses a `bool`.
 #[derive(Subcommand)]
 enum Command {
@@ -72,10 +81,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Create or verify local metadata snapshots without media or Worlds data.
+    /// Create or verify metadata snapshots without media or Worlds data.
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
+    },
+    /// Enqueue, run, inspect, cancel, or recover local metadata snapshot jobs.
+    Jobs {
+        #[command(subcommand)]
+        command: JobCommand,
     },
 }
 
@@ -101,6 +115,80 @@ enum SnapshotCommand {
     Verify {
         #[arg(long)]
         snapshot_root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// A parsed request for the local snapshot queue, with each action's needed data.
+///
+/// The variants keep a snapshot destination with enqueue requests, a checked
+/// `JobId` with requests about one job, and an expected `PositiveCounter` revision
+/// with cancellation. This lets execution reject an outdated cancellation rather
+/// than treating every command as an arbitrary status edit. The enum routes
+/// requests; the storage library owns persistence and snapshot verification.
+#[derive(Subcommand)]
+enum JobCommand {
+    /// Save a queued snapshot request without creating its output yet.
+    EnqueueSnapshot {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        /// New snapshot directory outside the source; its parent must exist.
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        development: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run one queued snapshot synchronously and retain its verified outcome.
+    Run {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        #[arg(long)]
+        job_id: JobId,
+        #[arg(long)]
+        development: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a bounded list of persisted snapshot jobs without changing them.
+    List {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the saved status and outcome of one snapshot job.
+    Inspect {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        #[arg(long)]
+        job_id: JobId,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a still-queued request using the revision shown by inspection.
+    Cancel {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        #[arg(long)]
+        job_id: JobId,
+        #[arg(long)]
+        expected_revision: PositiveCounter,
+        #[arg(long)]
+        development: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fence interrupted active jobs and retain their artifacts for inspection.
+    Recover {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        #[arg(long)]
+        development: bool,
         #[arg(long)]
         json: bool,
     },
@@ -139,8 +227,8 @@ fn main() -> ExitCode {
 /// acknowledgment before invoking storage. Propagates storage, serialization, or
 /// output errors; an output failure does not undo an already-published root or
 /// snapshot. A migration error may leave its journal for a retry with the same
-/// paths; this command never deletes it as a workaround. Verification and
-/// inspection do not require that acknowledgment.
+/// paths; this command never deletes it as a workaround. Job writes apply the same
+/// acknowledgment in `run_jobs`. Verification, inspection, and job reads need none.
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let (report, json, title) = match cli.command {
         Command::Init {
@@ -205,11 +293,123 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 "Verified local metadata snapshot (not a full backup):",
             ),
         },
+        Command::Jobs { command } => return run_jobs(command),
     };
     print_report(&report, title, json)
 }
 
-/// Write a verified metadata, migration, or snapshot report and flush the output.
+/// Execute one persisted snapshot-job request and print its saved result.
+///
+/// # Arguments
+///
+/// * `command` — owned `JobCommand` selecting the action and its checked arguments.
+///
+/// # Returns
+///
+/// `Result<(), Box<dyn Error>>` after flushing the report. List and recovery use
+/// a `jobs` array inside an object so text and JSON modes both show their results.
+///
+/// # Errors
+///
+/// Requires acknowledgment before any storage call for writes. Propagates storage,
+/// serialization, and output failures. A run whose persisted outcome is `Failed`
+/// prints that record and then returns an error, giving scripts a nonzero exit.
+fn run_jobs(command: JobCommand) -> Result<(), Box<dyn Error>> {
+    let (report, json, title) = match command {
+        JobCommand::EnqueueSnapshot {
+            metadata_root,
+            output,
+            development,
+            json,
+        } => {
+            acknowledge_job_write(development)?;
+            (
+                serde_json::to_value(enqueue_snapshot_job(&metadata_root, &output)?)?,
+                json,
+                "Persisted queued snapshot job:",
+            )
+        }
+        JobCommand::Run {
+            metadata_root,
+            job_id,
+            development,
+            json,
+        } => {
+            acknowledge_job_write(development)?;
+            let job = run_snapshot_job(&metadata_root, job_id)?;
+            let failed = job.state == JobState::Failed;
+            let value = serde_json::to_value(&job)?;
+            print_report(&value, "Persisted snapshot job outcome:", json)?;
+            if failed {
+                return Err(format!(
+                    "snapshot job {} failed: {}",
+                    job.job_id,
+                    job.error.as_deref().unwrap_or("inspect the saved outcome")
+                )
+                .into());
+            }
+            return Ok(());
+        }
+        JobCommand::List {
+            metadata_root,
+            limit,
+            json,
+        } => (
+            serde_json::json!({"jobs": list_jobs(&metadata_root, limit)?}),
+            json,
+            "Persisted local snapshot jobs:",
+        ),
+        JobCommand::Inspect {
+            metadata_root,
+            job_id,
+            json,
+        } => (
+            serde_json::to_value(inspect_job(&metadata_root, job_id)?)?,
+            json,
+            "Persisted local snapshot job:",
+        ),
+        JobCommand::Cancel {
+            metadata_root,
+            job_id,
+            expected_revision,
+            development,
+            json,
+        } => {
+            acknowledge_job_write(development)?;
+            (
+                serde_json::to_value(cancel_job(&metadata_root, job_id, expected_revision)?)?,
+                json,
+                "Persisted canceled snapshot job:",
+            )
+        }
+        JobCommand::Recover {
+            metadata_root,
+            development,
+            json,
+        } => {
+            acknowledge_job_write(development)?;
+            (
+                serde_json::json!({"jobs": recover_jobs(&metadata_root)?}),
+                json,
+                "Recovered interrupted local snapshot jobs:",
+            )
+        }
+    };
+    print_report(&report, title, json)
+}
+
+/// Check the explicit acknowledgment before a job command can write to storage.
+///
+/// `development` is the parsed `bool` flag. Returns `Result<(), Box<dyn Error>>`;
+/// false returns an explanatory error before opening a root or creating output.
+fn acknowledge_job_write(development: bool) -> Result<(), Box<dyn Error>> {
+    if !development {
+        return Err("snapshot job writes are a development preview; use --development to acknowledge local persistence and offline execution".into());
+    }
+    Ok(())
+}
+
+/// Write a metadata, migration, snapshot, or persisted-job report and flush output.
 ///
 /// # Arguments
 ///
