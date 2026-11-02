@@ -44,7 +44,7 @@ pub(super) use changes::pull_job_changes;
 pub(super) use history::job_history;
 pub(super) use jobs::{
     cancel_job, enqueue_snapshot_job, inspect_job, list_jobs, list_jobs_in_state, recover_jobs,
-    run_snapshot_job,
+    run_next_snapshot_job, run_snapshot_job,
 };
 pub(super) use migration::migrate;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};

@@ -4,6 +4,8 @@
 //! process exits. Each accepted status change updates the job, its full change
 //! projection, and the global change position in one short SQLite transaction.
 //! History is replayed through JobLifecycle before a stored status is trusted.
+//! Selecting the next queued request uses durable acceptance order under that same
+//! exclusive lock, so competing runners cannot claim the same request.
 //! Repeating a completed run after a lost reply returns its recorded outcome;
 //! it does not copy again or claim that the artifact is still healthy today.
 //!
@@ -93,6 +95,33 @@ pub(crate) fn run_snapshot_job(root: &Path, job_id: JobId) -> Result<SnapshotJob
     run_with_hook(root, job_id, |_| Ok(()))
 }
 
+/// Run at most one queued request, choosing the oldest durable acceptance first.
+///
+/// `root: &Path` selects existing schema-3 metadata. Returns
+/// `Result<Option<SnapshotJob>>`: `None` means the checked queue is empty;
+/// `Some` contains one completed or failed outcome, which the caller must inspect.
+/// Selection and execution retain the same exclusive lock, without reopening a
+/// gap in which another runner could claim the selected request. Terminal jobs
+/// are skipped; this does not poll, drain the queue, retry, or recover implicitly.
+pub(crate) fn run_next_snapshot_job(root: &Path) -> Result<Option<SnapshotJob>> {
+    let writer = open_writer(root, false)?;
+    let id: Option<Vec<u8>> = writer
+        .source
+        .connection
+        .query_row(
+            "SELECT job_id FROM jobs WHERE state='queued' ORDER BY created_seq ASC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else {
+        finish_writer(writer)?;
+        return Ok(None);
+    };
+    let (job, lifecycle) = load_job(&writer.source.connection, parse_id(&id)?)?;
+    run_loaded(writer, job, lifecycle, |_| Ok(())).map(Some)
+}
+
 /// Execute the actual run with private milestone injection for crash tests.
 ///
 /// `root` and `job_id` select the request; `milestone` observes `RunStep` values
@@ -101,10 +130,25 @@ pub(crate) fn run_snapshot_job(root: &Path, job_id: JobId) -> Result<SnapshotJob
 fn run_with_hook(
     root: &Path,
     job_id: JobId,
+    milestone: impl FnMut(RunStep) -> Result<()>,
+) -> Result<SnapshotJob> {
+    let writer = open_writer(root, false)?;
+    let (job, lifecycle) = load_job(&writer.source.connection, job_id)?;
+    run_loaded(writer, job, lifecycle, milestone)
+}
+
+/// Execute already checked work while retaining the lock used to select it.
+///
+/// `writer: Writer` owns exclusive maintenance access, `job: SnapshotJob` and
+/// `lifecycle: JobLifecycle` are its checked saved state, and `milestone` observes
+/// private crash-test boundaries. Returns `Result<SnapshotJob>` after the normal
+/// verified outcome/failure path. No write transaction spans the copy itself.
+fn run_loaded(
+    mut writer: Writer,
+    mut job: SnapshotJob,
+    mut lifecycle: JobLifecycle,
     mut milestone: impl FnMut(RunStep) -> Result<()>,
 ) -> Result<SnapshotJob> {
-    let mut writer = open_writer(root, false)?;
-    let (mut job, mut lifecycle) = load_job(&writer.source.connection, job_id)?;
     if job.state == JobState::Completed {
         finish_writer(writer)?;
         return Ok(job);

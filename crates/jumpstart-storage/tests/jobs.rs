@@ -376,6 +376,10 @@ mod filesystem {
         ));
         assert!(matches!(list_jobs(&root, 10), Err(StorageError::InUse)));
         assert!(matches!(
+            jumpstart_storage::run_next_snapshot_job(&root),
+            Err(StorageError::InUse)
+        ));
+        assert!(matches!(
             list_jobs_in_state(&root, JobState::Queued, 10),
             Err(StorageError::InUse)
         ));
