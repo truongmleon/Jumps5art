@@ -1,5 +1,7 @@
 # Development
 
+Start with [why the Rust types exist](docs/Development/README.md) when reading these crates. It explains each type's purpose and the problem it addresses, with a worked `JobLifecycle` example and an index of the newer and earlier types. It marks types described from open feature PRs separately from the code available on this branch.
+
 Install [rustup](https://rustup.rs/). The compiler and tools are pinned in `rust-toolchain.toml`, and `Cargo.lock` pins dependencies.
 
 ```sh
@@ -18,7 +20,7 @@ PR descriptions identify implemented behavior, validation, remaining dependencie
 
 ## Metadata development preview
 
-The `jumpstart-server` binary offers local initialization, offline inspection, and verified bootstrap metadata snapshots. It does not start a daemon, pair devices, open a listener or manage a library.
+The `jumpstart-server` binary offers local initialization, offline metadata inspection, verified bootstrap metadata snapshots, and point-in-time filesystem capacity observations. [docs/CLI/README.md](docs/CLI/README.md) lists each command, its arguments, and the report it prints. The binary does not start a daemon, pair devices, open a listener, or manage a library.
 
 On Linux or macOS, select a new child path of an existing scratch directory:
 
@@ -48,8 +50,19 @@ Reports explicitly identify the scope as `bootstrap_metadata`. They include the 
 
 This bundle captures the current bootstrap bookkeeping only. It excludes media/object contents, Worlds data and backups, secrets and keys, logs, server settings, and device-only or unsynchronized work. It is not a restorable metadata root, a complete server backup, or an implemented recovery/migration workflow. Keeping the snapshot on the source's physical disk does not protect either copy against that disk failing. The full backup requirements and independent-storage recovery gates in [Technical Design.md](<Technical Design.md>) remain separate work.
 
-## Versioned metadata preview
+## Storage capacity observations
 
-New roots use schema 2, which stores a nonnegative change high-water mark for future mutation bookkeeping. Existing schema 1 roots remain readable and can still be snapshotted without modification. Each supported schema is checked against its exact table definitions and sequential migration checksums. Snapshots independently compare the captured position with their copied database.
+On Linux or macOS, observe the filesystem containing an existing directory, for example before planning a large import. The positional path identifies an ordinary directory; it does not need to be a Jumpstart metadata root:
 
-This prerequisite does not silently upgrade an existing root or implement a change-feed service. The explicit recoverable upgrade is supplied by the dependent migration PR; production durability and full-server recovery remain separate gates.
+```sh
+cargo run -p jumpstart-server -- storage inspect .
+cargo run -p jumpstart-server -- storage inspect . --json
+```
+
+This read-only command needs no `--development` acknowledgment and creates no metadata. It refuses missing paths, regular files, and a final directory symlink. Other platforms, including Windows, return an explicit unsupported-platform error. The separate `inspect --metadata-root ...` command continues to verify offline metadata identity and format.
+
+The text heading identifies a **Storage capacity observation (not disk health or write approval)**. JSON reports use `scope: "capacity_only"`, a canonical directory path, and decimal strings for `total_bytes`, `free_bytes`, and `available_bytes`. The nested assessment reports warning and safety-reserve thresholds, available bytes above the reserve, and whether this observation crosses either threshold.
+
+The default warning threshold is 10% of total capacity, rounded up to a whole byte; for filesystems of at least 50 GiB it is also at least 5 GiB. The safety reserve is the smaller of 256 MiB and 1% of total capacity, rounded down. This reserve marks space that future write admission should leave for recording failures, shutting down safely, and preserving recovery state as ordinary imports fill a volume.
+
+These values are a point-in-time filesystem observation and may change immediately. The assessment does not reserve space or enforce admission. It provides no SMART or disk-health diagnosis, encryption check, registered-volume identity verification, quota or permission approval, or assurance that a write will succeed. Those storage qualification and reservation requirements remain separate work.

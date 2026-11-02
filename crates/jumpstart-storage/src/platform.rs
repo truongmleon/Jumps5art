@@ -45,11 +45,14 @@ const WATERMARK_MIGRATION_NAME: &str = "change_watermark";
 const WATERMARK_MIGRATION: &str = "ALTER TABLE server_state ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0 CHECK (change_seq >= 0)";
 const MARKER_LIMIT: u64 = 64 * 1024;
 
-/// An offline metadata database kept verified and locked for the caller's work.
+/// Keeps a checked source database and the resources protecting its read together.
 ///
-/// Holding this value keeps the shared maintenance lock alive while a snapshot
-/// reads the same checked connection. Cooperating writers must take the exclusive
-/// lock before opening a writable connection.
+/// A snapshot must copy the source it checked. Returning only an identity report
+/// and closing the source would release its lock before copying, allowing a
+/// cooperating writer to change it. Holding this value retains both the checked
+/// connection and shared maintenance lock through capture. They are released when
+/// the value is dropped. Writers must take the exclusive lock before opening a
+/// writable connection; this guard coordinates with those cooperating writers.
 struct VerifiedMetadata {
     /// Checked source identity, versions, and canonical root path.
     report: MetadataReport,
