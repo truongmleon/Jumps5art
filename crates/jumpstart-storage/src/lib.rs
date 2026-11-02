@@ -43,12 +43,14 @@ pub use capacity::{
 };
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
 pub const FORMAT_FILE: &str = "format.json";
 pub const LOCK_FILE: &str = "metadata.lock";
 pub const DATABASE_DIRECTORY: &str = "database";
 pub const DATABASE_FILE: &str = "jumpstart.sqlite";
+/// Journal retained until an explicit metadata upgrade finishes durably.
+pub const MIGRATION_FILE: &str = "migration.json";
 /// Current version of the separate bootstrap metadata snapshot format.
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 /// JSON manifest naming a verified local metadata snapshot's contents.
@@ -75,6 +77,11 @@ pub struct MetadataReport {
     pub format_version: u32,
     /// Verified SQLite schema version.
     pub schema_version: u32,
+    /// Stored change high-water mark, unavailable in schema 1 and initially zero in 2.
+    ///
+    /// Schema 2 records this value explicitly so a future change feed can capture
+    /// its actual position. No application mutations or change feed are added here.
+    pub change_seq: Option<Counter>,
     /// Persistent SQLite header mode, not the inspection connection's mode.
     pub journal_mode: String,
     /// Successful SQLite integrity-check result, currently `"ok"`.
@@ -122,10 +129,10 @@ pub struct SnapshotReport {
     pub format_version: u32,
     /// Source SQLite schema version, checked again inside the copy.
     pub schema_version: u32,
-    /// Captured change sequence, unavailable (`None`) in the bootstrap schema.
+    /// Captured stored change position, unavailable (`None`) in schema 1.
     ///
-    /// Schema 1 has no stored change sequence. This snapshot cannot be used as a
-    /// synchronization starting point; a later schema must capture its real value.
+    /// Schema 2 captures the actual database value, initially zero. No change-feed
+    /// service or synchronization starting-point workflow is implemented yet.
     pub change_seq: Option<Counter>,
     /// Exact byte length of the standalone SQLite artifact.
     pub database_bytes: Counter,

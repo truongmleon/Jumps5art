@@ -3,8 +3,9 @@
 //! a small manifest records its identity, schema, size, and hash before publication.
 //!
 //! This offline development tool preserves the current two-table metadata schema.
-//! Its bundle contains no media, Worlds state, secrets, or synchronization watermark,
-//! so it is a local metadata snapshot rather than a complete Jumpstart backup.
+//! Its bundle contains no media, Worlds state, or secrets. Schema 1 has no change
+//! watermark; schema 2 captures its stored value. This remains a local bootstrap
+//! metadata snapshot rather than a complete Jumpstart backup.
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
@@ -21,8 +22,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    destination, io, open_directory, open_regular, open_verified_metadata, readonly_uri,
-    reject_existing, require_directory, sync_directory, verify_database,
+    VerifiedMetadata, destination, io, open_directory, open_regular, open_verified_metadata,
+    read_change_seq, readonly_uri, reject_existing, require_directory, sync_directory,
+    verify_database,
 };
 use crate::{
     FORMAT_VERSION, FormatMarker, Result, SCHEMA_VERSION, SNAPSHOT_DATABASE_FILE,
@@ -30,7 +32,6 @@ use crate::{
 };
 
 const MANIFEST_LIMIT: u64 = 64 * 1024;
-const BOOTSTRAP_SCHEMA_VERSION: u32 = 1;
 const COPY_TIMEOUT: Duration = Duration::from_secs(60);
 const COPY_PAGES_PER_STEP: i32 = 128;
 const COPY_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -63,7 +64,8 @@ struct SnapshotManifest {
 /// Require the watermark field to be present even though bootstrap uses JSON null.
 ///
 /// `deserializer: D` supplies the explicit field value through `Deserializer<'de>`.
-/// Returns `Result<Option<Counter>, D::Error>`; later scope validation rejects `Some`.
+/// Returns `Result<Option<Counter>, D::Error>`; schema-specific checks distinguish
+/// absent storage in schema 1 from the actual stored counter in schema 2.
 /// Using this field callback prevents Serde from treating a missing field as `None`.
 fn deserialize_change_seq<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -88,11 +90,26 @@ pub(crate) fn create_snapshot(root: &Path, output: &Path) -> Result<SnapshotRepo
     // Keep the whole guard, including its source connection and shared lock, alive
     // through publication. An inspect-then-reopen sequence would lose that protection.
     let source = open_verified_metadata(root)?;
-    if source.report.schema_version != BOOTSTRAP_SCHEMA_VERSION {
-        return Err(StorageError::SnapshotUnavailable(
-            "snapshot creation supports only bootstrap metadata schema 1",
-        ));
-    }
+    create_snapshot_from_verified(&source, output)
+}
+
+/// Capture a checked source while retaining its existing shared or exclusive lock.
+///
+/// # Arguments
+/// * `source` — `&VerifiedMetadata` owned by inspection or the migration workflow.
+/// * `output` — new snapshot-directory `&Path` outside the source root.
+///
+/// # Returns
+/// `Result<SnapshotReport>` after the copied database and saved manifest agree.
+///
+/// # Errors
+/// Propagates the same path, copy, verification, and publication failures as
+/// `create_snapshot`. It never acquires another lock, so migration can retain its
+/// exclusive source lock without downgrading it while creating its safety copy.
+pub(super) fn create_snapshot_from_verified(
+    source: &VerifiedMetadata,
+    output: &Path,
+) -> Result<SnapshotReport> {
     let (parent, name) = destination(output)?;
     let final_root = parent.join(&name);
     if final_root.starts_with(&source.report.root) {
@@ -125,7 +142,7 @@ pub(crate) fn create_snapshot(root: &Path, output: &Path) -> Result<SnapshotRepo
             sync_epoch: source.marker.sync_epoch,
             format_version: source.marker.format_version,
             schema_version: source.marker.schema_version,
-            change_seq: None,
+            change_seq: read_change_seq(&source.connection, source.marker.schema_version)?,
             database_bytes,
             database_hash,
         };
@@ -181,7 +198,7 @@ pub(crate) fn create_snapshot(root: &Path, output: &Path) -> Result<SnapshotRepo
 ///
 /// # Errors
 /// Rejects extra entries (including journals), symlinks, unsupported formats,
-/// invented bootstrap watermarks, mismatched hashes/sizes, and invalid SQLite state.
+/// incorrect/missing watermarks, mismatched hashes/sizes, and invalid SQLite state.
 pub(crate) fn verify_snapshot(root: &Path) -> Result<SnapshotReport> {
     require_directory(root)?;
     let root =
@@ -212,6 +229,11 @@ pub(crate) fn verify_snapshot(root: &Path) -> Result<SnapshotReport> {
         sync_epoch: manifest.sync_epoch,
     };
     verify_database(&connection, &marker)?;
+    if read_change_seq(&connection, marker.schema_version)? != manifest.change_seq {
+        return Err(StorageError::InvalidSnapshot(
+            "snapshot change sequence does not match its database",
+        ));
+    }
     connection
         .close()
         .map_err(|(_, error)| StorageError::Database(error))?;
@@ -282,8 +304,9 @@ fn read_manifest(path: &Path) -> Result<SnapshotManifest> {
 /// Enforce the artifact format and the deliberately limited bootstrap scope.
 ///
 /// `manifest: &SnapshotManifest` supplies the declared versions and metadata.
-/// Returns `Result<()>` or an unsupported/invalid-snapshot error. Schema 1 has
-/// no change sequence, so even a declared zero watermark is rejected.
+/// Returns `Result<()>` or an unsupported/invalid-snapshot error. Schema 1 requires
+/// an explicit null watermark; schema 2 requires an actual counter whose value
+/// the standalone verifier also compares with the copied database.
 fn validate_manifest(manifest: &SnapshotManifest) -> Result<()> {
     if manifest.snapshot_format_version != SNAPSHOT_FORMAT_VERSION {
         return Err(StorageError::UnsupportedSnapshotFormat {
@@ -297,19 +320,19 @@ fn validate_manifest(manifest: &SnapshotManifest) -> Result<()> {
             supported: FORMAT_VERSION,
         });
     }
-    if manifest.schema_version != SCHEMA_VERSION {
+    if !matches!(manifest.schema_version, 1 | 2) {
         return Err(StorageError::UnsupportedSchema {
             found: manifest.schema_version.into(),
             supported: SCHEMA_VERSION,
         });
     }
     if !matches!(&manifest.scope, SnapshotScope::BootstrapMetadata)
-        || manifest.schema_version != BOOTSTRAP_SCHEMA_VERSION
-        || manifest.change_seq.is_some()
+        || (manifest.schema_version == 1 && manifest.change_seq.is_some())
+        || (manifest.schema_version == 2 && manifest.change_seq.is_none())
         || manifest.database_bytes.value() == 0
     {
         return Err(StorageError::InvalidSnapshot(
-            "bootstrap snapshots require schema 1, nonempty database bytes, and no change watermark",
+            "bootstrap snapshots require nonempty database bytes and a schema-appropriate change watermark",
         ));
     }
     Ok(())

@@ -28,6 +28,8 @@ use jumpstart_storage::{
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+mod support;
+
 /// Create a temporary parent and initialize a fresh metadata root for a test.
 ///
 /// # Returns
@@ -175,7 +177,8 @@ fn initialized_metadata_reopens_with_same_identity_and_verified_schema() {
     let reopened = inspect(&root).expect("offline reopen");
     assert_eq!(initial, reopened);
     assert_eq!(reopened.format_version, 1);
-    assert_eq!(reopened.schema_version, 1);
+    assert_eq!(reopened.schema_version, 2);
+    assert_eq!(reopened.change_seq.map(|value| value.value()), Some(0));
     assert_eq!(reopened.journal_mode, "wal");
     assert_eq!(reopened.integrity_check, "ok");
     assert_eq!(
@@ -194,6 +197,74 @@ fn initialized_metadata_reopens_with_same_identity_and_verified_schema() {
             & 0o777,
         0o600
     );
+}
+
+/// Read original-schema files without upgrading them or inventing a stored sequence.
+#[test]
+fn original_schema1_remains_readable_without_mutation() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("original-metadata");
+    let original = support::create_schema1(&root);
+    let before = fingerprint(&root);
+    let inspected = inspect(&root).unwrap();
+    assert_eq!(inspected, original);
+    assert_eq!(inspected.schema_version, 1);
+    assert_eq!(inspected.change_seq, None);
+    assert_eq!(fingerprint(&root), before);
+}
+
+/// Preserve the actual schema-2 high-water mark, including the maximum exact counter.
+#[test]
+fn schema2_inspection_reads_the_stored_change_sequence() {
+    let (_parent, root, _) = fixture();
+    for sequence in [42, i64::MAX] {
+        change_database(
+            &root,
+            &format!("UPDATE server_state SET change_seq = {sequence}"),
+        );
+        let before = fingerprint(&root);
+        assert_eq!(
+            inspect(&root)
+                .unwrap()
+                .change_seq
+                .map(|value| value.value()),
+            Some(sequence as u64)
+        );
+        assert_eq!(fingerprint(&root), before);
+    }
+}
+
+/// Refuse missing, altered, or extra migration records even when the table is intact.
+#[test]
+fn schema2_requires_both_exact_sequential_migration_records() {
+    for sql in [
+        "DELETE FROM schema_migrations WHERE version = 1",
+        "DELETE FROM schema_migrations WHERE version = 2",
+        "UPDATE schema_migrations SET name = 'another-change' WHERE version = 2",
+        "INSERT INTO schema_migrations VALUES (3, 'extra', 'unexpected', 'now')",
+    ] {
+        let (_parent, root, _) = fixture();
+        change_database(&root, sql);
+        let before = fingerprint(&root);
+        assert!(matches!(
+            inspect(&root),
+            Err(StorageError::MigrationMismatch)
+        ));
+        assert_eq!(fingerprint(&root), before);
+    }
+}
+
+/// Leave mismatched marker/database versions untouched for explicit recovery.
+#[test]
+fn supported_but_disagreeing_schema_versions_are_rejected_without_repair() {
+    let (_parent, root, _) = fixture();
+    change_marker(&root, |marker| marker["schema_version"] = 1.into());
+    let before = fingerprint(&root);
+    assert!(matches!(
+        inspect(&root),
+        Err(StorageError::MigrationMismatch)
+    ));
+    assert_eq!(fingerprint(&root), before);
 }
 
 /// Verify repeated offline inspection preserves the fixture's entry fingerprints,

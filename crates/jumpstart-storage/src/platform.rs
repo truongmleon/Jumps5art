@@ -23,14 +23,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fs2::FileExt;
-use jumpstart_domain::{ServerId, SyncEpoch};
+use jumpstart_domain::{Counter, ServerId, SyncEpoch};
 use rusqlite::{Connection, OpenFlags, params};
 use rustix::fs::{Mode, OFlags, RenameFlags};
 use uuid::Uuid;
 
 use super::{
     APPLICATION_ID, DATABASE_DIRECTORY, DATABASE_FILE, FORMAT_FILE, FORMAT_VERSION, FormatMarker,
-    LOCK_FILE, MetadataReport, Result, SCHEMA_VERSION, StorageError,
+    LOCK_FILE, MIGRATION_FILE, MetadataReport, Result, SCHEMA_VERSION, StorageError,
 };
 
 mod snapshot;
@@ -40,6 +40,9 @@ pub(super) use snapshot::{create_snapshot, verify_snapshot};
 const MIGRATION_NAME: &str = "initial_metadata";
 const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version INTEGER PRIMARY KEY CHECK (version > 0),\n    name TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL\n) STRICT";
 const STATE_TABLE: &str = "CREATE TABLE server_state (\n    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n    format_version INTEGER NOT NULL CHECK (format_version > 0),\n    server_id BLOB NOT NULL CHECK (length(server_id) = 16),\n    sync_epoch BLOB NOT NULL CHECK (length(sync_epoch) = 16)\n) STRICT";
+const STATE_TABLE_V2: &str = "CREATE TABLE server_state (\n    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n    format_version INTEGER NOT NULL CHECK (format_version > 0),\n    server_id BLOB NOT NULL CHECK (length(server_id) = 16),\n    sync_epoch BLOB NOT NULL CHECK (length(sync_epoch) = 16)\n, change_seq INTEGER NOT NULL DEFAULT 0 CHECK (change_seq >= 0)) STRICT";
+const WATERMARK_MIGRATION_NAME: &str = "change_watermark";
+const WATERMARK_MIGRATION: &str = "ALTER TABLE server_state ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0 CHECK (change_seq >= 0)";
 const MARKER_LIMIT: u64 = 64 * 1024;
 
 /// Keeps a checked source database and the resources protecting its read together.
@@ -251,15 +254,16 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     transaction.execute_batch(STATE_TABLE)?;
     transaction.execute(
         "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-        params![SCHEMA_VERSION, MIGRATION_NAME, migration_checksum()],
+        params![1, MIGRATION_NAME, migration_checksum()],
     )?;
     transaction.execute(
         "INSERT INTO server_state (singleton, format_version, server_id, sync_epoch) VALUES (1, ?1, ?2, ?3)",
         params![FORMAT_VERSION, marker.server_id.as_uuid().as_bytes().as_slice(), marker.sync_epoch.as_uuid().as_bytes().as_slice()],
     )?;
     transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
-    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    transaction.pragma_update(None, "user_version", 1)?;
     transaction.commit()?;
+    apply_schema2(&mut connection)?;
     verify_database(&connection, marker)?;
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -323,6 +327,23 @@ pub(super) fn inspect(root: &Path) -> Result<MetadataReport> {
 /// Returns the same path, version, recovery, integrity, I/O, and SQLite failures
 /// as offline inspection. It never opens an active WAL database as immutable.
 fn open_verified_metadata(root: &Path) -> Result<VerifiedMetadata> {
+    let (root, lock) = lock_metadata(root, false)?;
+    verify_locked_metadata(root, lock)
+}
+
+/// Retain a shared diagnostic lock or an exclusive maintenance lock on a root.
+///
+/// # Arguments
+/// * `root` — existing metadata `&Path`; its root, database folder, and lock must exist.
+/// * `exclusive` — `bool` selecting exclusive maintenance instead of shared reading.
+///
+/// # Returns
+/// `Result<(PathBuf, File)>` with the canonical root and the owned locked handle.
+///
+/// # Errors
+/// Refuses invalid paths, an unavailable lock, or failed filesystem operations.
+/// It does not create the lock or inspect/recover an interrupted migration.
+fn lock_metadata(root: &Path, exclusive: bool) -> Result<(PathBuf, File)> {
     require_directory(root)?;
     let root =
         fs::canonicalize(root).map_err(|source| io("resolve metadata root", root, source))?;
@@ -330,13 +351,33 @@ fn open_verified_metadata(root: &Path) -> Result<VerifiedMetadata> {
     require_directory(&database_directory)?;
     let lock_path = root.join(LOCK_FILE);
     let lock = open_regular(&lock_path)?;
-    FileExt::try_lock_shared(&lock).map_err(|source| {
+    let outcome = if exclusive {
+        FileExt::try_lock_exclusive(&lock)
+    } else {
+        FileExt::try_lock_shared(&lock)
+    };
+    outcome.map_err(|source| {
         if source.kind() == std::io::ErrorKind::WouldBlock {
             StorageError::InUse
         } else {
-            io("acquire offline inspection lock", &lock_path, source)
+            io("acquire metadata maintenance lock", &lock_path, source)
         }
     })?;
+    Ok((root, lock))
+}
+
+/// Read the root's bounded format marker and reject unsupported directory/schema versions.
+///
+/// # Arguments
+/// * `root` — `&Path` of an existing root whose caller retains the maintenance lock.
+///
+/// # Returns
+/// `Result<FormatMarker>` containing a supported schema 1 or schema 2 marker.
+///
+/// # Errors
+/// Returns I/O/JSON failures or unsupported versions. Database identity and schema
+/// verification are separate because migration recovery may inspect a pending marker.
+fn read_marker(root: &Path) -> Result<FormatMarker> {
     let marker_path = root.join(FORMAT_FILE);
     let marker_file = open_regular(&marker_path)?;
     if marker_file
@@ -354,12 +395,45 @@ fn open_verified_metadata(root: &Path) -> Result<VerifiedMetadata> {
             supported: FORMAT_VERSION,
         });
     }
-    if marker.schema_version != SCHEMA_VERSION {
+    if !matches!(marker.schema_version, 1 | 2) {
         return Err(StorageError::UnsupportedSchema {
             found: marker.schema_version.into(),
             supported: SCHEMA_VERSION,
         });
     }
+    Ok(marker)
+}
+
+/// Check an offline root using a lock already held by inspection or maintenance.
+///
+/// # Arguments
+/// * `root` — canonical `PathBuf` returned by `lock_metadata`.
+/// * `lock` — owned `File` retaining the shared or exclusive maintenance lock.
+///
+/// # Returns
+/// `Result<VerifiedMetadata>` retaining the same lock and checked read connection.
+///
+/// # Errors
+/// Refuses a migration journal, unsupported marker, pending WAL/rollback journal,
+/// malformed database, or mismatched identity/schema. No files are repaired.
+fn verify_locked_metadata(root: PathBuf, lock: File) -> Result<VerifiedMetadata> {
+    match fs::symlink_metadata(root.join(MIGRATION_FILE)) {
+        Ok(_) => {
+            return Err(StorageError::NeedsRecovery(
+                "metadata migration journal is present; resume the explicit migration before inspection",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(io(
+                "inspect migration journal",
+                &root.join(MIGRATION_FILE),
+                error,
+            ));
+        }
+    }
+    let marker = read_marker(&root)?;
+    let database_directory = root.join(DATABASE_DIRECTORY);
     let database_path = database_directory.join(DATABASE_FILE);
     for extension in ["-wal", "-journal"] {
         let sidecar = database_directory.join(format!("{DATABASE_FILE}{extension}"));
@@ -411,6 +485,7 @@ fn open_verified_metadata(root: &Path) -> Result<VerifiedMetadata> {
             sync_epoch: marker.sync_epoch,
             format_version: marker.format_version,
             schema_version: marker.schema_version,
+            change_seq: read_change_seq(&connection, marker.schema_version)?,
             journal_mode: "wal".to_owned(),
             integrity_check: "ok".to_owned(),
         },
@@ -443,11 +518,14 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
         ));
     }
     let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != i64::from(SCHEMA_VERSION) {
+    if !matches!(version, 1 | 2) {
         return Err(StorageError::UnsupportedSchema {
             found: version,
             supported: SCHEMA_VERSION,
         });
+    }
+    if version != i64::from(marker.schema_version) {
+        return Err(StorageError::MigrationMismatch);
     }
     let checks = connection
         .prepare("PRAGMA integrity_check")?
@@ -470,7 +548,14 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
     }
     for (name, expected) in [
         ("schema_migrations", MIGRATIONS_TABLE),
-        ("server_state", STATE_TABLE),
+        (
+            "server_state",
+            if version == 1 {
+                STATE_TABLE
+            } else {
+                STATE_TABLE_V2
+            },
+        ),
     ] {
         let actual: String = connection.query_row(
             "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
@@ -499,13 +584,15 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    if migrations
-        != [(
-            SCHEMA_VERSION.into(),
-            MIGRATION_NAME.to_owned(),
-            migration_checksum(),
-        )]
-    {
+    let mut expected_migrations = vec![(1, MIGRATION_NAME.to_owned(), migration_checksum())];
+    if version == 2 {
+        expected_migrations.push((
+            2,
+            WATERMARK_MIGRATION_NAME.to_owned(),
+            watermark_migration_checksum(),
+        ));
+    }
+    if migrations != expected_migrations {
         return Err(StorageError::MigrationMismatch);
     }
     let (format_version, server_id, sync_epoch): (i64, Vec<u8>, Vec<u8>) = connection.query_row(
@@ -519,7 +606,85 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
     {
         return Err(StorageError::IdentityMismatch);
     }
+    read_change_seq(connection, marker.schema_version)?;
     Ok(())
+}
+
+/// Read the stored change high-water mark without inventing one for schema 1.
+///
+/// # Arguments
+/// * `connection` — checked `&Connection` containing the selected schema.
+/// * `schema` — `u32` schema version, either 1 or 2.
+///
+/// # Returns
+/// `Result<Option<Counter>>`: `None` for schema 1, or the actual nonnegative value
+/// for schema 2. Zero means that no sequenced mutations have been committed yet.
+///
+/// # Errors
+/// Refuses unsupported versions, missing/invalid values, and failed queries.
+fn read_change_seq(connection: &Connection, schema: u32) -> Result<Option<Counter>> {
+    match schema {
+        1 => Ok(None),
+        2 => {
+            let sequence: i64 = connection.query_row(
+                "SELECT change_seq FROM server_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            let sequence = u64::try_from(sequence)
+                .ok()
+                .and_then(|value| Counter::from_u64(value).ok())
+                .ok_or(StorageError::Integrity("invalid stored change sequence"))?;
+            Ok(Some(sequence))
+        }
+        _ => Err(StorageError::UnsupportedSchema {
+            found: schema.into(),
+            supported: SCHEMA_VERSION,
+        }),
+    }
+}
+
+/// Apply the checksummed schema-2 watermark migration to a verified schema-1 database.
+///
+/// # Arguments
+/// * `connection` — mutable `&mut Connection` held by the exclusive maintenance owner.
+///
+/// # Returns
+/// `Result<()>` after the column, migration record, and SQLite version commit in
+/// one `BEGIN IMMEDIATE` transaction. Existing authority and epoch are unchanged.
+///
+/// # Errors
+/// Refuses a source other than schema 1 and propagates SQL/commit failures. Marker
+/// replacement and recovery journaling belong to the explicit migration workflow.
+fn apply_schema2(connection: &mut Connection) -> Result<()> {
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version != 1 {
+        return Err(StorageError::UnsupportedSchema {
+            found: version,
+            supported: 1,
+        });
+    }
+    transaction.execute_batch(WATERMARK_MIGRATION)?;
+    transaction.execute(
+        "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (2, ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        params![WATERMARK_MIGRATION_NAME, watermark_migration_checksum()],
+    )?;
+    transaction.pragma_update(None, "user_version", 2)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Fingerprint the exact schema-2 SQL and separator saved in its migration record.
+///
+/// # Returns
+/// An owned `String` containing the tagged BLAKE3 checksum of the migration.
+fn watermark_migration_checksum() -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(WATERMARK_MIGRATION.as_bytes());
+    hasher.update(b";\n");
+    format!("b3:{}", hasher.finalize().to_hex())
 }
 
 /// Hash the exact initial schema statements and separators used by this migration.
