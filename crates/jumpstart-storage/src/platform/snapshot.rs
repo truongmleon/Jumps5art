@@ -36,7 +36,7 @@ const COPY_TIMEOUT: Duration = Duration::from_secs(60);
 const COPY_PAGES_PER_STEP: i32 = 128;
 const COPY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
-/// The strict, source-independent description of a published two-file snapshot.
+/// The description saved with a snapshot so a later verifier knows what to check.
 ///
 /// Identity and schema fields describe the captured database. `database_bytes`
 /// and `database_hash` verify its retained bytes. `scope` labels bootstrap data in
