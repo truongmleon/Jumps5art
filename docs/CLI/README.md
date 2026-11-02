@@ -19,11 +19,12 @@ The commands run on Linux and macOS. On Windows they exit with an error that sto
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
 | `snapshot verify` | Checks an existing bundle. The original metadata folder is not required. |
 | `migrate` | Upgrades older metadata after saving a verified recovery copy; see [migration instructions](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade). |
+| `jobs` | Enqueues/runs snapshot requests, reads their status/history/change pages, cancels queued requests, and recovers interrupted work; see [job commands](../../CONTRIBUTING.md#persisted-local-snapshot-jobs). |
 | `storage inspect` | Reports how much space the filesystem has for an existing directory. |
 
-`init`, `migrate`, and `snapshot create` require `--development`. The other commands do not.
+`init`, `migrate`, and `snapshot create` require `--development`. Job enqueue/run/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
 
-A successful command prints its report on stdout and exits successfully. A failure prints `error:` and the reason on stderr, leaves stdout empty, and exits with a failure status. Add `--json` for pretty-printed JSON. Without `--json`, the first line is a heading and the fields follow, indented two spaces per level.
+A successful command prints its report on stdout and exits successfully. A failure prints `error:` and the reason on stderr, leaves stdout empty, and exits with a failure status. A snapshot job that records `Failed` prints that saved outcome before reporting failure. Add `--json` for JSON; `jobs changes` uses compact JSON to preserve its response byte bound, while other commands use pretty-printed JSON. Without `--json`, the first line is a heading and the fields follow, indented two spaces per level.
 
 `--help` and `--version` are handled before a command runs. `snapshot --help` and `storage --help` list the nested commands.
 

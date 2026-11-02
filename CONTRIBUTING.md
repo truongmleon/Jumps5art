@@ -168,6 +168,32 @@ Text mode shows each revision, state, and worker token. A successful run normall
 
 History does not execute work, repair storage, or create a snapshot. It validates the ledger and returns at most 16 entries for this closed runner; unknown jobs and inconsistent records are explicit errors. It is a local per-job explanation, not a device synchronization feed. As with ordinary inspection, uncheckpointed WAL requires explicit job recovery first.
 
+### Read pages of local job changes
+
+History explains one request. `jobs changes` follows saved revisions across requests, using the global change positions committed with each job mutation. For example, a page can show one job being queued, a second being queued, and the first being canceled, without replacing those earlier projections with their latest status.
+
+Read the root's current synchronization epoch and stored change position:
+
+```sh
+cargo run -p jumpstart-server -- inspect --metadata-root /tmp/jumpstart-metadata-demo --json
+```
+
+Then request changes after a position already held, supplying that epoch:
+
+```sh
+cargo run -p jumpstart-server -- jobs changes --metadata-root /tmp/jumpstart-metadata-demo --epoch EPOCH --after POSITION --limit 100 --json
+```
+
+The read-only command needs no development acknowledgment. Use the inspected `change_seq` to look for later local changes from that point. A fresh root permits `--after 0` to read all its retained changes. Keep the server identity, epoch, and position together; an epoch from another history is refused even when the numeric position exists.
+
+Each page contains `server_id`, `sync_epoch`, the requested `after`, continuation `next`, captured `high_water`, `minimum`, and `batches`. Each batch carries its exact `seq`, `payload_version`, and saved `job` projection. Text mode shows a concise sequence/job/revision/state timeline and the same cursor bounds. JSON emits the complete response compactly on one line: its JSON body is bounded to 1 MiB, followed by a newline. The row limit is 1–500, defaulting to 100; the byte budget can return fewer rows.
+
+Continue with the same epoch and the returned `next` as the next `--after`. `next < high_water` means that more pages remain at the captured high-water position. An empty page at that position is a valid result; an unknown epoch or a future position is an error.
+
+`minimum` is the lowest usable `after` cursor, inclusive. Upgrading older metadata preserves its existing change position as the history floor rather than inventing earlier job events. A cursor below that floor requires a new verified metadata-snapshot baseline; blindly advancing an old cursor would omit state the caller never obtained. The command reads changes after an existing baseline and does not construct or apply that baseline itself.
+
+This is local inspection of snapshot-job records. It does not acknowledge device cursors or provide an authenticated synchronization endpoint. Ordinary uncheckpointed WAL still requires explicit job recovery before reading.
+
 ## Storage capacity observations
 
 On Linux or macOS, observe the filesystem containing an existing directory, for example before planning a large import. The positional path identifies an ordinary directory; it does not need to be a Jumpstart metadata root:

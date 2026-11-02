@@ -1483,3 +1483,211 @@ fn storage_inspect_reports_unsupported_platform_without_filesystem_changes() {
     );
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
 }
+
+/// Construct a change-page invocation without executing it or accessing storage.
+///
+/// `root` is the requested metadata `&Path`; `epoch`, `after`, and `limit` are raw
+/// argument `&str` values so tests can exercise parser failures as well as valid
+/// cursors. Returns a `Command` selecting compact JSON and requiring no acknowledgment.
+fn job_changes_command(root: &std::path::Path, epoch: &str, after: &str, limit: &str) -> Command {
+    let mut invocation = command();
+    invocation
+        .args(["jobs", "changes", "--json", "--metadata-root"])
+        .arg(root)
+        .args(["--epoch", epoch, "--after", after, "--limit", limit]);
+    invocation
+}
+
+/// Page interleaved requests using global positions while preserving each saved
+/// projection, including earlier queued values that differ from today's rows.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_changes_paginate_saved_projections_in_json_and_text_without_mutation() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let initial = initialize_source(&root);
+    let epoch = initial["sync_epoch"].as_str().unwrap();
+    let first = enqueue_snapshot(&root, &parent.path().join("first"));
+    let second = enqueue_snapshot(&root, &parent.path().join("second"));
+    let canceled = command()
+        .args([
+            "jobs",
+            "cancel",
+            "--development",
+            "--json",
+            "--expected-revision",
+            "1",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .args(["--job-id", first["job_id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        canceled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&canceled.stderr)
+    );
+    let canceled: Value = serde_json::from_slice(&canceled.stdout).unwrap();
+    let completed = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", second["job_id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let completed: Value = serde_json::from_slice(&completed.stdout).unwrap();
+    let database = root.join("database/jumpstart.sqlite");
+    let database_before = fs::read(&database).unwrap();
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+    let mut pages = Vec::new();
+    for after in ["0", "2", "4", "6"] {
+        let result = job_changes_command(&root, epoch, after, "2")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stderr.is_empty());
+        assert_eq!(result.stdout.last(), Some(&b'\n'));
+        assert_eq!(
+            result.stdout.iter().filter(|byte| **byte == b'\n').count(),
+            1
+        );
+        assert!(result.stdout.len() - 1 <= 1024 * 1024);
+        let page: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(page["server_id"], initial["server_id"]);
+        assert_eq!(page["sync_epoch"], epoch);
+        assert_eq!(page["after"], after);
+        assert_eq!(page["minimum"], "0");
+        assert_eq!(page["high_water"], "6");
+        pages.push(page);
+    }
+    assert_eq!(pages[0]["next"], "2");
+    assert_eq!(pages[1]["next"], "4");
+    assert_eq!(pages[2]["next"], "6");
+    assert_eq!(pages[3]["next"], "6");
+    assert_eq!(pages[3]["batches"], serde_json::json!([]));
+    assert_eq!(pages[0]["batches"][0]["seq"], "1");
+    assert_eq!(pages[0]["batches"][1]["seq"], "2");
+    assert_eq!(pages[0]["batches"][0]["payload_version"], 1);
+    assert_eq!(pages[0]["batches"][0]["job"], first);
+    assert_eq!(pages[0]["batches"][1]["job"], second);
+    assert_eq!(pages[1]["batches"][0]["seq"], "3");
+    assert_eq!(pages[1]["batches"][0]["job"], canceled);
+    assert_eq!(pages[1]["batches"][1]["seq"], "4");
+    assert_eq!(pages[1]["batches"][1]["job"]["state"], "running");
+    assert_eq!(pages[2]["batches"][0]["job"]["state"], "verifying");
+    assert!(pages[2]["batches"][0]["job"]["result"].is_null());
+    assert_eq!(pages[2]["batches"][1]["job"], completed);
+    let text = command()
+        .args(["jobs", "changes", "--metadata-root"])
+        .arg(&root)
+        .args(["--epoch", epoch, "--after", "0", "--limit", "2"])
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.starts_with("Persisted snapshot-job changes:\n"));
+    assert!(text.contains(&format!("  sync_epoch: {epoch}\n")));
+    assert!(text.contains("  after: 0\n"));
+    assert!(text.contains("  next: 2\n"));
+    assert!(text.contains("  high_water: 6\n"));
+    assert!(text.contains("  minimum: 0\n"));
+    assert!(text.contains(first["job_id"].as_str().unwrap()));
+    assert!(text.contains(second["job_id"].as_str().unwrap()));
+    assert!(text.contains("revision 1, queued"));
+    assert!(!text.contains("output_path"));
+    assert_eq!(fs::read(database).unwrap(), database_before);
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+}
+
+/// Wrong histories and future positions must be errors rather than empty success;
+/// missing roots must not create a replacement database or an output artifact.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_changes_refuse_missing_wrong_epoch_and_future_cursors() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let initial = initialize_source(&root);
+    let epoch = initial["sync_epoch"].as_str().unwrap();
+    let wrong = jumpstart_domain::SyncEpoch::new().to_string();
+    let missing = parent.path().join("missing");
+    let database = root.join("database/jumpstart.sqlite");
+    let database_before = fs::read(&database).unwrap();
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+    for (path, supplied_epoch, after) in [
+        (&root, wrong.as_str(), "0"),
+        (&root, epoch, "1"),
+        (&missing, epoch, "0"),
+    ] {
+        let result = job_changes_command(path, supplied_epoch, after, "100")
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(!result.stderr.is_empty());
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("--development"));
+    }
+    assert_eq!(fs::read(database).unwrap(), database_before);
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+    assert!(!missing.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 1);
+}
+
+/// Typed epochs, canonical counters, and list budgets fail during argument parsing
+/// before a missing path can be accessed, on every platform.
+#[test]
+fn job_changes_arguments_reject_invalid_epochs_counters_and_limits() {
+    let parent = TempDir::new().unwrap();
+    let missing = parent.path().join("missing");
+    let valid = "550e8400-e29b-41d4-a716-446655440000";
+    for epoch in [
+        "not-a-uuid",
+        "00000000-0000-0000-0000-000000000000",
+        "019c2039-4c6b-7000-8000-000000000001",
+    ] {
+        let result = job_changes_command(&missing, epoch, "0", "100")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+    }
+    for after in ["-1", "01", "+1", "1.0", "9223372036854775808"] {
+        let result = job_changes_command(&missing, valid, after, "100")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+    }
+    for limit in ["0", "501"] {
+        let result = job_changes_command(&missing, valid, "0", limit)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+    }
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Keep the read-only change command available to the parser while unsupported
+/// storage platforms explicitly refuse it without creating the requested path.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn job_changes_report_unsupported_platform_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let missing = parent.path().join("missing");
+    let result = job_changes_command(&missing, "550e8400-e29b-41d4-a716-446655440000", "0", "100")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("supported only on Linux and macOS"));
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
