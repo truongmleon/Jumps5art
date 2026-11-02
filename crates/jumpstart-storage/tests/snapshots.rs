@@ -183,7 +183,7 @@ fn snapshot_preserves_authority_and_verifies_after_source_is_gone() {
         fs::canonicalize(&output).expect("canonical snapshot")
     );
     assert_eq!(created.snapshot_format_version, SNAPSHOT_FORMAT_VERSION);
-    assert_eq!(created.scope, SnapshotScope::BootstrapMetadata);
+    assert_eq!(created.scope, SnapshotScope::Metadata);
     assert_eq!(created.server_id, initial.server_id);
     assert_eq!(created.sync_epoch, initial.sync_epoch);
     assert_eq!(created.format_version, initial.format_version);
@@ -255,7 +255,9 @@ fn original_schema1_snapshot_still_verifies_after_its_source_is_removed() {
 /// Capture an actual nonzero stored watermark and compare it with the copied database.
 #[test]
 fn schema2_snapshot_preserves_the_actual_stored_change_sequence() {
-    let (parent, source, _) = source_fixture();
+    let parent = tempfile::tempdir().unwrap();
+    let source = parent.path().join("schema-two");
+    support::create_schema2(&source);
     let connection = Connection::open(source.join(DATABASE_DIRECTORY).join(DATABASE_FILE)).unwrap();
     connection
         .execute_batch("UPDATE server_state SET change_seq = 42; PRAGMA wal_checkpoint(TRUNCATE);")
@@ -525,8 +527,10 @@ fn matching_digest_does_not_hide_database_identity_or_schema_tampering() {
                     .expect("add a table resembling SQLite internals");
             }
             "watermark" => {
+                // Keep the empty ledger internally valid so this case reaches
+                // the independent manifest-versus-database position comparison.
                 connection
-                    .execute_batch("UPDATE server_state SET change_seq = 7")
+                    .execute_batch("UPDATE server_state SET change_seq = 7, change_floor = 7")
                     .expect("change the captured high-water mark");
             }
             _ => unreachable!(),

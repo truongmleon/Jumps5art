@@ -161,13 +161,13 @@ fn snapshot_creation_requires_acknowledgment_before_storage_io() {
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("--development"), "{error}");
-    assert!(error.contains("bootstrap metadata"), "{error}");
+    assert!(error.contains("local metadata"), "{error}");
     assert!(output.stdout.is_empty());
     assert!(!missing_parent.exists());
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
-/// Verify creation reports the exact bootstrap scope and preserves authority IDs;
+/// Verify creation reports the exact metadata scope and preserves authority IDs;
 /// readonly verification works after source deletion without rewriting the bundle.
 /// Assertion or fixture failures panic.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -196,7 +196,7 @@ fn snapshot_create_and_verify_report_scope_and_survive_source_removal() {
         String::from_utf8_lossy(&output.stderr)
     );
     let created: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(created["scope"], "bootstrap_metadata");
+    assert_eq!(created["scope"], "metadata");
     assert_eq!(created["snapshot_format_version"], 1);
     assert_eq!(created["server_id"], initial["server_id"]);
     assert_eq!(created["sync_epoch"], initial["sync_epoch"]);
@@ -417,7 +417,7 @@ fn migration_requires_acknowledgment_before_storage_io() {
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
-/// Verify migration of current schema 2 reports a no-op, preserves identity and
+/// Verify migration of current schema 3 reports a no-op, preserves identity and
 /// database bytes, and does not create a recovery artifact. Fixture failures panic.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
@@ -426,7 +426,7 @@ fn migration_of_current_schema_reports_json_noop_without_creating_snapshot() {
     let source = parent.path().join("source");
     let snapshot = parent.path().join("unused-snapshot");
     let initial = initialize_source(&source);
-    assert_eq!(initial["schema_version"], 2);
+    assert_eq!(initial["schema_version"], 3);
     let marker_before = fs::read(source.join("format.json")).unwrap();
     let database_before = fs::read(source.join("database/jumpstart.sqlite")).unwrap();
     let output = command()
@@ -444,8 +444,8 @@ fn migration_of_current_schema_reports_json_noop_without_creating_snapshot() {
     assert!(output.stderr.is_empty());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["metadata"], initial);
-    assert_eq!(report["from_schema_version"], 2);
-    assert_eq!(report["to_schema_version"], 2);
+    assert_eq!(report["from_schema_version"], 3);
+    assert_eq!(report["to_schema_version"], 3);
     assert_eq!(report["backup"], Value::Null);
     assert_eq!(report["resumed"], false);
     assert_eq!(fs::read(source.join("format.json")).unwrap(), marker_before);
@@ -511,8 +511,8 @@ fn migration_noop_text_reports_versions_and_absent_backup() {
     );
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.starts_with("Verified offline development metadata migration:\n"));
-    assert!(text.contains("  from_schema_version: 2\n"));
-    assert!(text.contains("  to_schema_version: 2\n"));
+    assert!(text.contains("  from_schema_version: 3\n"));
+    assert!(text.contains("  to_schema_version: 3\n"));
     assert!(text.contains("  backup: null\n"));
     assert!(text.contains("  resumed: false\n"));
     assert!(!snapshot.exists());

@@ -72,7 +72,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Create or verify bootstrap metadata snapshots without media or Worlds data.
+    /// Create or verify local metadata snapshots without media or Worlds data.
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
@@ -83,7 +83,7 @@ enum Command {
 /// `Verify` owns a bundle path. Both carry a `bool` selecting JSON output.
 #[derive(Subcommand)]
 enum SnapshotCommand {
-    /// Create a local bootstrap metadata snapshot; this is not a full server backup.
+    /// Create a local metadata snapshot; this is not a full server backup.
     Create {
         /// Existing offline, checkpointed metadata root to read without changing.
         #[arg(long)]
@@ -172,7 +172,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             json,
         } => {
             if !development {
-                return Err("metadata migration is a development preview; use --development to acknowledge the schema upgrade and its recovery copy of bootstrap metadata".into());
+                return Err("metadata migration is a development preview; use --development to acknowledge the schema upgrade and its recovery copy of local metadata".into());
             }
             (
                 serde_json::to_value(migrate(&metadata_root, &snapshot_output)?)?,
@@ -188,12 +188,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 json,
             } => {
                 if !development {
-                    return Err("snapshot creation is a development preview; use --development to acknowledge that this copies bootstrap metadata only, not media, Worlds, secrets, or a restorable server backup".into());
+                    return Err("snapshot creation is a development preview; use --development to acknowledge that this copies local metadata only, not media, Worlds, secrets, or a restorable server backup".into());
                 }
                 (
                     serde_json::to_value(create_snapshot(&metadata_root, &output)?)?,
                     json,
-                    "Verified local bootstrap metadata snapshot (not a full backup):",
+                    "Verified local metadata snapshot (not a full backup):",
                 )
             }
             SnapshotCommand::Verify {
@@ -202,7 +202,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             } => (
                 serde_json::to_value(verify_snapshot(&snapshot_root)?)?,
                 json,
-                "Verified local bootstrap metadata snapshot (not a full backup):",
+                "Verified local metadata snapshot (not a full backup):",
             ),
         },
     };
