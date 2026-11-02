@@ -142,7 +142,8 @@ enum JobCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Run one queued snapshot synchronously and retain its verified outcome.
+    /// Run queued work or return its recorded completion without copying again.
+    /// A recorded completion does not verify the artifact's current health.
     Run {
         #[arg(long)]
         metadata_root: PathBuf,

@@ -4,6 +4,8 @@
 //! process exits. Each accepted status change updates the job, its full change
 //! projection, and the global change position in one short SQLite transaction.
 //! History is replayed through JobLifecycle before a stored status is trusted.
+//! Repeating a completed run after a lost reply returns its recorded outcome;
+//! it does not copy again or claim that the artifact is still healthy today.
 //!
 //! This is an offline maintenance preview. A synchronous run retains the root's
 //! exclusive maintenance lock, but never a database write transaction, while
@@ -78,11 +80,14 @@ pub(crate) fn enqueue_snapshot_job(root: &Path, output: &Path) -> Result<Snapsho
     Ok(job)
 }
 
-/// Run one queued request synchronously and persist the accepted outcome.
+/// Run queued work, or return a successful outcome that was already recorded.
 ///
 /// `root` selects schema-3 metadata and `job_id` is its validated `JobId`.
-/// Returns `Result<SnapshotJob>` after a verified completion or recorded failure.
-/// A returned Failed record means work failed; callers must display that outcome.
+/// Returns `Result<SnapshotJob>` after new execution or an unchanged saved
+/// Completed record. Reading that completion neither copies nor verifies the
+/// current output; it lets a caller recover a lost success reply without rerunning.
+/// A new Failed record means work failed and must be displayed. Already-Failed,
+/// Canceled, and active requests cannot start again; interrupted work needs recovery.
 /// Storage/ledger errors can leave an incomplete job for explicit recovery.
 pub(crate) fn run_snapshot_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
     run_with_hook(root, job_id, |_| Ok(()))
@@ -100,9 +105,13 @@ fn run_with_hook(
 ) -> Result<SnapshotJob> {
     let mut writer = open_writer(root, false)?;
     let (mut job, mut lifecycle) = load_job(&writer.source.connection, job_id)?;
+    if job.state == JobState::Completed {
+        finish_writer(writer)?;
+        return Ok(job);
+    }
     if job.state != JobState::Queued {
         return Err(StorageError::InvalidJob(
-            "only queued snapshot jobs can run",
+            "only queued snapshot jobs can start",
         ));
     }
     transition(
@@ -1013,6 +1022,10 @@ mod tests {
                 crate::inspect(&root),
                 Err(StorageError::NeedsRecovery(_))
             ));
+            assert!(matches!(
+                run_snapshot_job(&root, job.job_id),
+                Err(StorageError::NeedsRecovery(_))
+            ));
             let recovered = recover_jobs(&root).unwrap();
             let stored = inspect_job(&root, job.job_id).unwrap();
             assert_eq!(inspect_job(&root, queued.job_id).unwrap(), queued);
@@ -1020,6 +1033,11 @@ mod tests {
                 assert!(recovered.is_empty());
                 assert_eq!(stored.state, JobState::Completed);
                 assert!(stored.result.is_some());
+                let before = crate::inspect(&root).unwrap();
+                let history = crate::job_history(&root, job.job_id).unwrap();
+                assert_eq!(run_snapshot_job(&root, job.job_id).unwrap(), stored);
+                assert_eq!(crate::inspect(&root).unwrap(), before);
+                assert_eq!(crate::job_history(&root, job.job_id).unwrap(), history);
             } else {
                 assert_eq!(recovered.len(), 1);
                 assert_eq!(stored.state, JobState::Failed);

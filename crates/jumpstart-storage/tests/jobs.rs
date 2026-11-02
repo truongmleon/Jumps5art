@@ -3,6 +3,8 @@
 //! A queued request is durable before its copy begins. Its completed status must
 //! follow actual publication and verification, while a failed or canceled request
 //! keeps its earlier data and must never overwrite somebody else's destination.
+//! Repeating a completed run returns the same saved record, including when its
+//! artifact has moved, so a lost success reply does not start a second copy.
 //! These tests exercise SQLite records and real scratch snapshots, not a daemon.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -186,7 +188,7 @@ mod filesystem {
         assert_eq!(verify_snapshot(&output).unwrap(), result);
         assert_eq!(positions(&root), (4, 4));
         assert_eq!(inspect_job(&root, queued.job_id).unwrap(), completed);
-        assert!(run_snapshot_job(&root, queued.job_id).is_err());
+        assert_eq!(run_snapshot_job(&root, queued.job_id).unwrap(), completed);
         assert_eq!(positions(&root), (4, 4));
         assert!(recover_jobs(&root).unwrap().is_empty());
         assert_eq!(inspect_job(&root, queued.job_id).unwrap(), completed);
@@ -217,6 +219,58 @@ mod filesystem {
         );
         assert_eq!(fs::read_dir(output).unwrap().count(), 1);
         assert_eq!(positions(&root), (3, 3));
+        assert!(run_snapshot_job(&root, queued.job_id).is_err());
+        assert_eq!(inspect_job(&root, queued.job_id).unwrap(), failed);
+        assert_eq!(positions(&root), (3, 3));
+    }
+
+    /// Return historical completion after an artifact moves without touching the
+    /// replacement destination, old snapshot bytes, or committed job/change data.
+    #[test]
+    fn repeated_completion_does_not_recopy_or_revalidate_the_recorded_output() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("metadata");
+        let output = parent.path().join("snapshot");
+        let moved = parent.path().join("moved-snapshot");
+        initialize(&root).unwrap();
+        let queued = enqueue_snapshot_job(&root, &output).unwrap();
+        let completed = run_snapshot_job(&root, queued.job_id).unwrap();
+        let recorded_result = completed.result.as_ref().unwrap();
+        let snapshot_database = fs::read(output.join("metadata.sqlite")).unwrap();
+        let snapshot_manifest = fs::read(output.join("snapshot.json")).unwrap();
+        fs::rename(&output, &moved).unwrap();
+        fs::create_dir(&output).unwrap();
+        let sentinel = output.join("keep.txt");
+        fs::write(&sentinel, b"new data at the old destination").unwrap();
+        let before_positions = positions(&root);
+        let database = root.join(DATABASE_DIRECTORY).join(DATABASE_FILE);
+        let metadata_bytes = fs::read(&database).unwrap();
+        let marker_bytes = fs::read(root.join("format.json")).unwrap();
+
+        let repeated = run_snapshot_job(&root, queued.job_id).unwrap();
+
+        assert_eq!(repeated, completed);
+        assert_eq!(positions(&root), before_positions);
+        assert_eq!(fs::read(database).unwrap(), metadata_bytes);
+        assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_bytes);
+        assert_eq!(
+            fs::read(sentinel).unwrap(),
+            b"new data at the old destination"
+        );
+        assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(moved.join("metadata.sqlite")).unwrap(),
+            snapshot_database
+        );
+        assert_eq!(
+            fs::read(moved.join("snapshot.json")).unwrap(),
+            snapshot_manifest
+        );
+        let moved_report = verify_snapshot(&moved).unwrap();
+        assert_eq!(moved_report.database_hash, recorded_result.database_hash);
+        assert_eq!(moved_report.server_id, recorded_result.server_id);
+        assert_ne!(moved_report.root, recorded_result.root);
+        assert_eq!(recorded_result.root, output.canonicalize().unwrap());
     }
 
     /// Canceling a queued request is revision checked and never starts its output.
