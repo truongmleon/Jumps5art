@@ -115,7 +115,7 @@ fn inspecting_missing_storage_does_not_initialize_it() {
     assert!(!root.exists());
 }
 
-/// Initialize a source root through the CLI for a snapshot test.
+/// Initialize a source root through the CLI for a local metadata command test.
 ///
 /// # Arguments
 ///

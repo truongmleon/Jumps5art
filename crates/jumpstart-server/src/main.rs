@@ -56,6 +56,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Upgrade offline metadata, retaining a verified pre-upgrade snapshot.
+    Migrate {
+        /// Existing offline metadata root to upgrade, preserving its server identity.
+        #[arg(long)]
+        metadata_root: PathBuf,
+        /// New directory outside the source for its pre-upgrade snapshot.
+        /// Retrying an interrupted upgrade must supply the same path.
+        /// A clean, current root leaves this path untouched.
+        #[arg(long)]
+        snapshot_output: PathBuf,
+        /// Acknowledge the development preview and limited metadata-only recovery copy.
+        #[arg(long)]
+        development: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Create or verify bootstrap metadata snapshots without media or Worlds data.
     Snapshot {
         #[command(subcommand)]
@@ -141,7 +157,7 @@ fn main() -> ExitCode {
 ///
 /// # Errors
 ///
-/// Refuses initialization or snapshot creation without the development
+/// Refuses initialization, migration, or snapshot creation without the development
 /// acknowledgment before invoking storage. Propagates storage, serialization, or
 /// output errors; an output failure does not undo an already-published root or
 /// snapshot. Verification, metadata inspection, and read-only capacity observation
@@ -171,6 +187,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             json,
             "Verified offline development metadata:",
         ),
+        Command::Migrate {
+            metadata_root,
+            snapshot_output,
+            development,
+            json,
+        } => {
+            if !development {
+                return Err("metadata migration is a development preview; use --development to acknowledge the schema upgrade and its recovery copy of bootstrap metadata".into());
+            }
+            (
+                serde_json::to_value(migrate(&metadata_root, &snapshot_output)?)?,
+                json,
+                "Verified offline development metadata migration:",
+            )
+        }
         Command::Snapshot { command } => match command {
             SnapshotCommand::Create {
                 metadata_root,

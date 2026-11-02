@@ -33,7 +33,9 @@ Initialization refuses every existing target, including an empty directory or sy
 
 Offline inspection takes the existing shared maintenance lock and uses SQLite read-only immutable mode only after ruling out uncheckpointed WAL/rollback-journal data. It creates no files and performs no repair. Future writers must hold the exclusive maintenance lock for their connection lifetime. Active or interrupted writers require separate recovery work, not an inspection fallback.
 
-The explicit `--development` flag acknowledges that encryption checks, volume registration, Linux filesystem qualification, sustained writing, complete server backups, restoration, migrations and power-loss fault injection remain unimplemented. Storage functions return UnsupportedPlatform on Windows; portable domain/protocol tests still run there. Development smoke tests and the bundled SQLite tests do not establish production durability.
+New initialization uses metadata schema 2. Existing schema 1 roots remain inspectable and can still be snapshotted; inspecting them never upgrades them automatically. Schema 2 adds a stored change-sequence high-water mark, initially zero, for future sequenced library changes. It does not add a change feed or durable job execution.
+
+The explicit `--development` flag acknowledges that encryption checks, volume registration, Linux filesystem qualification, sustained writing, complete server backups, restoration, whole-server migration and power-loss qualification remain unimplemented. Storage functions return UnsupportedPlatform on Windows; portable domain/protocol tests still run there. Development smoke tests and the bundled SQLite tests do not establish production durability.
 
 ## Local bootstrap metadata snapshots
 
@@ -46,9 +48,33 @@ cargo run -p jumpstart-server -- snapshot verify --snapshot-root /tmp/jumpstart-
 
 Creation reads the source under its shared maintenance lock and copies its SQLite bookkeeping through SQLite's Online Backup API. The source must be checkpointed, with no active exclusive writer or nonempty WAL/rollback journal. The operation verifies the copied database and manifest before publishing a separate bundle containing only `snapshot.json` and `metadata.sqlite`; an existing output is never replaced. Verification reads the bundle without changing it and does not require the original source or `--development`.
 
-Reports explicitly identify the scope as `bootstrap_metadata`. They include the source server ID and synchronization epoch, metadata/schema versions, database size as a decimal string, and a tagged BLAKE3 digest. Schema 1 reports `change_seq` as `null` because the value is unavailable. Schema 2 captures the actual stored value, initially the decimal string `"0"`. An unavailable position and a stored zero remain distinct.
+Reports explicitly identify the scope as `bootstrap_metadata`. They include the source server ID and synchronization epoch, metadata/schema versions, database size as a decimal string, and a tagged BLAKE3 digest. For schema 1, `change_seq` is `null` because that schema stores no change-feed watermark. For schema 2, it is the captured stored value, initially the decimal string `"0"` because no sequenced library changes have occurred. An unavailable value and an actual stored zero remain distinct.
 
-This bundle captures the current bootstrap bookkeeping only. It excludes media/object contents, Worlds data and backups, secrets and keys, logs, server settings, and device-only or unsynchronized work. It is not a restorable metadata root, a complete server backup, or an implemented recovery/migration workflow. Keeping the snapshot on the source's physical disk does not protect either copy against that disk failing. The full backup requirements and independent-storage recovery gates in [Technical Design.md](<Technical Design.md>) remain separate work.
+This bundle captures the current bootstrap bookkeeping only. It excludes media/object contents, Worlds data and backups, secrets and keys, logs, server settings, and device-only or unsynchronized work. It is not a restorable metadata root, a complete server backup, or an implemented whole-server recovery/migration workflow. The schema upgrade below retains a snapshot for inspection but does not implement restoring that copy. Keeping the snapshot on the source's physical disk does not protect either copy against that disk failing. The full backup requirements and independent-storage recovery gates in [Technical Design.md](<Technical Design.md>) remain separate work.
+
+## Recoverable metadata schema upgrade
+
+An older root should keep its server identity as its database layout evolves. On Linux or macOS, `migrate` upgrades a verified, offline schema 1 root to schema 2 while retaining a verified pre-upgrade snapshot. Select a **new** snapshot directory outside the source root, beneath an existing parent:
+
+```sh
+cargo run -p jumpstart-server -- inspect --metadata-root /tmp/jumpstart-metadata-demo --json
+cargo run -p jumpstart-server -- migrate --metadata-root /tmp/jumpstart-metadata-demo --snapshot-output /tmp/jumpstart-before-schema-2 --development --json
+```
+
+The acknowledgment is checked before filesystem access. The upgrade takes the exclusive maintenance lock, verifies the old root, creates and verifies the snapshot, and records `migration.json` before changing the database. It applies the new schema, migration checksum, and SQLite version in one database transaction. It then checkpoints and closes SQLite, synchronizes the database, replaces `format.json` atomically, verifies the completed root, and removes the journal with directory synchronization. The server ID and synchronization epoch are retained.
+
+The journal is needed because a SQLite transaction and a separate `format.json` replacement cannot commit together. An interruption can leave the database upgraded while the marker still names the older schema. While the journal exists, ordinary inspection and snapshot creation refuse the root; only migration can reconcile that recorded workflow.
+
+`MigrationReport` groups the result so a caller can tell what changed and locate the retained copy:
+
+| Field | What it tells the caller |
+|---|---|
+| `metadata` | The verified metadata root and its identity after completion. |
+| `from_schema_version`, `to_schema_version` | The starting and resulting database layouts. |
+| `backup` | The verified pre-upgrade `SnapshotReport`, or `null` when no upgrade was needed. |
+| `resumed` | Whether this call continued a previously recorded migration journal. |
+
+A clean schema 2 root returns a successful no-op: both versions are 2, `backup` is `null`, and `resumed` is false. It creates no snapshot and leaves an existing snapshot-output path untouched. Supplying `--snapshot-output` is still required by the command so its invocation can also describe a real or resumed upgrade.
 
 ## Storage capacity observations
 
