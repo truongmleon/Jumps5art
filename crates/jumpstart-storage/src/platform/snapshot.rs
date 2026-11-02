@@ -530,6 +530,7 @@ mod tests {
     /// Verify that the checked-source guard holds its shared lock until dropped.
     #[test]
     fn checked_source_guard_keeps_exclusive_writer_blocked_until_drop() {
+        let _isolation = crate::isolate_process_tests();
         let parent = TempDir::new().expect("temporary parent");
         let root = parent.path().join("source");
         initialize(&root).expect("initialize fixture metadata");
@@ -544,6 +545,7 @@ mod tests {
     /// Verify that an expired deadline cannot report a successful SQLite copy.
     #[test]
     fn expired_copy_deadline_fails_and_releases_destination() {
+        let _isolation = crate::isolate_process_tests();
         let source = Connection::open_in_memory().expect("source connection");
         source
             .execute_batch(
