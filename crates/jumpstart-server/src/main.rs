@@ -13,6 +13,8 @@
 //! can inspect what happened after the original command exits. Running one job
 //! performs the existing snapshot operation synchronously; recovery records an
 //! interrupted run as failed rather than assuming that an output file means success.
+//! `storage inspect <folder>` observes filesystem capacity without granting write
+//! approval or diagnosing disk health.
 //! The program accepts these arguments, delegates file/database work to the storage
 //! library, and prints a report or exits with an error.
 //!
@@ -26,8 +28,8 @@ use clap::{Parser, Subcommand};
 use jumpstart_domain::{JobId, JobState, PositiveCounter};
 use jumpstart_storage::{
     SnapshotJob, cancel_job, create_snapshot, enqueue_snapshot_job, initialize, inspect,
-    inspect_job, job_history, list_jobs, list_jobs_in_state, migrate, recover_jobs,
-    run_snapshot_job, verify_snapshot,
+    inspect_capacity, inspect_job, job_history, list_jobs, list_jobs_in_state, migrate,
+    recover_jobs, run_snapshot_job, verify_snapshot,
 };
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
@@ -91,6 +93,11 @@ enum Command {
     Jobs {
         #[command(subcommand)]
         command: JobCommand,
+    },
+    /// Observe existing-directory storage capacity without approving writes.
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
     },
 }
 
@@ -227,6 +234,23 @@ fn parse_job_state(value: &str) -> Result<JobState, String> {
     }
 }
 
+/// Read-only filesystem observations, separate from verifying a metadata root.
+///
+/// `Inspect` owns an existing directory's positional `PathBuf` and a `bool`
+/// selecting JSON output. Its capacity observation checks neither disk health
+/// nor encryption, registered identity, reservations, or write authorization.
+#[derive(Subcommand)]
+enum StorageCommand {
+    /// Observe point-in-time capacity; this is not disk health or write approval.
+    Inspect {
+        /// Existing directory to observe; missing paths, files, and final symlinks fail.
+        path: PathBuf,
+        /// Print the capacity-only report as JSON, with byte counts as decimal strings.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Parse process arguments, execute the command, and report failures to stderr.
 ///
 /// # Returns
@@ -324,6 +348,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 serde_json::to_value(verify_snapshot(&snapshot_root)?)?,
                 json,
                 "Verified local metadata snapshot (not a full backup):",
+            ),
+        },
+        Command::Storage { command } => match command {
+            StorageCommand::Inspect { path, json } => (
+                serde_json::to_value(inspect_capacity(&path)?)?,
+                json,
+                "Storage capacity observation (not disk health or write approval):",
             ),
         },
         Command::Jobs { command } => return run_jobs(command),
