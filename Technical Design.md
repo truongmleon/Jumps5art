@@ -8,7 +8,7 @@
 - Design references checked: October 23, 2026. Exact shipped dependency/tool/model versions are recorded in lockfiles and each release manifest.
 - **Decision** identifies the selected baseline. A **release gate** is evidence required before enabling a capability; it does not claim an implemented or tested prototype.
 
-This document specifies the implementation to build. Implementation proceeds in slices; [CONTRIBUTING.md](CONTRIBUTING.md) lists the commands currently available and their limitations. Example schemas, commands, budgets, and state machines below remain implementation contracts unless that progress documentation identifies them as implemented. Requirements take precedence; changing a selected baseline or relaxing a gate requires an explicit reviewed design change.
+This document specifies the implementation to build. Implementation proceeds in slices; [docs/CLI/README.md](docs/CLI/README.md) lists the commands currently available, and [CONTRIBUTING.md](CONTRIBUTING.md) explains their limitations. Example schemas, commands, budgets, and state machines below remain implementation contracts unless that progress documentation identifies them as implemented. Requirements take precedence; changing a selected baseline or relaxing a gate requires an explicit reviewed design change.
 
 ## 1. Design Goals
 
@@ -1291,7 +1291,7 @@ jumpstart-server update plan|apply|rollback
 jumpstart-server recovery list|inspect|verify|export|plan|apply|reconcile
 ```
 
-This list defines the planned administrative surface. See [CONTRIBUTING.md](CONTRIBUTING.md) for the currently implemented development commands and their limitations. Initialization inventories non-empty locations and never adopts them implicitly. Registering or replacing a volume requires a plan bound to its stable identity and fingerprint. Before serving mutations, startup verifies the format/schema and registered roots, runs publication/job/restore reconciliation, then publishes capability and health state. A missing primary degrades only its items; a missing metadata database enters recovery mode without initializing a replacement.
+This list defines the planned administrative surface. See [docs/CLI/README.md](docs/CLI/README.md) for the currently implemented development commands and [CONTRIBUTING.md](CONTRIBUTING.md) for their limitations. Initialization inventories non-empty locations and never adopts them implicitly. Registering or replacing a volume requires a plan bound to its stable identity and fingerprint. Before serving mutations, startup verifies the format/schema and registered roots, runs publication/job/restore reconciliation, then publishes capability and health state. A missing primary degrades only its items; a missing metadata database enters recovery mode without initializing a replacement.
 
 ### 16.2 Upgrade and Rollback
 
