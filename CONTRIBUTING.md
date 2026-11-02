@@ -12,6 +12,17 @@ cargo test --workspace --locked
 
 `jumpstart-domain` implements validated identities, decimal-string counters, immutable content hashes and app ownership. `jumpstart-protocol` implements the version 1 handshake and bounded JSON framing. Neither opens a network listener. Wire fixtures live under `protocol/v1/`; neither crate claims the application RPC handlers or authenticated transport are implemented.
 
+The protocol crate also checks half-open file read ranges and copies their raw
+bytes from a supplied seekable source. `ReadRange::new` checks the actual resource
+size and the 8 MiB per-range cap before I/O; zero length succeeds through EOF.
+`copy_read_range` seeks to the accepted offset and streams exactly that length
+through a 32 KiB buffer. A short source or failed write stays an error with any
+partial destination retained. The caller owns authorization, immutable placement
+pins, blob verification, cancellation/deadlines, and durable publication. These
+are blocking library primitives; they do not expose a transfer service. See the
+[range implementation](crates/jumpstart-protocol/src/range.rs) and
+[raw-body/control-frame tests](crates/jumpstart-protocol/tests/ranges.rs).
+
 The domain crate also checks job state transitions, fences stale worker results, and bounds automatic retries. For example, a canceled import cannot accept its old worker's late result, and an unavailable provider cannot trigger retries forever. These are in-memory rules for a future scheduler; durable job records, worker execution, timers, and publication still need implementation.
 
 CI runs the Rust checks on Linux, macOS and Windows. These library checks do not qualify the future Linux daemon, native applications or virtual-drive helpers for production.

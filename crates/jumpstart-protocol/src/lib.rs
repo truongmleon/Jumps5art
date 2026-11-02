@@ -10,13 +10,15 @@
 //! handshake code decides whether both sides understand compatible communication rules.
 //!
 //! The current implementation provides functions and tests, without a network
-//! listener. Pairing, app commands, and transferring raw song/photo/video bytes
-//! require additional implementation. Callers must authenticate a connection
-//! before using the regular protocol.
+//! listener. Checked read ranges and a bounded raw-byte copy primitive support
+//! future file-transfer handlers separately from JSON control frames. Pairing,
+//! app commands, authenticated transfer sessions, and publication still require
+//! implementation. Callers must authenticate a connection before regular protocol use.
 
 mod codec;
 mod finite;
 mod handshake;
+mod range;
 
 pub use codec::{
     CodecError, FRAME_PREFIX_BYTES, MAX_FRAME_BYTES, MAX_JSON_DEPTH, decode_body, encode_body,
@@ -26,6 +28,7 @@ pub use handshake::{
     Capability, ErrorCode, HandshakeValidationError, Hello, NegotiationError, ProtocolError,
     ProtocolLimits, ServerHandshake, Welcome, negotiate,
 };
+pub use range::{MAX_READ_RANGE_BYTES, ReadRange, ReadRangeError, copy_read_range};
 
 /// The regular application protocol; pairing uses its own restricted listener.
 pub const APPLICATION_ALPN: &[u8] = b"jumpstart/1";
