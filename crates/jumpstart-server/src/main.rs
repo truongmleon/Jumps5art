@@ -26,7 +26,8 @@ use clap::{Parser, Subcommand};
 use jumpstart_domain::{JobId, JobState, PositiveCounter};
 use jumpstart_storage::{
     SnapshotJob, cancel_job, create_snapshot, enqueue_snapshot_job, initialize, inspect,
-    inspect_job, job_history, list_jobs, migrate, recover_jobs, run_snapshot_job, verify_snapshot,
+    inspect_job, job_history, list_jobs, list_jobs_in_state, migrate, recover_jobs,
+    run_snapshot_job, verify_snapshot,
 };
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
@@ -156,6 +157,9 @@ enum JobCommand {
     List {
         #[arg(long)]
         metadata_root: PathBuf,
+        /// Select this recorded state before applying the result limit.
+        #[arg(long, value_parser = parse_job_state)]
+        state: Option<JobState>,
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
         limit: u16,
         #[arg(long)]
@@ -201,6 +205,25 @@ enum JobCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Parse the local snapshot runner's closed state vocabulary for list filtering.
+///
+/// `value` is a command-line `&str`. Returns `Result<JobState, String>` for queued,
+/// running, verifying, completed, failed, or canceled. Other scheduler states and
+/// misspellings are argument errors before the metadata path is accessed.
+fn parse_job_state(value: &str) -> Result<JobState, String> {
+    match value {
+        "queued" => Ok(JobState::Queued),
+        "running" => Ok(JobState::Running),
+        "verifying" => Ok(JobState::Verifying),
+        "completed" => Ok(JobState::Completed),
+        "failed" => Ok(JobState::Failed),
+        "canceled" => Ok(JobState::Canceled),
+        _ => Err(
+            "state must be queued, running, verifying, completed, failed, or canceled".to_owned(),
+        ),
+    }
 }
 
 /// Parse process arguments, execute the command, and report failures to stderr.
@@ -361,13 +384,20 @@ fn run_jobs(command: JobCommand) -> Result<(), Box<dyn Error>> {
         }
         JobCommand::List {
             metadata_root,
+            state,
             limit,
             json,
-        } => (
-            serde_json::json!({"jobs": list_jobs(&metadata_root, limit)?}),
-            json,
-            "Persisted local snapshot jobs:",
-        ),
+        } => {
+            let jobs = match state {
+                Some(state) => list_jobs_in_state(&metadata_root, state, limit)?,
+                None => list_jobs(&metadata_root, limit)?,
+            };
+            let report = match state {
+                Some(state) => serde_json::json!({"jobs": jobs, "state": state}),
+                None => serde_json::json!({"jobs": jobs}),
+            };
+            (report, json, "Persisted local snapshot jobs:")
+        }
         JobCommand::Inspect {
             metadata_root,
             job_id,

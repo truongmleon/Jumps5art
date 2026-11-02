@@ -213,6 +213,45 @@ pub(crate) fn list_jobs(root: &Path, limit: u16) -> Result<Vec<SnapshotJob>> {
     Ok(jobs)
 }
 
+/// List one recorded state before applying the bounded result limit.
+///
+/// For example, newer completed work must not hide older queued requests when a
+/// caller asks for the first waiting jobs. The state/acceptance index narrows the
+/// SQL selection; each returned record still receives normal history validation.
+///
+/// `root` is schema-3 metadata, `state` is one of this runner's six states, and
+/// `limit` must be `1..=100`. Returns `Result<Vec<SnapshotJob>>` in reverse durable
+/// acceptance order. Invalid states and limits fail before filesystem access.
+pub(crate) fn list_jobs_in_state(
+    root: &Path,
+    state: JobState,
+    limit: u16,
+) -> Result<Vec<SnapshotJob>> {
+    if !(1..=100).contains(&limit) {
+        return Err(StorageError::InvalidJob("job list limit must be 1..=100"));
+    }
+    let state = state_name(state)?;
+    let source = open_verified_metadata(root)?;
+    require_jobs(&source.report)?;
+    let ids = {
+        let mut statement = source
+            .connection
+            .prepare("SELECT job_id FROM jobs WHERE state=?1 ORDER BY created_seq DESC LIMIT ?2")?;
+        let mut rows = statement.query(params![state, i64::from(limit)])?;
+        let mut ids = Vec::with_capacity(usize::from(limit));
+        while let Some(row) = rows.next()? {
+            ids.push(parse_id(&row.get::<_, Vec<u8>>(0)?)?);
+        }
+        ids
+    };
+    let jobs = ids
+        .into_iter()
+        .map(|id| load_job(&source.connection, id).map(|value| value.0))
+        .collect::<Result<Vec<_>>>()?;
+    finish_reader(source)?;
+    Ok(jobs)
+}
+
 /// Cancel an unstarted job using the revision the caller actually observed.
 ///
 /// `root` and `job_id` select the request; `expected_revision` is its

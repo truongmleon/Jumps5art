@@ -41,7 +41,8 @@ mod snapshot;
 
 pub(super) use history::job_history;
 pub(super) use jobs::{
-    cancel_job, enqueue_snapshot_job, inspect_job, list_jobs, recover_jobs, run_snapshot_job,
+    cancel_job, enqueue_snapshot_job, inspect_job, list_jobs, list_jobs_in_state, recover_jobs,
+    run_snapshot_job,
 };
 pub(super) use migration::migrate;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};

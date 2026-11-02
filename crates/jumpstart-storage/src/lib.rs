@@ -455,6 +455,18 @@ pub fn list_jobs(root: &Path, limit: u16) -> Result<Vec<SnapshotJob>> {
     platform::list_jobs(root, limit)
 }
 
+/// Find jobs in one recorded state before limiting the newest matching results.
+///
+/// For example, queued requests remain discoverable when newer completed work
+/// fills an unfiltered page. `root: &Path` selects checkpointed schema-3 metadata,
+/// `state: JobState` is queued/running/verifying/completed/failed/canceled, and
+/// `limit: u16` must be `1..=100`. Returns `Result<Vec<SnapshotJob>>` in reverse
+/// acceptance order without executing work or changing files. Other states and
+/// invalid limits are refused before filesystem access on supported platforms.
+pub fn list_jobs_in_state(root: &Path, state: JobState, limit: u16) -> Result<Vec<SnapshotJob>> {
+    platform::list_jobs_in_state(root, state, limit)
+}
+
 /// Cancel queued work only if the caller observed its current revision.
 ///
 /// `root: &Path` selects offline metadata, `job_id: JobId` selects the request,
@@ -486,8 +498,8 @@ mod platform;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
     use super::{
-        JobId, MetadataReport, MigrationReport, Path, PositiveCounter, Result, SnapshotJob,
-        SnapshotReport, StorageError,
+        JobId, JobState, MetadataReport, MigrationReport, Path, PositiveCounter, Result,
+        SnapshotJob, SnapshotReport, StorageError,
     };
 
     /// Refuse queue writes without touching `root` or `output` (`&Path`).
@@ -517,6 +529,16 @@ mod platform {
     /// Refuse listing `limit: u16` jobs at `root: &Path` without filesystem work.
     /// Returns `Result<Vec<SnapshotJob>>`, always the unsupported-platform error.
     pub fn list_jobs(_root: &Path, _limit: u16) -> Result<Vec<SnapshotJob>> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse filtering `state: JobState` at `root: &Path` without filesystem work.
+    /// `limit: u16` is unused; `Result<Vec<SnapshotJob>>` is always unsupported.
+    pub fn list_jobs_in_state(
+        _root: &Path,
+        _state: JobState,
+        _limit: u16,
+    ) -> Result<Vec<SnapshotJob>> {
         Err(StorageError::UnsupportedPlatform)
     }
 

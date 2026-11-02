@@ -934,6 +934,16 @@ fn job_arguments_reject_invalid_limits_ids_and_zero_revisions() {
         assert_eq!(result.status.code(), Some(2));
         assert!(result.stdout.is_empty());
     }
+    for state in ["paused", "waiting_for_storage", "unknown", "Queued"] {
+        let result = command()
+            .args(["jobs", "list", "--state", state, "--metadata-root"])
+            .arg(&missing)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("state must be"));
+    }
     let invalid_id = command()
         .args([
             "jobs",
@@ -962,6 +972,125 @@ fn job_arguments_reject_invalid_limits_ids_and_zero_revisions() {
         .unwrap();
     assert_eq!(zero.status.code(), Some(2));
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// State filtering must find older queued requests ahead of the result limit,
+/// show the selected state in both formats, and perform no mutation or execution.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_list_state_filter_finds_waiting_work_in_a_mixed_queue() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let oldest_output = parent.path().join("oldest");
+    let oldest = enqueue_snapshot(&root, &oldest_output);
+    let next_output = parent.path().join("next");
+    let next = enqueue_snapshot(&root, &next_output);
+    let completed = enqueue_snapshot(&root, &parent.path().join("completed"));
+    let run = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", completed["job_id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let completed: Value = serde_json::from_slice(&run.stdout).unwrap();
+    let failed_output = parent.path().join("occupied");
+    let failed = enqueue_snapshot(&root, &failed_output);
+    fs::create_dir(&failed_output).unwrap();
+    fs::write(failed_output.join("keep.txt"), b"keep occupied output").unwrap();
+    let run = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", failed["job_id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!run.status.success());
+    let failed: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(completed["state"], "completed");
+    assert_eq!(failed["state"], "failed");
+    let database = root.join("database/jumpstart.sqlite");
+    let database_before = fs::read(&database).unwrap();
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+
+    for (state, expected) in [
+        ("queued", vec![next.clone(), oldest.clone()]),
+        ("completed", vec![completed]),
+        ("failed", vec![failed]),
+        ("running", vec![]),
+        ("verifying", vec![]),
+        ("canceled", vec![]),
+    ] {
+        let listed = command()
+            .args([
+                "jobs",
+                "list",
+                "--json",
+                "--state",
+                state,
+                "--limit",
+                "100",
+                "--metadata-root",
+            ])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+        assert_eq!(report["state"], state);
+        assert_eq!(report["jobs"], serde_json::to_value(expected).unwrap());
+    }
+    let limited = command()
+        .args([
+            "jobs",
+            "list",
+            "--json",
+            "--state",
+            "queued",
+            "--limit",
+            "1",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(limited.status.success());
+    let report: Value = serde_json::from_slice(&limited.stdout).unwrap();
+    assert_eq!(report["jobs"], serde_json::json!([next.clone()]));
+    let text = command()
+        .args([
+            "jobs",
+            "list",
+            "--state",
+            "queued",
+            "--limit",
+            "1",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("  state: queued\n"));
+    assert!(text.contains(next["job_id"].as_str().unwrap()));
+    assert!(!text.contains(oldest["job_id"].as_str().unwrap()));
+    assert_eq!(fs::read(&database).unwrap(), database_before);
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+    assert!(!oldest_output.exists());
+    assert!(!next_output.exists());
+    assert_eq!(
+        fs::read(failed_output.join("keep.txt")).unwrap(),
+        b"keep occupied output"
+    );
 }
 
 /// Read and write actions on missing roots must fail without creating a replacement

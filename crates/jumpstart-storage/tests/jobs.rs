@@ -18,7 +18,7 @@ mod filesystem {
     use jumpstart_storage::{
         DATABASE_DIRECTORY, DATABASE_FILE, LOCK_FILE, MIGRATION_FILE, SnapshotScope, StorageError,
         cancel_job, enqueue_snapshot_job, initialize, inspect, inspect_job, list_jobs,
-        recover_jobs, run_snapshot_job, verify_snapshot,
+        list_jobs_in_state, recover_jobs, run_snapshot_job, verify_snapshot,
     };
     use rusqlite::{Connection, params};
 
@@ -66,6 +66,105 @@ mod filesystem {
         assert_eq!(json["revision"], "1");
         assert_eq!(json["attempt_generation"], "0");
         assert_eq!(json["created_seq"], "1");
+    }
+
+    /// Older queued work must remain discoverable even when newer outcomes occupy
+    /// an unfiltered page. Filtering and listing must preserve all saved data.
+    #[test]
+    fn state_filter_precedes_limit_and_keeps_acceptance_order_without_mutation() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("metadata");
+        initialize(&root).unwrap();
+        let oldest_output = parent.path().join("oldest-queued");
+        let oldest = enqueue_snapshot_job(&root, &oldest_output).unwrap();
+        let next_output = parent.path().join("next-queued");
+        let next = enqueue_snapshot_job(&root, &next_output).unwrap();
+        let completed = enqueue_snapshot_job(&root, &parent.path().join("completed-copy")).unwrap();
+        let completed = run_snapshot_job(&root, completed.job_id).unwrap();
+        let failed_output = parent.path().join("occupied-copy");
+        let failed = enqueue_snapshot_job(&root, &failed_output).unwrap();
+        fs::create_dir(&failed_output).unwrap();
+        fs::write(failed_output.join("keep.txt"), b"keep occupied output").unwrap();
+        let failed = run_snapshot_job(&root, failed.job_id).unwrap();
+        assert_eq!(
+            list_jobs(&root, 2).unwrap(),
+            vec![failed.clone(), completed.clone()]
+        );
+        let database = root.join(DATABASE_DIRECTORY).join(DATABASE_FILE);
+        let database_before = fs::read(&database).unwrap();
+        let marker_before = fs::read(root.join("format.json")).unwrap();
+        let metadata_before = inspect(&root).unwrap();
+
+        assert_eq!(
+            list_jobs_in_state(&root, JobState::Queued, 1).unwrap(),
+            vec![next.clone()]
+        );
+        assert_eq!(
+            list_jobs_in_state(&root, JobState::Queued, 100).unwrap(),
+            vec![next, oldest]
+        );
+        assert_eq!(
+            list_jobs_in_state(&root, JobState::Completed, 1).unwrap(),
+            vec![completed]
+        );
+        assert_eq!(
+            list_jobs_in_state(&root, JobState::Failed, 1).unwrap(),
+            vec![failed]
+        );
+        for state in [JobState::Running, JobState::Verifying, JobState::Canceled] {
+            assert!(list_jobs_in_state(&root, state, 100).unwrap().is_empty());
+        }
+        assert_eq!(fs::read(&database).unwrap(), database_before);
+        assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+        assert_eq!(inspect(&root).unwrap(), metadata_before);
+        assert!(!oldest_output.exists());
+        assert!(!next_output.exists());
+        assert_eq!(
+            fs::read(failed_output.join("keep.txt")).unwrap(),
+            b"keep occupied output"
+        );
+    }
+
+    /// Invalid filters/budgets fail before missing-path access, while valid filters
+    /// retain the explicit old-schema refusal rather than silently creating a queue.
+    #[test]
+    fn invalid_filters_missing_paths_and_old_schemas_are_refused_unchanged() {
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("missing");
+        for state in [
+            JobState::Paused,
+            JobState::WaitingForSource,
+            JobState::WaitingForStorage,
+            JobState::WaitingForInput,
+        ] {
+            assert!(matches!(
+                list_jobs_in_state(&missing, state, 1),
+                Err(StorageError::InvalidJob(_))
+            ));
+        }
+        for limit in [0, 101, u16::MAX] {
+            assert!(matches!(
+                list_jobs_in_state(&missing, JobState::Queued, limit),
+                Err(StorageError::InvalidJob(_))
+            ));
+        }
+        assert!(list_jobs_in_state(&missing, JobState::Queued, 1).is_err());
+        assert!(!missing.exists());
+        let one = parent.path().join("schema-one");
+        let two = parent.path().join("schema-two");
+        super::support::create_schema1(&one);
+        super::support::create_schema2(&two);
+        for (root, schema) in [(&one, 1), (&two, 2)] {
+            let database = root.join(DATABASE_DIRECTORY).join(DATABASE_FILE);
+            let before = fs::read(&database).unwrap();
+            let marker = fs::read(root.join("format.json")).unwrap();
+            assert!(
+                matches!(list_jobs_in_state(root, JobState::Queued, 1), Err(StorageError::JobsUnavailable { found }) if found == schema)
+            );
+            assert_eq!(fs::read(database).unwrap(), before);
+            assert_eq!(fs::read(root.join("format.json")).unwrap(), marker);
+            assert_eq!(inspect(root).unwrap().schema_version, schema);
+        }
     }
 
     /// Complete only after a real snapshot exists and verifies independently.
@@ -223,6 +322,10 @@ mod filesystem {
         ));
         assert!(matches!(list_jobs(&root, 10), Err(StorageError::InUse)));
         assert!(matches!(
+            list_jobs_in_state(&root, JobState::Queued, 10),
+            Err(StorageError::InUse)
+        ));
+        assert!(matches!(
             enqueue_snapshot_job(&root, &parent.path().join("another")),
             Err(StorageError::InUse)
         ));
@@ -272,6 +375,10 @@ mod filesystem {
             Err(StorageError::InvalidJob(_))
         ));
         assert!(matches!(inspect(&root), Err(StorageError::InvalidJob(_))));
+        assert!(matches!(
+            list_jobs_in_state(&root, JobState::Completed, 10),
+            Err(StorageError::InvalidJob(_))
+        ));
         assert!(enqueue_snapshot_job(&root, &parent.path().join("another")).is_err());
         assert!(
             jumpstart_storage::create_snapshot(&root, &parent.path().join("bad-copy")).is_err()
@@ -405,10 +512,10 @@ mod filesystem {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn unsupported_job_operations_do_not_touch_the_filesystem() {
-    use jumpstart_domain::{JobId, PositiveCounter};
+    use jumpstart_domain::{JobId, JobState, PositiveCounter};
     use jumpstart_storage::{
-        StorageError, cancel_job, enqueue_snapshot_job, inspect_job, list_jobs, recover_jobs,
-        run_snapshot_job,
+        StorageError, cancel_job, enqueue_snapshot_job, inspect_job, list_jobs, list_jobs_in_state,
+        recover_jobs, run_snapshot_job,
     };
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("metadata");
@@ -432,6 +539,10 @@ fn unsupported_job_operations_do_not_touch_the_filesystem() {
     ));
     assert!(matches!(
         list_jobs(&root, 10),
+        Err(StorageError::UnsupportedPlatform)
+    ));
+    assert!(matches!(
+        list_jobs_in_state(&root, JobState::Queued, 10),
         Err(StorageError::UnsupportedPlatform)
     ));
     assert!(matches!(
