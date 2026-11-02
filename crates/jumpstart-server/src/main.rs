@@ -25,8 +25,8 @@ use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 use clap::{Parser, Subcommand};
 use jumpstart_domain::{JobId, JobState, PositiveCounter};
 use jumpstart_storage::{
-    cancel_job, create_snapshot, enqueue_snapshot_job, initialize, inspect, inspect_job, list_jobs,
-    migrate, recover_jobs, run_snapshot_job, verify_snapshot,
+    SnapshotJob, cancel_job, create_snapshot, enqueue_snapshot_job, initialize, inspect,
+    inspect_job, job_history, list_jobs, migrate, recover_jobs, run_snapshot_job, verify_snapshot,
 };
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
@@ -163,6 +163,15 @@ enum JobCommand {
     },
     /// Read the saved status and outcome of one snapshot job.
     Inspect {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        #[arg(long)]
+        job_id: JobId,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show saved revisions in order without executing or changing the request.
+    History {
         #[arg(long)]
         metadata_root: PathBuf,
         #[arg(long)]
@@ -368,6 +377,14 @@ fn run_jobs(command: JobCommand) -> Result<(), Box<dyn Error>> {
             json,
             "Persisted local snapshot job:",
         ),
+        JobCommand::History {
+            metadata_root,
+            job_id,
+            json,
+        } => {
+            let history = job_history(&metadata_root, job_id)?;
+            return print_job_history(job_id, &history, json);
+        }
         JobCommand::Cancel {
             metadata_root,
             job_id,
@@ -406,6 +423,43 @@ fn acknowledge_job_write(development: bool) -> Result<(), Box<dyn Error>> {
     if !development {
         return Err("snapshot job writes are a development preview; use --development to acknowledge local persistence and offline execution".into());
     }
+    Ok(())
+}
+
+/// Display the stages behind a job's current row, rather than rerunning its work.
+///
+/// `job_id: JobId` identifies the request, `history: &[SnapshotJob]` holds checked
+/// revisions, and `json: bool` selects full projections instead of a concise text
+/// timeline. Returns `Result<(), Box<dyn Error>>` after flushing stdout; storage
+/// is already read-only, and serialization/write errors are propagated.
+fn print_job_history(
+    job_id: JobId,
+    history: &[SnapshotJob],
+    json: bool,
+) -> Result<(), Box<dyn Error>> {
+    if json {
+        return print_report(
+            &serde_json::json!({"job_id": job_id, "history": history}),
+            "Persisted snapshot job history:",
+            true,
+        );
+    }
+    let mut output = std::io::stdout().lock();
+    writeln!(output, "Snapshot job {job_id} history:")?;
+    writeln!(output, "  revision  state         worker token")?;
+    for job in history {
+        let state = serde_json::to_value(job.state)?;
+        let state = state.as_str().ok_or("invalid serialized job state")?;
+        writeln!(
+            output,
+            "  {:>8}  {state:<12} {}",
+            job.revision, job.attempt_generation
+        )?;
+        if let Some(error) = &job.error {
+            writeln!(output, "    error: {}", serde_json::to_string(error)?)?;
+        }
+    }
+    output.flush()?;
     Ok(())
 }
 

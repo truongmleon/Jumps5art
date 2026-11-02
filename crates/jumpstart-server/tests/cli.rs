@@ -1025,3 +1025,102 @@ fn job_commands_report_unsupported_platform_without_creating_paths() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("supported only on Linux and macOS"));
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
+
+/// Read historical values through fresh processes without repeating the saved work.
+/// JSON keeps full projections; text provides a concise state/revision/token timeline.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_history_explains_completed_work_in_json_and_text_without_mutation() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let queued = enqueue_snapshot(&root, &parent.path().join("snapshot"));
+    let id = queued["job_id"].as_str().unwrap();
+    let run = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let completed: Value = serde_json::from_slice(&run.stdout).unwrap();
+    let database = root.join("database/jumpstart.sqlite");
+    let before = fs::read(&database).unwrap();
+    let history = command()
+        .args(["jobs", "history", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(
+        history.status.success(),
+        "{}",
+        String::from_utf8_lossy(&history.stderr)
+    );
+    let report: Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(report["job_id"], id);
+    let entries = report["history"].as_array().unwrap();
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0], queued);
+    assert_eq!(entries[3], completed);
+    assert!(entries[..3].iter().all(|entry| entry["result"].is_null()));
+    let text = command()
+        .args(["jobs", "history", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.starts_with(&format!("Snapshot job {id} history:\n")));
+    assert!(text.contains("worker token"));
+    for state in ["queued", "running", "verifying", "completed"] {
+        assert!(text.contains(state));
+    }
+    assert_eq!(fs::read(database).unwrap(), before);
+    assert_eq!(inspect_snapshot_job(&root, id), completed);
+}
+
+/// Unknown jobs and missing roots are errors, without an empty success or initialization.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_history_refuses_unknown_or_missing_data_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let missing = parent.path().join("missing");
+    for path in [&root, &missing] {
+        let result = command()
+            .args(["jobs", "history", "--json", "--metadata-root"])
+            .arg(path)
+            .args(["--job-id", "019c2039-4c6b-7000-8000-000000000001"])
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(!result.stderr.is_empty());
+    }
+    assert!(!missing.exists());
+}
+
+/// Keep the history command recognizable while explicitly refusing unsupported storage.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn job_history_reports_unsupported_storage_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("missing");
+    let result = command()
+        .args(["jobs", "history", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", "019c2039-4c6b-7000-8000-000000000001"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("supported only on Linux and macOS"));
+    assert!(!root.exists());
+}

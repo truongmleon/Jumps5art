@@ -135,3 +135,16 @@ cargo run -p jumpstart-server -- jobs recover --metadata-root /tmp/jumpstart-met
 Recovery obtains exclusive access, fences interrupted active attempts, and records them as failed while retaining their artifacts. An existing output file does not prove the original job completed. Queued work remains queued. Create a new request with a new output path when retrying; this preview does not yet link retry requests, automatically restart old work, or delete partial output. If a storage failure prevents saving an outcome, the API returns an error and the job can remain active until explicit recovery succeeds.
 
 List and inspect are read-only and need no acknowledgment. Enqueue, run, cancel, and recover check `--development` before opening storage. Lists are bounded to 1–100 records, defaulting to 50; list and recovery reports contain a `jobs` array. Other platforms return an explicit unsupported error. These are local administrative tools; authenticated app APIs, daemon admission, generic workers, automatic retries/timers, and full-server restore remain separate work.
+
+### Read a job's history
+
+`inspect` shows the latest status. To see the saved values that led to it, use the read-only history command:
+
+```sh
+cargo run -p jumpstart-server -- jobs history --metadata-root /tmp/jumpstart-metadata-demo --job-id JOB_ID
+cargo run -p jumpstart-server -- jobs history --metadata-root /tmp/jumpstart-metadata-demo --job-id JOB_ID --json
+```
+
+Text mode shows each revision, state, and worker token. A successful run normally shows `queued → running → verifying → completed`: revisions `1, 2, 3, 4` and token counters `0, 1, 1, 2`. The token advances at completion to stop accepting that attempt's later reports; it is not a count of workers. Failed runs retain their recorded explanation. JSON includes the complete saved projections in order, rather than filling earlier entries with today's outcome.
+
+History does not execute work, repair storage, or create a snapshot. It validates the ledger and returns at most 16 entries for this closed runner; unknown jobs and inconsistent records are explicit errors. It is a local per-job explanation, not a device synchronization feed. As with ordinary inspection, uncheckpointed WAL requires explicit job recovery first.
