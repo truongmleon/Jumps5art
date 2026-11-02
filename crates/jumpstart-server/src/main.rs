@@ -16,6 +16,7 @@
 //! `storage inspect <folder>` observes filesystem capacity without granting write
 //! approval or diagnosing disk health.
 //! `jobs changes` returns bounded original projections after a saved epoch/position.
+//! `jobs run-next` executes one oldest queued snapshot without selecting an ID.
 //! The program accepts these arguments, delegates file/database work to the storage
 //! library, and prints a report or exits with an error.
 //!
@@ -30,7 +31,8 @@ use jumpstart_domain::{Counter, JobId, JobState, PositiveCounter, SyncEpoch};
 use jumpstart_storage::{
     SnapshotJob, SnapshotJobChangePage, cancel_job, create_snapshot, enqueue_snapshot_job,
     initialize, inspect, inspect_capacity, inspect_job, job_history, list_jobs, list_jobs_in_state,
-    migrate, pull_job_changes, recover_jobs, run_snapshot_job, verify_snapshot,
+    migrate, pull_job_changes, recover_jobs, run_next_snapshot_job, run_snapshot_job,
+    verify_snapshot,
 };
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
@@ -159,6 +161,16 @@ enum JobCommand {
         metadata_root: PathBuf,
         #[arg(long)]
         job_id: JobId,
+        #[arg(long)]
+        development: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run at most one oldest queued request; an empty queue succeeds without work.
+    RunNext {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        /// Acknowledge local execution, even when the checked queue is empty.
         #[arg(long)]
         development: bool,
         #[arg(long)]
@@ -419,16 +431,24 @@ fn run_jobs(command: JobCommand) -> Result<(), Box<dyn Error>> {
         } => {
             acknowledge_job_write(development)?;
             let job = run_snapshot_job(&metadata_root, job_id)?;
-            let failed = job.state == JobState::Failed;
             let value = serde_json::to_value(&job)?;
             print_report(&value, "Persisted snapshot job outcome:", json)?;
-            if failed {
-                return Err(format!(
-                    "snapshot job {} failed: {}",
-                    job.job_id,
-                    job.error.as_deref().unwrap_or("inspect the saved outcome")
-                )
-                .into());
+            return job_result_status(&job);
+        }
+        JobCommand::RunNext {
+            metadata_root,
+            development,
+            json,
+        } => {
+            acknowledge_job_write(development)?;
+            let job = run_next_snapshot_job(&metadata_root)?;
+            print_report(
+                &serde_json::json!({"job": &job}),
+                "Persisted next snapshot job outcome:",
+                json,
+            )?;
+            if let Some(job) = &job {
+                job_result_status(job)?;
             }
             return Ok(());
         }
@@ -503,6 +523,24 @@ fn run_jobs(command: JobCommand) -> Result<(), Box<dyn Error>> {
         }
     };
     print_report(&report, title, json)
+}
+
+/// Give the CLI a nonzero outcome for a saved failure after displaying its record.
+///
+/// `job: &SnapshotJob` is the runner's saved outcome. Returns
+/// `Result<(), Box<dyn Error>>`: `Err` carries the job ID and retained explanation
+/// for Failed work; `Ok(())` preserves the runner's other returned outcome.
+/// The caller prints the record first so scripts can inspect a failed attempt.
+fn job_result_status(job: &SnapshotJob) -> Result<(), Box<dyn Error>> {
+    if job.state == JobState::Failed {
+        return Err(format!(
+            "snapshot job {} failed: {}",
+            job.job_id,
+            job.error.as_deref().unwrap_or("inspect the saved outcome")
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Check the explicit acknowledgment before a job command can write to storage.
