@@ -39,6 +39,18 @@
 #[cfg(test)]
 extern crate self as jumpstart_storage;
 
+/// Isolate lock-lifetime assertions from another test's subprocess creation.
+///
+/// A child can briefly inherit even close-on-exec file descriptors before exec,
+/// retaining a flock after its parent closes the descriptor. Returns a scheduling
+/// guard held for the whole test; no production locking or retry policy changes.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn isolate_process_tests() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GATE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 use std::path::{Path, PathBuf};
 
 use jumpstart_domain::{

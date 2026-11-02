@@ -529,6 +529,7 @@ mod tests {
     /// Check every cross-file interruption boundary and idempotent explicit retry.
     #[test]
     fn interruptions_resume_without_reapplying_the_schema_change() {
+        let _isolation = crate::isolate_process_tests();
         for stopped in [
             MigrationStep::JournalPublished,
             MigrationStep::IntermediateCommitted,
@@ -541,21 +542,26 @@ mod tests {
             let root = temporary.path().join("metadata");
             let backup = temporary.path().join("before-upgrade");
             let before = schema1_fixture::create_schema1(&root);
+            let mut reached = false;
+            let outcome = migrate_with_hook(&root, &backup, |step| {
+                if step == stopped {
+                    reached = true;
+                    Err(StorageError::NeedsRecovery("injected interruption"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(reached, "{stopped:?} was not reached: {outcome:?}");
             assert!(
-                migrate_with_hook(&root, &backup, |step| {
-                    if step == stopped {
-                        Err(StorageError::NeedsRecovery("injected interruption"))
-                    } else {
-                        Ok(())
-                    }
-                })
-                .is_err()
+                matches!(&outcome, Err(StorageError::NeedsRecovery(reason)) if *reason == "injected interruption"),
+                "unexpected result at {stopped:?}: {outcome:?}"
             );
             if stopped != MigrationStep::JournalRemoved {
-                assert!(matches!(
-                    crate::inspect(&root),
-                    Err(StorageError::NeedsRecovery(_))
-                ));
+                let inspection = crate::inspect(&root);
+                assert!(
+                    matches!(&inspection, Err(StorageError::NeedsRecovery(_))),
+                    "inspection after {stopped:?}: {inspection:?}"
+                );
             }
             let resumed = migrate(&root, &backup).unwrap();
             assert_eq!(resumed.metadata.schema_version, SCHEMA_VERSION);
@@ -589,6 +595,7 @@ mod tests {
     /// Recover committed WAL after process exit while the old marker is still present.
     #[test]
     fn process_exit_after_commit_is_recoverable() {
+        let _isolation = crate::isolate_process_tests();
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("metadata");
         let backup = temporary.path().join("before-upgrade");
@@ -627,6 +634,7 @@ mod tests {
     /// Resume each schema-2 boundary without resetting an already captured position.
     #[test]
     fn schema2_interruptions_preserve_the_change_floor() {
+        let _isolation = crate::isolate_process_tests();
         for stopped in [
             MigrationStep::JournalPublished,
             MigrationStep::DatabaseCommitted,
