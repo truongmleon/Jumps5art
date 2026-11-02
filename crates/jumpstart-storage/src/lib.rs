@@ -14,6 +14,11 @@
 //! This development snapshot excludes media, Worlds, and secrets, and is not a
 //! complete server backup or a way to restore an installation.
 //!
+//! `inspect_capacity` observes how much space an existing directory's filesystem
+//! reports as available to ordinary users. For example, it can explain why a
+//! future import should wait for storage. It reports the default warning and
+//! safety-reserve thresholds without registering a volume or accepting writes.
+//!
 //! Initialization publishes a fully verified sibling staging directory using an
 //! atomic no-replace rename. Existing targets, including empty directories, are
 //! never adopted. Failed staging is retained for diagnosis rather than removed.
@@ -30,6 +35,12 @@ use std::path::{Path, PathBuf};
 use jumpstart_domain::{BlobId, Counter, ServerId, SyncEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+mod capacity;
+
+pub use capacity::{
+    CapacityAssessment, CapacityReport, CapacityScope, assess_capacity, inspect_capacity,
+};
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 1;
@@ -177,7 +188,10 @@ pub enum StorageError {
     /// Snapshot creation could not finish within its bounded copy workflow.
     #[error("metadata snapshot could not be completed: {0}")]
     SnapshotUnavailable(&'static str),
-    #[error("metadata storage is currently supported only on Linux and macOS")]
+    /// Filesystem measurements cannot produce a valid bounded capacity report.
+    #[error("storage capacity observation is invalid: {0}")]
+    InvalidCapacity(&'static str),
+    #[error("storage operations are currently supported only on Linux and macOS")]
     UnsupportedPlatform,
 }
 
