@@ -28,6 +28,9 @@
 //! copy remains visible after the CLI exits, and a finished copy has a recorded
 //! outcome. The synchronous runner keeps exclusive offline access while it works;
 //! it is not a daemon, parallel worker pool, or automatic retry scheduler.
+//! `pull_job_changes` reads what changed after a saved position across all these
+//! jobs. Its epoch and history floor prevent a reader from silently skipping
+//! unknown history. This local reader does not establish a device sync service.
 //!
 //! Initialization publishes a fully verified sibling staging directory using an
 //! atomic no-replace rename. Existing targets, including empty directories, are
@@ -85,6 +88,10 @@ pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 pub const SNAPSHOT_MANIFEST_FILE: &str = "snapshot.json";
 /// Standalone SQLite database stored inside a metadata snapshot directory.
 pub const SNAPSHOT_DATABASE_FILE: &str = "metadata.sqlite";
+/// Maximum compact JSON body size of one local saved-job change page (1 MiB).
+pub const MAX_JOB_CHANGE_PAGE_BYTES: usize = 1_048_576;
+/// Maximum number of whole saved-job changes requested in one bounded page.
+pub const MAX_JOB_CHANGE_PAGE_RECORDS: u16 = 500;
 
 /// The answer to "which server bookkeeping root did this operation check?"
 ///
@@ -221,6 +228,55 @@ pub struct SnapshotJob {
     pub error: Option<String>,
 }
 
+/// One committed job change, including the complete job values at that position.
+///
+/// For example, a completed request has separate queued, running, verifying, and
+/// completed records. A reader needs the original values to replay those changes
+/// in order; replacing them with the current job would lose that history. The
+/// storage reader checks the ledger before returning this record. Constructing
+/// or deserializing the value alone does not prove it came from verified storage.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotJobChange {
+    /// Positive global commit position, shared across all local snapshot jobs.
+    pub seq: PositiveCounter,
+    /// Version of the saved job projection, currently 1; not the database schema.
+    pub payload_version: u32,
+    /// Full saved values at this change, including their original result/error.
+    pub job: SnapshotJob,
+}
+
+/// A bounded page for catching up on job changes after a previously saved position.
+///
+/// This lets a local reader continue from `next` without rerunning work or loading
+/// every job's history separately. Apply each whole batch before saving its
+/// position. The epoch identifies the history, and `minimum` detects a cursor
+/// that predates retained records. These records cover only local snapshot jobs;
+/// device authentication, acknowledgments, and a network sync service are separate.
+/// The page limits apply to values returned by the storage reader; deserializing
+/// arbitrary JSON into this report does not validate its cursor or total size.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotJobChangePage {
+    /// Authority whose checked metadata supplied these records.
+    pub server_id: ServerId,
+    /// History identity that must agree with the caller's saved epoch.
+    pub sync_epoch: SyncEpoch,
+    /// Exclusive starting position supplied by the caller.
+    pub after: Counter,
+    /// Last included position, or `after` for an empty page; use for the next pull.
+    pub next: Counter,
+    /// Latest committed position captured under this page's maintenance guard.
+    /// `next < high_water` means this page has more changes to follow.
+    pub high_water: Counter,
+    /// Lowest usable `after` position, inclusive; older cursors need a new baseline.
+    /// A migrated root can start above zero without inventing older job records.
+    pub minimum: Counter,
+    /// Complete original job projections in increasing global commit order.
+    /// Count and compact JSON body are bounded by the published page limits.
+    pub batches: Vec<SnapshotJobChange>,
+}
+
 /// On-disk JSON marker containing the format versions and server identity.
 ///
 /// Its version and identity fields must agree with the SQLite database before
@@ -316,6 +372,22 @@ pub enum StorageError {
     /// Filesystem measurements cannot produce a valid bounded capacity report.
     #[error("storage capacity observation is invalid: {0}")]
     InvalidCapacity(&'static str),
+    /// A local change-page request has an invalid budget or future position.
+    #[error("invalid snapshot-job change cursor: {0}")]
+    InvalidJobChangeCursor(&'static str),
+    /// A position from another history cannot be interpreted against this root.
+    #[error(
+        "snapshot-job history epoch changed: requested {requested}, current {current}; obtain a new baseline before continuing"
+    )]
+    JobChangeEpochMismatch {
+        requested: SyncEpoch,
+        current: SyncEpoch,
+    },
+    /// The requested position predates the root's retained history.
+    #[error(
+        "snapshot-job changes after {after} are unavailable; minimum usable position is {minimum}; obtain a new baseline before continuing"
+    )]
+    JobChangesUnavailable { after: Counter, minimum: Counter },
     #[error("storage operations are currently supported only on Linux and macOS")]
     UnsupportedPlatform,
 }
@@ -495,6 +567,25 @@ pub fn list_jobs_in_state(root: &Path, state: JobState, limit: u16) -> Result<Ve
     platform::list_jobs_in_state(root, state, limit)
 }
 
+/// Read complete saved job changes strictly after a position in the same history.
+///
+/// For example, a local reader that saved position `4` asks for later records and
+/// continues from the returned `next`. `root: &Path` selects checkpointed schema-3
+/// metadata, `epoch: SyncEpoch` must match that root, `after: Counter` must be
+/// between its retained floor and current high-water mark, and `limit: u16` is
+/// `1..=500`. Returns `Result<SnapshotJobChangePage>` with increasing, complete
+/// original projections and at most 1 MiB of compact JSON including the envelope.
+/// It never clamps a stale/future cursor, starts work, repairs files, or advances
+/// a server-side acknowledgment. Busy/recovery and integrity errors remain explicit.
+pub fn pull_job_changes(
+    root: &Path,
+    epoch: SyncEpoch,
+    after: Counter,
+    limit: u16,
+) -> Result<SnapshotJobChangePage> {
+    platform::pull_job_changes(root, epoch, after, limit)
+}
+
 /// Cancel queued work only if the caller observed its current revision.
 ///
 /// `root: &Path` selects offline metadata, `job_id: JobId` selects the request,
@@ -526,8 +617,8 @@ mod platform;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
     use super::{
-        JobId, JobState, MetadataReport, MigrationReport, Path, PositiveCounter, Result,
-        SnapshotJob, SnapshotReport, StorageError,
+        Counter, JobId, JobState, MetadataReport, MigrationReport, Path, PositiveCounter, Result,
+        SnapshotJob, SnapshotJobChangePage, SnapshotReport, StorageError, SyncEpoch,
     };
 
     /// Refuse queue writes without touching `root` or `output` (`&Path`).
@@ -567,6 +658,18 @@ mod platform {
         _state: JobState,
         _limit: u16,
     ) -> Result<Vec<SnapshotJob>> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse change pages at `root: &Path` without filesystem work.
+    /// `epoch: SyncEpoch`, `after: Counter`, and `limit: u16` are unused;
+    /// `Result<SnapshotJobChangePage>` always contains the unsupported error.
+    pub fn pull_job_changes(
+        _root: &Path,
+        _epoch: SyncEpoch,
+        _after: Counter,
+        _limit: u16,
+    ) -> Result<SnapshotJobChangePage> {
         Err(StorageError::UnsupportedPlatform)
     }
 
