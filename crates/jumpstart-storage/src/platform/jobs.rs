@@ -945,6 +945,7 @@ mod tests {
     /// Recover actual committed WAL after process exit without accepting output alone.
     #[test]
     fn interrupted_runs_are_fenced_and_completed_commits_survive() {
+        let _isolation = crate::isolate_process_tests();
         for phase in [
             RunStep::RunningCommitted,
             RunStep::SnapshotPublished,
