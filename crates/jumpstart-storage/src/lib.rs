@@ -19,6 +19,11 @@
 //! so an interrupted upgrade can be finished explicitly instead of guessed at by
 //! inspection. Schema 2 stores a change position for future mutation bookkeeping.
 //!
+//! `inspect_capacity` observes how much space an existing directory's filesystem
+//! reports as available to ordinary users. For example, it can explain why a
+//! future import should wait for storage. It reports the default warning and
+//! safety-reserve thresholds without registering a volume or accepting writes.
+//!
 //! Schema 3 also saves local snapshot jobs and their changes. For example, a queued
 //! copy remains visible after the CLI exits, and a finished copy has a recorded
 //! outcome. The synchronous runner keeps exclusive offline access while it works;
@@ -59,6 +64,12 @@ use jumpstart_domain::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod capacity;
+
+pub use capacity::{
+    CapacityAssessment, CapacityReport, CapacityScope, assess_capacity, inspect_capacity,
+};
+
 pub const FORMAT_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 3;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
@@ -75,8 +86,13 @@ pub const SNAPSHOT_MANIFEST_FILE: &str = "snapshot.json";
 /// Standalone SQLite database stored inside a metadata snapshot directory.
 pub const SNAPSHOT_DATABASE_FILE: &str = "metadata.sqlite";
 
-/// Verified metadata identity and on-disk format. No filesystem qualification or
-/// encryption guarantee is implied by successful initialization or inspection.
+/// The answer to "which server bookkeeping root did this operation check?"
+///
+/// Initialization and inspection return its path, identity, versions, and database
+/// check results together so the CLI can describe the checked installation. For
+/// example, a matching folder name alone would not reveal that a different server's
+/// database had been placed there. The report records successful checks; it does
+/// not retain a database connection or lock, qualify a filesystem, or verify encryption.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MetadataReport {
     /// Absolute path of the verified metadata root.
@@ -100,7 +116,7 @@ pub struct MetadataReport {
     pub integrity_check: String,
 }
 
-/// The data covered by a snapshot, so a metadata copy cannot imply a full backup.
+/// Labels which data a snapshot includes, so callers can explain what was protected.
 ///
 /// Schemas 1/2 contain initial server bookkeeping. Schema 3 also includes saved
 /// snapshot jobs and their changes. Both scopes exclude media, Worlds, and secrets.
@@ -116,9 +132,15 @@ pub enum SnapshotScope {
 
 /// Verified identity and contents of one standalone metadata snapshot.
 ///
-/// The database's size and fingerprint detect accidental changes to the artifact;
-/// they do not authenticate a snapshot supplied by an untrusted person. Verification
-/// works without the source root, but no restore or activation operation is provided.
+/// Creation and verification return the bundle's path, source identity, versions,
+/// scope, byte count, and fingerprint together. This lets a caller identify a copy
+/// after moving it or losing its original source, rather than receiving only a
+/// success flag. The saved `SnapshotManifest` supplies the comparison data on disk;
+/// this report describes the operation's result at its current local path.
+///
+/// Size and fingerprint checks detect changed artifact bytes against the manifest;
+/// they do not authenticate an untrusted supplier. Constructing a report does not
+/// run verification. No restore or activation operation is provided.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SnapshotReport {
     /// Absolute path of the verified snapshot directory.
@@ -291,7 +313,10 @@ pub enum StorageError {
     /// Another job change would exceed the supported global change counter.
     #[error("metadata change sequence is exhausted")]
     ChangeSequenceExhausted,
-    #[error("metadata storage is currently supported only on Linux and macOS")]
+    /// Filesystem measurements cannot produce a valid bounded capacity report.
+    #[error("storage capacity observation is invalid: {0}")]
+    InvalidCapacity(&'static str),
+    #[error("storage operations are currently supported only on Linux and macOS")]
     UnsupportedPlatform,
 }
 

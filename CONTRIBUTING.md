@@ -1,5 +1,7 @@
 # Development
 
+Start with [why the Rust types exist](docs/Development/README.md) when reading these crates. It explains each type's purpose and the problem it addresses, with a worked `JobLifecycle` example and an index of the newer and earlier types. It marks types described from open feature PRs separately from the code available on this branch.
+
 Install [rustup](https://rustup.rs/). The compiler and tools are pinned in `rust-toolchain.toml`, and `Cargo.lock` pins dependencies.
 
 ```sh
@@ -10,7 +12,7 @@ cargo test --workspace --locked
 
 `jumpstart-domain` implements validated identities, decimal-string counters, immutable content hashes and app ownership. `jumpstart-protocol` implements the version 1 handshake and bounded JSON framing. Neither opens a network listener. Wire fixtures live under `protocol/v1/`; neither crate claims the application RPC handlers or authenticated transport are implemented.
 
-The domain crate also checks job state transitions, fences stale worker results, and bounds automatic retries. For example, a canceled import cannot accept its old worker's late result, and an unavailable provider cannot trigger retries forever. The local storage preview now persists those rules for one closed operation: metadata snapshots. The general background scheduler, worker pool, timers, and application jobs remain future work.
+The domain crate also checks job state transitions, fences stale worker results, and bounds automatic retries. For example, a canceled import cannot accept its old worker's late result, and an unavailable provider cannot trigger retries forever. These are in-memory rules for a future scheduler; durable job records, worker execution, timers, and publication still need implementation.
 
 CI runs the Rust checks on Linux, macOS and Windows. These library checks do not qualify the future Linux daemon, native applications or virtual-drive helpers for production.
 
@@ -18,7 +20,7 @@ PR descriptions identify implemented behavior, validation, remaining dependencie
 
 ## Metadata development preview
 
-The `jumpstart-server` binary offers local initialization, offline inspection, verified metadata snapshots, recoverable metadata schema upgrades, and persisted local snapshot jobs. It does not start a daemon, pair devices, open a listener or manage a library.
+The `jumpstart-server` binary offers local initialization, offline inspection, verified metadata snapshots, recoverable metadata schema upgrades, filesystem capacity observations, and persisted local snapshot jobs. It does not start a daemon, pair devices, open a listener or manage a library.
 
 On Linux or macOS, select a new child path of an existing scratch directory:
 
@@ -163,3 +165,20 @@ cargo run -p jumpstart-server -- jobs history --metadata-root /tmp/jumpstart-met
 Text mode shows each revision, state, and worker token. A successful run normally shows `queued → running → verifying → completed`: revisions `1, 2, 3, 4` and token counters `0, 1, 1, 2`. The token advances at completion to stop accepting that attempt's later reports; it is not a count of workers. Failed runs retain their recorded explanation. JSON includes the complete saved projections in order, rather than filling earlier entries with today's outcome.
 
 History does not execute work, repair storage, or create a snapshot. It validates the ledger and returns at most 16 entries for this closed runner; unknown jobs and inconsistent records are explicit errors. It is a local per-job explanation, not a device synchronization feed. As with ordinary inspection, uncheckpointed WAL requires explicit job recovery first.
+
+## Storage capacity observations
+
+On Linux or macOS, observe the filesystem containing an existing directory, for example before planning a large import. The positional path identifies an ordinary directory; it does not need to be a Jumpstart metadata root:
+
+```sh
+cargo run -p jumpstart-server -- storage inspect .
+cargo run -p jumpstart-server -- storage inspect . --json
+```
+
+This read-only command needs no `--development` acknowledgment and creates no metadata. It refuses missing paths, regular files, and a final directory symlink. Other platforms, including Windows, return an explicit unsupported-platform error. The separate `inspect --metadata-root ...` command continues to verify offline metadata identity and format.
+
+The text heading identifies a **Storage capacity observation (not disk health or write approval)**. JSON reports use `scope: "capacity_only"`, a canonical directory path, and decimal strings for `total_bytes`, `free_bytes`, and `available_bytes`. The nested assessment reports warning and safety-reserve thresholds, available bytes above the reserve, and whether this observation crosses either threshold.
+
+The default warning threshold is 10% of total capacity, rounded up to a whole byte; for filesystems of at least 50 GiB it is also at least 5 GiB. The safety reserve is the smaller of 256 MiB and 1% of total capacity, rounded down. This reserve marks space that future write admission should leave for recording failures, shutting down safely, and preserving recovery state as ordinary imports fill a volume.
+
+These values are a point-in-time filesystem observation and may change immediately. The assessment does not reserve space or enforce admission. It provides no SMART or disk-health diagnosis, encryption check, registered-volume identity verification, quota or permission approval, or assurance that a write will succeed. Those storage qualification and reservation requirements remain separate work.
