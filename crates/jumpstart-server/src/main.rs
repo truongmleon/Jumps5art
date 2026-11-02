@@ -547,14 +547,46 @@ fn print_report(report: &serde_json::Value, title: &str, json: bool) -> Result<(
     } else {
         writeln!(output, "{title}")?;
         if let serde_json::Value::Object(fields) = report {
-            for (name, value) in fields {
-                match value {
-                    serde_json::Value::String(text) => writeln!(output, "  {name}: {text}")?,
-                    other => writeln!(output, "  {name}: {other}")?,
-                }
-            }
+            print_fields(&mut output, fields, 2)?;
         }
     }
     output.flush()?;
+    Ok(())
+}
+
+/// Print nested report objects as indented labels for people reading the terminal.
+///
+/// For example, capacity thresholds appear under `assessment` on separate lines
+/// instead of being squeezed into a JSON object inside the text report.
+///
+/// # Arguments
+///
+/// * `output` — mutable borrowed writer receiving the report's text fields.
+/// * `fields` — borrowed JSON object produced from a typed local storage report.
+/// * `indent` — `usize` number of leading spaces for fields at this object level.
+///
+/// # Returns
+///
+/// `std::io::Result<()>` after writing this object and its nested objects.
+///
+/// # Errors
+///
+/// Propagates write failures; output may already contain part of the report.
+fn print_fields(
+    output: &mut impl Write,
+    fields: &serde_json::Map<String, serde_json::Value>,
+    indent: usize,
+) -> std::io::Result<()> {
+    for (name, value) in fields {
+        write!(output, "{blank:indent$}{name}:", blank = "")?;
+        match value {
+            serde_json::Value::Object(nested) => {
+                writeln!(output)?;
+                print_fields(output, nested, indent + 2)?;
+            }
+            serde_json::Value::String(text) => writeln!(output, " {text}")?,
+            other => writeln!(output, " {other}")?,
+        }
+    }
     Ok(())
 }
