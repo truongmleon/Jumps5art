@@ -19,7 +19,9 @@
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use jumpstart_storage::{create_snapshot, initialize, inspect, inspect_capacity, verify_snapshot};
+use jumpstart_storage::{
+    create_snapshot, initialize, inspect, inspect_capacity, migrate, verify_snapshot,
+};
 
 /// Parsed options with `command: Command` selecting a local storage operation.
 /// No network listener is configured or started by this development tool.
