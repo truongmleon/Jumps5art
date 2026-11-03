@@ -4,6 +4,8 @@
 //! Each piece has a digest so a damaged body can be rejected without touching its
 //! destination. This digest covers the piece; the complete resource still needs
 //! its own hash and domain checks before publication.
+//! The sender also verifies its selected local file piece before emitting bytes,
+//! so a changed source does not quietly send a body for an earlier fingerprint.
 //!
 //! These blocking primitives work with supplied readers/writers. The caller must
 //! authorize the transfer, reserve space, and confirm that the target range is
@@ -139,6 +141,49 @@ pub fn copy_upload_chunk<R: Read, W: Write + Seek>(
     destination: &mut W,
     chunk: UploadChunk,
 ) -> Result<Counter, UploadChunkError> {
+    let bytes = read_verified_body(source, chunk)?;
+    seek_chunk_offset(destination, chunk.offset)?;
+    destination.write_all(&bytes)?;
+    Ok(chunk.length)
+}
+
+/// Verify one source-file piece before writing its outgoing raw body.
+///
+/// `source: &mut R` implements `Read + Seek` over the resource;
+/// `destination: &mut W` implements `Write` for the outgoing body. `chunk: UploadChunk`
+/// holds the checked position/length and expected piece fingerprint. Returns
+/// `Result<Counter, UploadChunkError>` after exactly the body bytes are written.
+/// Seeks to the piece's resource offset and buffers at most 4 MiB for verification.
+/// A changed, truncated, or unreadable piece emits no body bytes. The source's
+/// position may advance on failure. Short writes and interrupted I/O are handled.
+///
+/// The caller sends control metadata separately and binds the source identity,
+/// transfer ownership, and expected fingerprint to its session. This function
+/// emits neither a JSON frame nor a durable acknowledgment. A destination error
+/// can leave an incomplete body, so callers must abort/reconcile the transfer;
+/// successful writing does not establish server acceptance or full-file integrity.
+/// Flushing, cancellation, deadlines, and resumable progress belong to the caller.
+pub fn write_upload_chunk<R: Read + Seek, W: Write>(
+    source: &mut R,
+    destination: &mut W,
+    chunk: UploadChunk,
+) -> Result<Counter, UploadChunkError> {
+    seek_chunk_offset(source, chunk.offset)?;
+    let bytes = read_verified_body(source, chunk)?;
+    destination.write_all(&bytes)?;
+    Ok(chunk.length)
+}
+
+/// Read one bounded body and compare its fingerprint before any output writes.
+///
+/// `source: &mut R` is positioned at the body's start; `chunk: UploadChunk`
+/// supplies its checked length and digest. Returns
+/// `Result<Vec<u8>, UploadChunkError>` containing the verified bytes. Both sender and receiver
+/// use this check, while their public functions retain different seek ordering.
+fn read_verified_body<R: Read>(
+    source: &mut R,
+    chunk: UploadChunk,
+) -> Result<Vec<u8>, UploadChunkError> {
     let mut bytes = vec![0; chunk.length.value() as usize];
     source.read_exact(&mut bytes)?;
     let actual = BlobId::hash_bytes(&bytes);
@@ -148,15 +193,22 @@ pub fn copy_upload_chunk<R: Read, W: Write + Seek>(
             actual,
         });
     }
+    Ok(bytes)
+}
+
+/// Seek a supplied stream to `offset: Counter`, retrying interrupted seeks.
+///
+/// `stream: &mut S` implements `Seek`. Returns `Result<(), UploadChunkError>`;
+/// genuine errors retain their I/O cause. Receivers call only after verification,
+/// while senders position their resource before reading the selected piece.
+fn seek_chunk_offset<S: Seek>(stream: &mut S, offset: Counter) -> Result<(), UploadChunkError> {
     loop {
-        match destination.seek(SeekFrom::Start(chunk.offset.value())) {
+        match stream.seek(SeekFrom::Start(offset.value())) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             outcome => {
                 outcome?;
-                break;
+                return Ok(());
             }
         }
     }
-    destination.write_all(&bytes)?;
-    Ok(chunk.length)
 }
