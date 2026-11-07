@@ -96,6 +96,21 @@ cargo run -p jumpstart-server -- jobs enqueue-snapshot --metadata-root /tmp/jump
 cargo run -p jumpstart-server -- jobs list --metadata-root /tmp/jumpstart-metadata-demo --limit 50 --json
 ```
 
+Use a state filter to find waiting requests even when newer completed or failed
+requests fill the unfiltered page:
+
+```sh
+cargo run -p jumpstart-server -- jobs list --metadata-root /tmp/jumpstart-metadata-demo --state queued --limit 50 --json
+```
+
+Selection uses the recorded state before applying `--limit`, and matching jobs
+remain ordered from newest to oldest acceptance position. Other accepted states
+are `running`, `verifying`, `completed`, `failed`, and `canceled`. Filtered reports
+include `state` alongside `jobs`; unfiltered reports keep their existing shape.
+This read-only command needs no development acknowledgment. A live runner still
+owns the exclusive maintenance lock, so listing does not offer concurrent live
+monitoring.
+
 Copy the returned `job_id` into the following commands:
 
 ```sh
