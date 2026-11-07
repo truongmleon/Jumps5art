@@ -24,7 +24,7 @@ const MAX_PROJECTION_BYTES: usize = 65_536;
 ///
 /// # Arguments
 ///
-/// * `root` — existing schema-3 metadata `&Path`, opened read-only without repair.
+/// * `root` — existing metadata with a job ledger `&Path`, opened read-only without repair.
 /// * `epoch` — `SyncEpoch` of the history from which the caller obtained its cursor.
 /// * `after` — nonnegative `Counter` position already observed by the caller.
 /// * `limit` — requested record cap in `1..=MAX_JOB_CHANGE_PAGE_RECORDS`.
@@ -56,7 +56,7 @@ pub(crate) fn pull_job_changes(
     }
     let source = open_verified_metadata(root)?;
     let outcome = (|| -> Result<SnapshotJobChangePage> {
-        if source.report.schema_version != 3 {
+        if source.report.schema_version < 3 {
             return Err(StorageError::JobsUnavailable {
                 found: source.report.schema_version,
             });

@@ -19,7 +19,7 @@ const MAX_PROJECTION_BYTES: usize = 65_536;
 ///
 /// # Arguments
 ///
-/// * `root` — existing schema-3 metadata `&Path`, inspected without repair.
+/// * `root` — existing metadata with a job ledger `&Path`, inspected without repair.
 /// * `job_id` — validated `JobId` identifying the request whose history is wanted.
 ///
 /// # Returns
@@ -36,7 +36,7 @@ const MAX_PROJECTION_BYTES: usize = 65_536;
 /// source already validates its complete ledger and lifecycle histories.
 pub(crate) fn job_history(root: &Path, job_id: JobId) -> Result<Vec<SnapshotJob>> {
     let source = open_verified_metadata(root)?;
-    if source.report.schema_version != 3 {
+    if source.report.schema_version < 3 {
         return Err(StorageError::JobsUnavailable {
             found: source.report.schema_version,
         });

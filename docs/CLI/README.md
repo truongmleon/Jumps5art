@@ -98,16 +98,16 @@ Heading: `Verified local metadata snapshot (not a full backup):`
 |---|---|
 | `root` | Absolute path of the published bundle |
 | `snapshot_format_version` | Number, currently `1` |
-| `scope` | `"bootstrap_metadata"` for schemas 1/2, `"metadata"` for schema 3 |
+| `scope` | `"bootstrap_metadata"` for schemas 1/2, `"metadata"` for schemas 3/4 |
 | `server_id` | Server UUID copied from the source |
 | `sync_epoch` | Sync-epoch UUID copied from the source |
 | `format_version` | Source metadata format, currently `1` |
-| `schema_version` | Source schema, currently `1` |
-| `change_seq` | `null` |
+| `schema_version` | Source schema, from `1` through `4` |
+| `change_seq` | Stored decimal string, or `null` for schema 1 |
 | `database_bytes` | Decimal string, the exact length of `metadata.sqlite` |
 | `database_hash` | `b3:` followed by 64 lowercase hex digits |
 
-`bootstrap_metadata` covers initial server bookkeeping in schemas 1/2. Schema 3 uses `metadata` because its database also includes saved snapshot jobs and their changes. Neither scope contains media, Worlds data, secrets, or logs. There is no command here that turns the bundle back into a metadata folder or a running server. Keeping the bundle on the same disk as the source does not protect either copy if that disk fails.
+`bootstrap_metadata` covers initial server bookkeeping in schemas 1/2. Schemas 3/4 use `metadata` and include saved snapshot jobs and their changes. Schema 4 also includes the shared catalog and the Worlds recovery index. The bundle excludes media bytes, Worlds world files and recovery bundles, secrets, and logs. There is no command here that turns the bundle back into a metadata folder or a running server. Keeping the bundle on the same disk as the source does not protect either copy if that disk fails.
 
 ## `snapshot verify`
 

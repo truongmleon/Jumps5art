@@ -8,12 +8,12 @@ The storage library currently prepares and checks a server's bookkeeping folder 
 
 Suppose you create a metadata snapshot and later move it to another folder. You need to know which server it came from, whether its files still match the recorded contents, and what was included. A directory name such as `backup-1` cannot answer those questions.
 
-The snapshot contains `metadata.sqlite` and `snapshot.json`. The database holds server bookkeeping and, in schema 3, saved snapshot jobs and their ordered changes. Schemas 1/2 retain the earlier bootstrap scope. It does not contain songs, photos, Worlds data, or secrets.
+The snapshot contains `metadata.sqlite` and `snapshot.json`. The database holds server bookkeeping, saved snapshot jobs and their ordered changes in schema 3 and later, and the application catalog in schema 4. Schemas 1/2 retain the earlier bootstrap scope. It does not contain songs, photos, Worlds data, or secrets.
 
 | Type | What it is for | Why we need it |
 |---|---|---|
 | `SnapshotReport` | The answer returned after creating or verifying a snapshot: its current path, source identity, versions, database size, fingerprint, and scope. | The CLI and future callers need one consistent description of the result. A bare success flag would hide which server and exact artifact were checked. |
-| `SnapshotScope` | A machine-readable label for what the artifact includes. It uses `BootstrapMetadata` for schemas 1/2 and `Metadata` for schema 3, which also stores snapshot jobs and their changes. | A successful metadata copy must identify its actual contents. Otherwise callers might describe it as a complete server backup and assume missing media were protected. |
+| `SnapshotScope` | A machine-readable label for what the artifact includes. It uses `BootstrapMetadata` for schemas 1/2 and `Metadata` for schemas 3/4. | A successful metadata copy must identify its actual contents. Otherwise callers might describe it as a complete server backup and assume missing media were protected. |
 
 The report uses existing foundation types for individual fields:
 
@@ -69,7 +69,7 @@ A metadata upgrade changes two separately stored things: the SQLite schema and `
 | `MigrationReport` | Returns the checked resulting metadata, starting/target schema versions, retained backup, and whether work resumed. | A caller must distinguish a real upgrade, a resumed upgrade, and an already-current no-op, and locate the verified prior state. |
 | Private `MigrationJournal` | Retains the workflow's identities, source/target versions, baseline and verified recovery-copy information. | A later explicit retry needs evidence of the exact upgrade to finish; it cannot guess from a mismatch or reuse an unrelated snapshot. |
 
-Migration first saves a verified recovery snapshot, then records the journal before changing the source. With a journal present, ordinary inspection refuses recovery work. Repeating migration with the same paths validates the recorded evidence and finishes the interrupted workflow. Schema 3 preserves the earlier change position as its history floor and retains the server identity and epoch. Completing a legacy journal keeps its recorded target; another forward upgrade needs its own recovery copy.
+Migration first saves a verified recovery snapshot, then records the journal before changing the source. With a journal present, ordinary inspection refuses recovery work. Repeating migration with the same paths validates the recorded evidence and finishes the interrupted workflow. Schema 3 preserves the earlier change position as its history floor. Schema 4 adds the catalog while preserving the job ledger and its history. Both upgrades retain the server identity and epoch. Completing a legacy journal keeps its recorded target; another forward upgrade needs its own recovery copy.
 
 Source: [upgrade report](../../crates/jumpstart-storage/src/lib.rs), [journal and recovery](../../crates/jumpstart-storage/src/platform/migration.rs), and [migration tests](../../crates/jumpstart-storage/tests/migrations.rs).
 

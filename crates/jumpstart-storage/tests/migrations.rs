@@ -128,9 +128,9 @@ mod filesystem {
     /// Panics if the simulated journal cannot be serialized or written.
     fn write_journal(root: &Path, source: &MetadataReport, backup: &SnapshotReport) {
         let journal = json!({
-            "journal_format_version": 2,
+            "journal_format_version": 3,
             "from_schema_version": source.schema_version,
-            "to_schema_version": 3,
+            "to_schema_version": SCHEMA_VERSION,
             "server_id": source.server_id,
             "sync_epoch": source.sync_epoch,
             "backup": backup,
@@ -191,7 +191,7 @@ mod filesystem {
         let result = migrate(&root, &recovery_path).expect("upgrade schema 1");
 
         assert_eq!(result.from_schema_version, 1);
-        assert_eq!(result.to_schema_version, 3);
+        assert_eq!(result.to_schema_version, SCHEMA_VERSION);
         assert!(!result.resumed);
         assert_eq!(
             result.metadata,
@@ -223,8 +223,8 @@ mod filesystem {
             recovery
         );
         let upgraded_path = parent.path().join("after-upgrade");
-        let upgraded = create_snapshot(&root, &upgraded_path).expect("snapshot schema 3");
-        assert_eq!(upgraded.schema_version, 3);
+        let upgraded = create_snapshot(&root, &upgraded_path).expect("snapshot current schema");
+        assert_eq!(upgraded.schema_version, SCHEMA_VERSION);
         assert_eq!(
             upgraded
                 .change_seq
@@ -254,8 +254,8 @@ mod filesystem {
         let result = migrate(&root, &output).expect("already-current no-op");
 
         assert_eq!(result.metadata, initial);
-        assert_eq!(result.from_schema_version, 3);
-        assert_eq!(result.to_schema_version, 3);
+        assert_eq!(result.from_schema_version, SCHEMA_VERSION);
+        assert_eq!(result.to_schema_version, SCHEMA_VERSION);
         assert_eq!(result.backup, None);
         assert!(!result.resumed);
         assert_eq!(fingerprint(&root), root_before);
@@ -326,11 +326,11 @@ mod filesystem {
 
         assert!(result.resumed);
         assert_eq!(result.from_schema_version, 1);
-        assert_eq!(result.to_schema_version, 3);
+        assert_eq!(result.to_schema_version, SCHEMA_VERSION);
         assert_eq!(result.backup, Some(backup));
         assert_eq!(fingerprint(&output), backup_before);
         assert!(!root.join(MIGRATION_FILE).exists());
-        assert_eq!(inspect(&root).unwrap().schema_version, 3);
+        assert_eq!(inspect(&root).unwrap().schema_version, SCHEMA_VERSION);
     }
 
     /// A crash after the new database and marker are ready may leave the journal;
@@ -374,11 +374,11 @@ mod filesystem {
 
         assert!(resumed.resumed);
         assert_eq!(resumed.from_schema_version, 1);
-        assert_eq!(resumed.to_schema_version, 3);
+        assert_eq!(resumed.to_schema_version, SCHEMA_VERSION);
         assert_eq!(resumed.metadata, first.metadata);
         assert_eq!(resumed.backup, Some(backup.clone()));
         assert_eq!(verify_snapshot(&output).unwrap(), backup);
-        assert_eq!(inspect(&root).unwrap().schema_version, 3);
+        assert_eq!(inspect(&root).unwrap().schema_version, SCHEMA_VERSION);
         assert!(!root.join(MIGRATION_FILE).exists());
     }
 
@@ -417,7 +417,7 @@ mod filesystem {
         let valid: Value =
             serde_json::from_slice(&fs::read(root.join(MIGRATION_FILE)).unwrap()).unwrap();
         let mut future = valid.clone();
-        future["journal_format_version"] = json!(3);
+        future["journal_format_version"] = json!(4);
         let mut wrong_identity = valid.clone();
         wrong_identity["server_id"] = json!(jumpstart_domain::ServerId::new());
         for bytes in [
@@ -646,10 +646,10 @@ mod filesystem {
                 .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
                 .unwrap();
             connection.close().unwrap();
-            let backup_path = parent.path().join("before-three");
+            let backup_path = parent.path().join("before-catalog");
             let result = migrate(&root, &backup_path).unwrap();
             assert_eq!(result.from_schema_version, 2);
-            assert_eq!(result.to_schema_version, 3);
+            assert_eq!(result.to_schema_version, SCHEMA_VERSION);
             assert_eq!(result.metadata.server_id, before.server_id);
             assert_eq!(result.metadata.sync_epoch, before.sync_epoch);
             assert_eq!(result.metadata.change_seq.unwrap().value(), sequence as u64);
@@ -662,7 +662,7 @@ mod filesystem {
                 .unwrap();
             assert_eq!(floor, sequence);
             database.close().unwrap();
-            let after_path = parent.path().join("schema-three-snapshot");
+            let after_path = parent.path().join("catalog-snapshot");
             let after = create_snapshot(&root, &after_path).unwrap();
             assert_eq!(after.scope, jumpstart_storage::SnapshotScope::Metadata);
             fs::remove_dir_all(&root).unwrap();
@@ -675,7 +675,7 @@ mod filesystem {
 
     /// Finish a journal emitted by the previous binary at its original schema-2 target.
     #[test]
-    fn legacy_journal_finishes_two_before_a_separate_upgrade_to_three() {
+    fn legacy_journal_finishes_two_before_a_separate_upgrade_to_current() {
         let (parent, root, before) = old_fixture();
         let first_output = parent.path().join("legacy-backup");
         let backup = create_snapshot(&root, &first_output).unwrap();
@@ -693,9 +693,60 @@ mod filesystem {
         assert!(!journal_path.exists());
         let final_result = migrate(&root, &parent.path().join("next-backup")).unwrap();
         assert_eq!(final_result.from_schema_version, 2);
-        assert_eq!(final_result.to_schema_version, 3);
+        assert_eq!(final_result.to_schema_version, SCHEMA_VERSION);
         assert_eq!(final_result.metadata.server_id, before.server_id);
         assert_eq!(final_result.metadata.sync_epoch, before.sync_epoch);
+    }
+
+    /// Complete an old job-ledger journal, then preserve real jobs when adding the catalog.
+    #[test]
+    fn catalog_upgrade_preserves_completed_jobs_and_legacy_snapshot_results() {
+        let (parent, root, initial) = old_fixture();
+        let legacy_output = parent.path().join("before-ledger");
+        let legacy_backup = create_snapshot(&root, &legacy_output).unwrap();
+        write_journal(&root, &initial, &legacy_backup);
+        let journal_path = root.join(MIGRATION_FILE);
+        let mut journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        journal["journal_format_version"] = 2.into();
+        journal["to_schema_version"] = 3.into();
+        fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+        let legacy = migrate(&root, &legacy_output).unwrap();
+        assert_eq!(legacy.to_schema_version, 3);
+        assert!(legacy.resumed);
+
+        let old_job_output = parent.path().join("old-job-snapshot");
+        let job = jumpstart_storage::enqueue_snapshot_job(&root, &old_job_output).unwrap();
+        let completed = jumpstart_storage::run_snapshot_job(&root, job.job_id).unwrap();
+        let history = jumpstart_storage::job_history(&root, job.job_id).unwrap();
+        let before = inspect(&root).unwrap();
+        let backup_path = parent.path().join("before-catalog");
+        let upgraded = migrate(&root, &backup_path).unwrap();
+
+        assert_eq!(upgraded.from_schema_version, 3);
+        assert_eq!(upgraded.to_schema_version, SCHEMA_VERSION);
+        assert_eq!(upgraded.metadata.server_id, before.server_id);
+        assert_eq!(upgraded.metadata.sync_epoch, before.sync_epoch);
+        assert_eq!(upgraded.metadata.change_seq, before.change_seq);
+        assert_eq!(
+            verify_snapshot(&backup_path).unwrap(),
+            upgraded.backup.unwrap()
+        );
+        assert_eq!(
+            verify_snapshot(&old_job_output).unwrap(),
+            completed.result.clone().unwrap()
+        );
+        assert_eq!(
+            jumpstart_storage::run_snapshot_job(&root, job.job_id).unwrap(),
+            completed
+        );
+        assert_eq!(
+            jumpstart_storage::job_history(&root, job.job_id).unwrap(),
+            history
+        );
+        let new_job_output = parent.path().join("new-job-snapshot");
+        let next = jumpstart_storage::enqueue_snapshot_job(&root, &new_job_output).unwrap();
+        let next = jumpstart_storage::run_snapshot_job(&root, next.job_id).unwrap();
+        assert_eq!(next.result.unwrap().schema_version, SCHEMA_VERSION);
     }
 
     /// Validate the complete schema-2 migration prefix before resuming a new upgrade.
@@ -704,7 +755,7 @@ mod filesystem {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("schema-two");
         let before = super::support::create_schema2(&root);
-        let output = parent.path().join("before-three");
+        let output = parent.path().join("before-catalog");
         let backup = create_snapshot(&root, &output).unwrap();
         write_journal(&root, &before, &backup);
         let connection =

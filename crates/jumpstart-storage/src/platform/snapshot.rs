@@ -40,7 +40,7 @@ const COPY_RETRY_DELAY: Duration = Duration::from_millis(10);
 ///
 /// Identity and schema fields describe the captured database. `database_bytes`
 /// and `database_hash` verify its retained bytes. `scope` labels bootstrap data in
-/// schemas 1/2 or metadata including jobs in schema 3. `change_seq` is explicitly
+/// schemas 1/2 or full database metadata in later schemas. `change_seq` is explicitly
 /// null for schema 1 or the captured stored counter for schemas 2/3.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -316,7 +316,7 @@ fn validate_manifest(manifest: &SnapshotManifest) -> Result<()> {
             supported: FORMAT_VERSION,
         });
     }
-    if !matches!(manifest.schema_version, 1..=3) {
+    if !(1..=SCHEMA_VERSION).contains(&manifest.schema_version) {
         return Err(StorageError::UnsupportedSchema {
             found: manifest.schema_version.into(),
             supported: SCHEMA_VERSION,
@@ -337,12 +337,12 @@ fn validate_manifest(manifest: &SnapshotManifest) -> Result<()> {
 /// Select the exact artifact scope supported by a known database schema.
 ///
 /// `schema` is the captured `u32` layout version. Returns `Result<SnapshotScope>`:
-/// bootstrap metadata for 1/2 or metadata including the job ledger for 3. Unknown
+/// bootstrap metadata for 1/2 or full database metadata for later versions. Unknown
 /// versions fail rather than silently claiming a broader or narrower backup.
 fn scope_for_schema(schema: u32) -> Result<SnapshotScope> {
     match schema {
         1 | 2 => Ok(SnapshotScope::BootstrapMetadata),
-        3 => Ok(SnapshotScope::Metadata),
+        3..=SCHEMA_VERSION => Ok(SnapshotScope::Metadata),
         _ => Err(StorageError::UnsupportedSchema {
             found: schema.into(),
             supported: SCHEMA_VERSION,

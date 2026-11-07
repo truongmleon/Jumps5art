@@ -208,6 +208,21 @@ Mass sibling names are UTF-8 NFC, case-sensitive, and unique among live siblings
 
 Cross-app **Move** changes the logical owner only after destination validation and processing succeeds. **Copy** creates an independent destination-owned item and version pointers, even when bytes are shared. Future edits always publish a new immutable version. Deleting an album, playlist, collection, or membership never cascades into its library items.
 
+#### Development catalog in schema 4
+
+Schema 4 installs the catalog in the existing server metadata database. A new root starts with an empty catalog. A development upgrade from schemas 1–3 retains a verified snapshot, preserves the authority and change position, and leaves existing snapshot jobs and their projections intact. An interrupted legacy upgrade finishes its recorded target first. The schema 3 job ledger remains separate from the application catalog while the daemon feed decision in §18.1 is open.
+
+| App | Records available in the catalog | Design |
+|---|---|---|
+| Muse | Owned tracks and rendition versions, ordered playlist entries that can refer to the same track more than once, and field provenance and manual locks. | §§8.1, 8.3 |
+| Photogenic | Compound versions with original resource roles, album membership, and minimal camera suppression records independent of retained bytes. | §§9.1–9.2 |
+| Mass | Owned folders and files with unique live sibling names, immutable versions, and blob placements. | §§4.2–4.4, 10.3–10.4 |
+| Bato | Provider chapter releases, version-bound progress, completion events, bookmarks, and annotations. | §§11.2, 11.5 |
+| Flex | Version-bound playback checkpoints, opening and ending markers, and separate watched events. | §12.5 |
+| Worlds | An index for verified recovery manifests on registered volumes. The filesystem catalog remains the recovery source. | §13.3 |
+
+Verify that SQLite rejects cross-owner parents and references to another item's version, preserves originals when a collection entry is removed, and keeps suppression records after content is gone. Verify that a schema-3 root with completed work upgrades without losing the recorded outcome or its original snapshot. The authenticated writer still owns Unicode normalization, parent-cycle checks, immutable publication, typed payload validation, and transactional receipts and change batches. App-specific ingestion, providers, client outboxes and caches, and recovery actions need their own integration before release.
+
 ### 4.5 Publication, Crash Recovery, and Garbage Collection
 
 Every upload, worker result, relocation, and restore uses the same publication service:
