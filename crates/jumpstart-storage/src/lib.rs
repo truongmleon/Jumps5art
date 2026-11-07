@@ -526,6 +526,20 @@ pub fn run_snapshot_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
     platform::run_snapshot_job(root, job_id)
 }
 
+/// Execute the oldest queued snapshot request without first choosing its ID.
+///
+/// `root: &Path` selects existing offline schema-3 metadata. Returns
+/// `Result<Option<SnapshotJob>>`: `None` means no queued work exists; `Some(job)`
+/// describes the one attempted request, including a saved `Failed` outcome when
+/// copying fails. The caller must inspect that state. Durable acceptance sequence
+/// determines order, independent of clocks. Selection and execution hold one
+/// exclusive maintenance lock; no database write transaction spans the copy.
+/// This call does not drain the queue, start a daemon, rerun terminal jobs, or
+/// recover interrupted work. Busy/recovery/integrity failures remain `Err`.
+pub fn run_next_snapshot_job(root: &Path) -> Result<Option<SnapshotJob>> {
+    platform::run_next_snapshot_job(root)
+}
+
 /// Read one saved job after checking its committed state-change history.
 ///
 /// `root: &Path` selects checkpointed metadata; `job_id: JobId` selects the record.
@@ -630,6 +644,12 @@ mod platform {
     /// Refuse executing `job_id: JobId` at `root: &Path` on this platform.
     /// Returns `Result<SnapshotJob>`, always the unsupported-platform error.
     pub fn run_snapshot_job(_root: &Path, _job_id: JobId) -> Result<SnapshotJob> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse queue execution at `root: &Path` without filesystem work.
+    /// Returns `Result<Option<SnapshotJob>>`, always an unsupported-platform error.
+    pub fn run_next_snapshot_job(_root: &Path) -> Result<Option<SnapshotJob>> {
         Err(StorageError::UnsupportedPlatform)
     }
 
