@@ -8,7 +8,7 @@ The storage library currently prepares and checks a server's bookkeeping folder 
 
 Suppose you create a metadata snapshot and later move it to another folder. You need to know which server it came from, whether its files still match the recorded contents, and what was included. A directory name such as `backup-1` cannot answer those questions.
 
-The snapshot contains `metadata.sqlite` and `snapshot.json`. The database currently holds bootstrap bookkeeping, such as the server's identity and initial schema. It does not contain songs, photos, Worlds data, or secrets.
+The snapshot contains `metadata.sqlite` and `snapshot.json`. The database holds server bookkeeping and, in schema 3, saved snapshot jobs and their ordered changes. Schemas 1/2 retain the earlier bootstrap scope. It does not contain songs, photos, Worlds data, or secrets.
 
 | Type | What it is for | Why we need it |
 |---|---|---|

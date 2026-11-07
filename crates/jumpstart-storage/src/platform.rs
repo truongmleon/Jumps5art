@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use fs2::FileExt;
 use jumpstart_domain::{Counter, ServerId, SyncEpoch};
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use rustix::fs::{Mode, OFlags, RenameFlags};
 use uuid::Uuid;
 
@@ -33,9 +33,14 @@ use super::{
     LOCK_FILE, MIGRATION_FILE, MetadataReport, Result, SCHEMA_VERSION, StorageError,
 };
 
+mod jobs;
 mod migration;
+mod schema3;
 mod snapshot;
 
+pub(super) use jobs::{
+    cancel_job, enqueue_snapshot_job, inspect_job, list_jobs, recover_jobs, run_snapshot_job,
+};
 pub(super) use migration::migrate;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};
 
@@ -43,24 +48,23 @@ const MIGRATION_NAME: &str = "initial_metadata";
 const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version INTEGER PRIMARY KEY CHECK (version > 0),\n    name TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL\n) STRICT";
 const STATE_TABLE: &str = "CREATE TABLE server_state (\n    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n    format_version INTEGER NOT NULL CHECK (format_version > 0),\n    server_id BLOB NOT NULL CHECK (length(server_id) = 16),\n    sync_epoch BLOB NOT NULL CHECK (length(sync_epoch) = 16)\n) STRICT";
 const STATE_TABLE_V2: &str = "CREATE TABLE server_state (\n    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n    format_version INTEGER NOT NULL CHECK (format_version > 0),\n    server_id BLOB NOT NULL CHECK (length(server_id) = 16),\n    sync_epoch BLOB NOT NULL CHECK (length(sync_epoch) = 16)\n, change_seq INTEGER NOT NULL DEFAULT 0 CHECK (change_seq >= 0)) STRICT";
+const STATE_TABLE_V3: &str = "CREATE TABLE server_state (\n    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n    format_version INTEGER NOT NULL CHECK (format_version > 0),\n    server_id BLOB NOT NULL CHECK (length(server_id) = 16),\n    sync_epoch BLOB NOT NULL CHECK (length(sync_epoch) = 16)\n, change_seq INTEGER NOT NULL DEFAULT 0 CHECK (change_seq >= 0), change_floor INTEGER NOT NULL DEFAULT 0 CHECK (change_floor >= 0 AND change_floor <= change_seq)) STRICT";
 const WATERMARK_MIGRATION_NAME: &str = "change_watermark";
 const WATERMARK_MIGRATION: &str = "ALTER TABLE server_state ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0 CHECK (change_seq >= 0)";
 const MARKER_LIMIT: u64 = 64 * 1024;
 
-/// Keeps a checked source database and the resources protecting its read together.
+/// Keeps a checked metadata connection and its maintenance lock alive together.
 ///
-/// A snapshot must copy the source it checked. Returning only an identity report
-/// and closing the source would release its lock before copying, allowing a
-/// cooperating writer to change it. Holding this value retains both the checked
-/// connection and shared maintenance lock through capture. They are released when
-/// the value is dropped. Writers must take the exclusive lock before opening a
-/// writable connection; this guard coordinates with those cooperating writers.
+/// Ordinary inspection holds a shared lock and immutable reader. A local snapshot
+/// job holds an exclusive lock and checked writer, committing each status before
+/// copying with no active write transaction. Keeping these resources together
+/// prevents a capture from losing protection between checking and reading data.
 struct VerifiedMetadata {
     /// Checked source identity, versions, and canonical root path.
     report: MetadataReport,
     /// Checked format marker used when validating the copied database.
     marker: FormatMarker,
-    /// Read-only immutable connection, safe only for this protected offline source.
+    /// Checked reader or exclusive job writer; capture uses no active write transaction.
     connection: Connection,
     /// Owned lock handle retained until capture or inspection finishes.
     _lock: File,
@@ -266,6 +270,7 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     transaction.pragma_update(None, "user_version", 1)?;
     transaction.commit()?;
     apply_schema2(&mut connection)?;
+    apply_schema3(&mut connection)?;
     verify_database(&connection, marker)?;
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -374,7 +379,7 @@ fn lock_metadata(root: &Path, exclusive: bool) -> Result<(PathBuf, File)> {
 /// * `root` — `&Path` of an existing root whose caller retains the maintenance lock.
 ///
 /// # Returns
-/// `Result<FormatMarker>` containing a supported schema 1 or schema 2 marker.
+/// `Result<FormatMarker>` containing a supported schema-1, -2, or -3 marker.
 ///
 /// # Errors
 /// Returns I/O/JSON failures or unsupported versions. Database identity and schema
@@ -397,7 +402,7 @@ fn read_marker(root: &Path) -> Result<FormatMarker> {
             supported: FORMAT_VERSION,
         });
     }
-    if !matches!(marker.schema_version, 1 | 2) {
+    if !matches!(marker.schema_version, 1..=3) {
         return Err(StorageError::UnsupportedSchema {
             found: marker.schema_version.into(),
             supported: SCHEMA_VERSION,
@@ -520,13 +525,62 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
         ));
     }
     let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1..=3) {
         return Err(StorageError::UnsupportedSchema {
             found: version,
             supported: SCHEMA_VERSION,
         });
     }
     if version != i64::from(marker.schema_version) {
+        return Err(StorageError::MigrationMismatch);
+    }
+    for (name, expected) in [
+        ("schema_migrations", MIGRATIONS_TABLE),
+        (
+            "server_state",
+            match version {
+                1 => STATE_TABLE,
+                2 => STATE_TABLE_V2,
+                3 => STATE_TABLE_V3,
+                _ => unreachable!(),
+            },
+        ),
+    ] {
+        let actual: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if actual.as_deref().map(str::trim) != Some(expected.trim()) {
+            return Err(StorageError::MigrationMismatch);
+        }
+    }
+    let schema_objects: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
+        [],
+        |row| row.get(0),
+    )?;
+    if version == 3 {
+        for (kind, name, expected) in [
+            ("table", "jobs", schema3::JOBS_TABLE),
+            ("table", "change_batches", schema3::CHANGE_BATCHES_TABLE),
+            ("index", "jobs_queue", schema3::JOBS_QUEUE_INDEX),
+        ] {
+            let actual: Option<String> = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type=?1 AND name=?2",
+                    [kind, name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if actual.as_deref().map(str::trim) != Some(expected.trim()) {
+                return Err(StorageError::MigrationMismatch);
+            }
+        }
+    }
+    if schema_objects != if version == 3 { 5 } else { 2 } {
         return Err(StorageError::MigrationMismatch);
     }
     let checks = connection
@@ -548,34 +602,6 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
             "SQLite foreign_key_check reported a violation",
         ));
     }
-    for (name, expected) in [
-        ("schema_migrations", MIGRATIONS_TABLE),
-        (
-            "server_state",
-            if version == 1 {
-                STATE_TABLE
-            } else {
-                STATE_TABLE_V2
-            },
-        ),
-    ] {
-        let actual: String = connection.query_row(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-            [name],
-            |row| row.get(0),
-        )?;
-        if actual.trim() != expected.trim() {
-            return Err(StorageError::MigrationMismatch);
-        }
-    }
-    let schema_objects: i64 = connection.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
-        [],
-        |row| row.get(0),
-    )?;
-    if schema_objects != 2 {
-        return Err(StorageError::MigrationMismatch);
-    }
     let migrations = connection
         .prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version")?
         .query_map([], |row| {
@@ -587,12 +613,15 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut expected_migrations = vec![(1, MIGRATION_NAME.to_owned(), migration_checksum())];
-    if version == 2 {
+    if version >= 2 {
         expected_migrations.push((
             2,
             WATERMARK_MIGRATION_NAME.to_owned(),
             watermark_migration_checksum(),
         ));
+    }
+    if version == 3 {
+        expected_migrations.push((3, schema3::MIGRATION_NAME.to_owned(), schema3::checksum()));
     }
     if migrations != expected_migrations {
         return Err(StorageError::MigrationMismatch);
@@ -609,6 +638,10 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
         return Err(StorageError::IdentityMismatch);
     }
     read_change_seq(connection, marker.schema_version)?;
+    if version == 3 {
+        schema3::verify_ledger(connection)?;
+        jobs::verify_all_jobs(connection)?;
+    }
     Ok(())
 }
 
@@ -616,18 +649,18 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
 ///
 /// # Arguments
 /// * `connection` — checked `&Connection` containing the selected schema.
-/// * `schema` — `u32` schema version, either 1 or 2.
+/// * `schema` — `u32` schema version, either 1, 2, or 3.
 ///
 /// # Returns
 /// `Result<Option<Counter>>`: `None` for schema 1, or the actual nonnegative value
-/// for schema 2. Zero means that no sequenced mutations have been committed yet.
+/// for schema 2 or 3. Zero means that no sequenced mutations have been committed yet.
 ///
 /// # Errors
 /// Refuses unsupported versions, missing/invalid values, and failed queries.
 fn read_change_seq(connection: &Connection, schema: u32) -> Result<Option<Counter>> {
     match schema {
         1 => Ok(None),
-        2 => {
+        2 | 3 => {
             let sequence: i64 = connection.query_row(
                 "SELECT change_seq FROM server_state WHERE singleton = 1",
                 [],
@@ -674,6 +707,33 @@ fn apply_schema2(connection: &mut Connection) -> Result<()> {
         params![WATERMARK_MIGRATION_NAME, watermark_migration_checksum()],
     )?;
     transaction.pragma_update(None, "user_version", 2)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Apply the schema-3 job ledger while preserving the previous change position.
+///
+/// `connection` is a mutable `&mut Connection` under exclusive maintenance access.
+/// Returns `Result<()>` after all SQL, its checksum, and version commit together.
+/// Refuses any source except schema 2; an error rolls back the transaction.
+fn apply_schema3(connection: &mut Connection) -> Result<()> {
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version != 2 {
+        return Err(StorageError::UnsupportedSchema {
+            found: version,
+            supported: 2,
+        });
+    }
+    for statement in schema3::statements() {
+        transaction.execute_batch(statement)?;
+    }
+    transaction.execute(
+        "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (3, ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        params![schema3::MIGRATION_NAME, schema3::checksum()],
+    )?;
+    transaction.pragma_update(None, "user_version", 3)?;
     transaction.commit()?;
     Ok(())
 }

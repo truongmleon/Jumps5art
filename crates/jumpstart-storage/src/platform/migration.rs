@@ -4,8 +4,8 @@
 //! first preserves a verified snapshot, then publishes a journal before changing
 //! SQLite. A later explicit upgrade can use that journal to finish the database,
 //! checkpoint, and marker steps. Ordinary inspection never repairs these files.
-//! Schema 2 adds the stored change position needed by future mutations; it does
-//! not add a job store, change-feed service, daemon, or full-server recovery.
+//! Schema 3 adds durable job/change records while preserving schema-1/2 recovery.
+//! A legacy journal still finishes its original target before a new upgrade begins.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    VerifiedMetadata, apply_schema2, destination, io, lock_metadata, open_directory, open_regular,
-    read_change_seq, read_marker, readonly_uri, snapshot, sync_directory, verify_database,
-    verify_locked_metadata,
+    VerifiedMetadata, apply_schema2, apply_schema3, destination, io, lock_metadata, open_directory,
+    open_regular, read_change_seq, read_marker, readonly_uri, snapshot, sync_directory,
+    verify_database, verify_locked_metadata,
 };
 use crate::{
     DATABASE_DIRECTORY, DATABASE_FILE, FORMAT_FILE, FORMAT_VERSION, FormatMarker, MIGRATION_FILE,
@@ -52,6 +52,7 @@ struct MigrationJournal {
 enum MigrationStep {
     BackupPrepared,
     JournalPublished,
+    IntermediateCommitted,
     DatabaseCommitted,
     Checkpointed,
     MarkerPublished,
@@ -102,9 +103,9 @@ fn migrate_with_hook(
         let backup = snapshot::create_snapshot_from_verified(&source, snapshot_output)?;
         milestone(MigrationStep::BackupPrepared)?;
         let journal = MigrationJournal {
-            journal_format_version: 1,
-            from_schema_version: 1,
-            to_schema_version: 2,
+            journal_format_version: 2,
+            from_schema_version: source.marker.schema_version,
+            to_schema_version: 3,
             server_id: source.marker.server_id,
             sync_epoch: source.marker.sync_epoch,
             backup,
@@ -190,7 +191,7 @@ fn finish_upgrade(
     reader.busy_timeout(Duration::from_secs(5))?;
     reader.pragma_update(None, "trusted_schema", false)?;
     reader.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
-    validate_database_state(&reader, &marker, &journal.backup)?;
+    validate_database_state(&reader, &marker, &journal)?;
     reader
         .close()
         .map_err(|(_, error)| StorageError::Database(error))?;
@@ -216,14 +217,24 @@ fn finish_upgrade(
             "recovery writer did not retain WAL mode",
         ));
     }
-    let mut database_marker = validate_database_state(&connection, &marker, &journal.backup)?;
+    let mut database_marker = validate_database_state(&connection, &marker, &journal)?;
     if database_marker.schema_version == 1 {
         apply_schema2(&mut connection)?;
+        database_marker.schema_version = 2;
+        if journal.to_schema_version == 3 {
+            milestone(MigrationStep::IntermediateCommitted)?;
+        }
+    }
+    if database_marker.schema_version == 2 && journal.to_schema_version == 3 {
+        apply_schema3(&mut connection)?;
     }
     milestone(MigrationStep::DatabaseCommitted)?;
-    database_marker.schema_version = 2;
+    database_marker.schema_version = journal.to_schema_version;
     verify_database(&connection, &database_marker)?;
-    if read_change_seq(&connection, 2)?.map(|value| value.value()) != Some(0) {
+    let preserved_position = journal.backup.change_seq.map_or(0, |value| value.value());
+    if read_change_seq(&connection, journal.to_schema_version)?.map(|value| value.value())
+        != Some(preserved_position)
+    {
         return Err(StorageError::InvalidMigration(
             "interrupted bootstrap upgrade has an unexpected change position",
         ));
@@ -259,8 +270,8 @@ fn finish_upgrade(
     let verified = verify_locked_metadata(root.to_path_buf(), lock)?;
     Ok(MigrationReport {
         metadata: verified.report,
-        from_schema_version: 1,
-        to_schema_version: 2,
+        from_schema_version: journal.from_schema_version,
+        to_schema_version: journal.to_schema_version,
         backup: Some(journal.backup),
         resumed,
     })
@@ -297,19 +308,25 @@ fn verify_published_root(root: &Path, expected: &FormatMarker) -> Result<()> {
     Ok(())
 }
 
-/// Validate a WAL-aware database view before opening or using its recovery writer.
+/// Validate a WAL-aware database against one explicitly supported upgrade journal.
 ///
-/// `connection` is a read-only or write-capable view, `marker` is the checked root
-/// marker, and `backup` is the verified schema-1 artifact. Returns
-/// `Result<FormatMarker>` with the actual schema. Only DB1/marker1, DB2/marker1,
-/// and DB2/marker2 are recognized interrupted states; other combinations fail.
+/// `connection` is the current view, `marker` is the checked root marker, and
+/// `journal` binds its preserved baseline and target. Returns `Result<FormatMarker>`
+/// for recognized forward stages only. A target marker cannot precede its database.
 fn validate_database_state(
     connection: &Connection,
     marker: &FormatMarker,
-    backup: &SnapshotReport,
+    journal: &MigrationJournal,
 ) -> Result<FormatMarker> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !matches!(version, 1 | 2) || (version == 1 && marker.schema_version != 1) {
+    if !matches!(version, 1..=3)
+        || version < journal.from_schema_version
+        || version > journal.to_schema_version
+        || ![journal.from_schema_version, journal.to_schema_version]
+            .contains(&marker.schema_version)
+        || (marker.schema_version == journal.to_schema_version
+            && version != journal.to_schema_version)
+    {
         return Err(StorageError::InvalidMigration(
             "database and marker are not a recognized interrupted upgrade",
         ));
@@ -317,21 +334,35 @@ fn validate_database_state(
     let mut expected = marker.clone();
     expected.schema_version = version;
     verify_database(connection, &expected)?;
-    compare_preserved_state(connection, backup)?;
-    if version == 2 && read_change_seq(connection, 2)?.map(|value| value.value()) != Some(0) {
+    compare_preserved_state(connection, &journal.backup)?;
+    let baseline = journal.backup.change_seq.map_or(0, |value| value.value());
+    if version >= 2
+        && read_change_seq(connection, version)?.map(|value| value.value()) != Some(baseline)
+    {
         return Err(StorageError::InvalidMigration(
-            "interrupted bootstrap upgrade has an unexpected change position",
+            "interrupted upgrade has a changed position",
         ));
+    }
+    if version == 3 {
+        let (floor, jobs): (i64, i64) = connection.query_row(
+            "SELECT change_floor, (SELECT count(*) FROM jobs) FROM server_state WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if u64::try_from(floor).ok() != Some(baseline) || jobs != 0 {
+            return Err(StorageError::InvalidMigration(
+                "interrupted upgrade contains new job work",
+            ));
+        }
     }
     Ok(expected)
 }
 
-/// Check that bootstrap migration data still matches the preserved snapshot.
+/// Check that every old migration record still matches the preserved snapshot.
 ///
-/// `connection` is the checked current SQLite database; `backup` is its verified
-/// schema-1 recovery artifact. Returns `Result<()>` after comparing the initial
-/// migration record; identity is checked separately by database/journal validation.
-/// This rejects changed migration data even when schema and identity still agree.
+/// `connection` is the checked database; `backup` identifies its verified baseline.
+/// Returns `Result<()>` after comparing the complete original migration prefix,
+/// including its timestamps. Identity is checked separately by database/journal validation.
 fn compare_preserved_state(connection: &Connection, backup: &SnapshotReport) -> Result<()> {
     let saved = Connection::open_with_flags(
         readonly_uri(&backup.root.join(crate::SNAPSHOT_DATABASE_FILE)),
@@ -340,16 +371,15 @@ fn compare_preserved_state(connection: &Connection, backup: &SnapshotReport) -> 
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    let initial_record = |database: &Connection| -> rusqlite::Result<(String, String, String)> {
-        database.query_row(
-            "SELECT name, checksum, applied_at FROM schema_migrations WHERE version=1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-    };
-    if initial_record(connection)? != initial_record(&saved)? {
+    let original_records =
+        |database: &Connection| -> rusqlite::Result<Vec<(i64, String, String, String)>> {
+            database.prepare("SELECT version, name, checksum, applied_at FROM schema_migrations WHERE version<=?1 ORDER BY version")?
+            .query_map([backup.schema_version], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect()
+        };
+    if original_records(connection)? != original_records(&saved)? {
         return Err(StorageError::InvalidMigration(
-            "initial migration record differs from the preserved snapshot",
+            "migration history differs from the preserved snapshot",
         ));
     }
     saved
@@ -379,12 +409,16 @@ fn read_journal(root: &Path) -> Result<MigrationJournal> {
 ///
 /// `root` is the canonical metadata directory; `output` is the caller's requested
 /// backup path; `journal` is untrusted decoded data. Returns `Result<()>` only for
-/// the supported 1-to-2 upgrade and matching old identity, path, and artifact.
+/// the supported legacy 1-to-2 or current 1/2-to-3 upgrade and matching old identity, path, and artifact.
 fn validate_journal(root: &Path, output: &Path, journal: &MigrationJournal) -> Result<()> {
-    if journal.journal_format_version != 1
-        || journal.from_schema_version != 1
-        || journal.to_schema_version != 2
-        || journal.backup.schema_version != 1
+    let supported = (journal.journal_format_version == 1
+        && journal.from_schema_version == 1
+        && journal.to_schema_version == 2)
+        || (journal.journal_format_version == 2
+            && matches!(journal.from_schema_version, 1 | 2)
+            && journal.to_schema_version == 3);
+    if !supported
+        || journal.backup.schema_version != journal.from_schema_version
         || journal.backup.format_version != FORMAT_VERSION
         || journal.backup.server_id != journal.server_id
         || journal.backup.sync_epoch != journal.sync_epoch
@@ -495,8 +529,10 @@ mod tests {
     /// Check every cross-file interruption boundary and idempotent explicit retry.
     #[test]
     fn interruptions_resume_without_reapplying_the_schema_change() {
+        let _isolation = crate::isolate_process_tests();
         for stopped in [
             MigrationStep::JournalPublished,
+            MigrationStep::IntermediateCommitted,
             MigrationStep::DatabaseCommitted,
             MigrationStep::Checkpointed,
             MigrationStep::MarkerPublished,
@@ -506,24 +542,29 @@ mod tests {
             let root = temporary.path().join("metadata");
             let backup = temporary.path().join("before-upgrade");
             let before = schema1_fixture::create_schema1(&root);
+            let mut reached = false;
+            let outcome = migrate_with_hook(&root, &backup, |step| {
+                if step == stopped {
+                    reached = true;
+                    Err(StorageError::NeedsRecovery("injected interruption"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(reached, "{stopped:?} was not reached: {outcome:?}");
             assert!(
-                migrate_with_hook(&root, &backup, |step| {
-                    if step == stopped {
-                        Err(StorageError::NeedsRecovery("injected interruption"))
-                    } else {
-                        Ok(())
-                    }
-                })
-                .is_err()
+                matches!(&outcome, Err(StorageError::NeedsRecovery(reason)) if *reason == "injected interruption"),
+                "unexpected result at {stopped:?}: {outcome:?}"
             );
             if stopped != MigrationStep::JournalRemoved {
-                assert!(matches!(
-                    crate::inspect(&root),
-                    Err(StorageError::NeedsRecovery(_))
-                ));
+                let inspection = crate::inspect(&root);
+                assert!(
+                    matches!(&inspection, Err(StorageError::NeedsRecovery(_))),
+                    "inspection after {stopped:?}: {inspection:?}"
+                );
             }
             let resumed = migrate(&root, &backup).unwrap();
-            assert_eq!(resumed.metadata.schema_version, 2);
+            assert_eq!(resumed.metadata.schema_version, SCHEMA_VERSION);
             assert_eq!(resumed.metadata.server_id, before.server_id);
             assert_eq!(resumed.metadata.sync_epoch, before.sync_epoch);
             assert!(!root.join(MIGRATION_FILE).exists());
@@ -554,6 +595,7 @@ mod tests {
     /// Recover committed WAL after process exit while the old marker is still present.
     #[test]
     fn process_exit_after_commit_is_recoverable() {
+        let _isolation = crate::isolate_process_tests();
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("metadata");
         let backup = temporary.path().join("before-upgrade");
@@ -587,5 +629,53 @@ mod tests {
         assert_eq!(resumed.metadata.server_id, before.server_id);
         assert_eq!(resumed.metadata.sync_epoch, before.sync_epoch);
         assert_eq!(resumed.metadata.change_seq.unwrap().value(), 0);
+    }
+
+    /// Resume each schema-2 boundary without resetting an already captured position.
+    #[test]
+    fn schema2_interruptions_preserve_the_change_floor() {
+        let _isolation = crate::isolate_process_tests();
+        for stopped in [
+            MigrationStep::JournalPublished,
+            MigrationStep::DatabaseCommitted,
+            MigrationStep::Checkpointed,
+            MigrationStep::MarkerPublished,
+            MigrationStep::JournalRemoved,
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("metadata");
+            let backup = temporary.path().join("before-three");
+            let before = schema1_fixture::create_schema2(&root);
+            let connection =
+                Connection::open(root.join(DATABASE_DIRECTORY).join(DATABASE_FILE)).unwrap();
+            connection
+                .execute("UPDATE server_state SET change_seq=42", [])
+                .unwrap();
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            connection.close().unwrap();
+            assert!(
+                migrate_with_hook(&root, &backup, |step| {
+                    if step == stopped {
+                        Err(StorageError::NeedsRecovery(
+                            "injected schema-2 interruption",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+            );
+            let resumed = migrate(&root, &backup).unwrap();
+            assert_eq!(resumed.metadata.schema_version, 3);
+            assert_eq!(resumed.metadata.server_id, before.server_id);
+            assert_eq!(resumed.metadata.sync_epoch, before.sync_epoch);
+            assert_eq!(resumed.metadata.change_seq.unwrap().value(), 42);
+            assert_eq!(
+                snapshot::verify_snapshot(&backup).unwrap().schema_version,
+                2
+            );
+        }
     }
 }

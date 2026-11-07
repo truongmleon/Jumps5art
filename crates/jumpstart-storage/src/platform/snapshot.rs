@@ -1,10 +1,10 @@
-//! Creates and verifies a standalone copy of Jumpstart's bootstrap metadata database.
+//! Creates and verifies a standalone copy of Jumpstart's metadata database.
 //! SQLite's backup API copies the checked database into a private staging directory;
 //! a small manifest records its identity, schema, size, and hash before publication.
 //!
-//! This offline development tool preserves the current two-table metadata schema.
+//! This offline development tool preserves bootstrap or job-ledger metadata.
 //! Its bundle contains no media, Worlds state, or secrets. Schema 1 has no change
-//! watermark; schema 2 captures its stored value. This remains a local bootstrap
+//! watermark; schemas 2/3 capture their stored value. This remains a local
 //! metadata snapshot rather than a complete Jumpstart backup.
 
 use std::ffi::OsStr;
@@ -38,14 +38,10 @@ const COPY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// The description saved with a snapshot so a later verifier knows what to check.
 ///
-/// A moved bundle or a lost source must still be identifiable. `snapshot.json`
-/// therefore retains the captured identity, schema, scope, size, and fingerprint.
-/// The verifier compares those claims with the retained database before returning
-/// a `SnapshotReport`. The report additionally names the bundle's current local
-/// path; that path does not belong in this portable saved description.
-///
-/// `scope` must be bootstrap metadata and `change_seq` must be present as JSON null
-/// because schema 1 has no synchronization watermark.
+/// Identity and schema fields describe the captured database. `database_bytes`
+/// and `database_hash` verify its retained bytes. `scope` labels bootstrap data in
+/// schemas 1/2 or metadata including jobs in schema 3. `change_seq` is explicitly
+/// null for schema 1 or the captured stored counter for schemas 2/3.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotManifest {
@@ -65,7 +61,7 @@ struct SnapshotManifest {
 ///
 /// `deserializer: D` supplies the explicit field value through `Deserializer<'de>`.
 /// Returns `Result<Option<Counter>, D::Error>`; schema-specific checks distinguish
-/// absent storage in schema 1 from the actual stored counter in schema 2.
+/// absent storage in schema 1 from the actual stored counter in schemas 2/3.
 /// Using this field callback prevents Serde from treating a missing field as `None`.
 fn deserialize_change_seq<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -137,7 +133,7 @@ pub(super) fn create_snapshot_from_verified(
         let (database_bytes, database_hash) = hash_database(&database_path)?;
         let manifest = SnapshotManifest {
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
-            scope: SnapshotScope::BootstrapMetadata,
+            scope: scope_for_schema(source.marker.schema_version)?,
             server_id: source.marker.server_id,
             sync_epoch: source.marker.sync_epoch,
             format_version: source.marker.format_version,
@@ -301,11 +297,11 @@ fn read_manifest(path: &Path) -> Result<SnapshotManifest> {
     serde_json::from_slice(&bytes).map_err(StorageError::InvalidSnapshotManifest)
 }
 
-/// Enforce the artifact format and the deliberately limited bootstrap scope.
+/// Enforce the artifact format and the schema-specific metadata scope.
 ///
 /// `manifest: &SnapshotManifest` supplies the declared versions and metadata.
 /// Returns `Result<()>` or an unsupported/invalid-snapshot error. Schema 1 requires
-/// an explicit null watermark; schema 2 requires an actual counter whose value
+/// an explicit null watermark; schemas 2/3 require an actual counter whose value
 /// the standalone verifier also compares with the copied database.
 fn validate_manifest(manifest: &SnapshotManifest) -> Result<()> {
     if manifest.snapshot_format_version != SNAPSHOT_FORMAT_VERSION {
@@ -320,22 +316,38 @@ fn validate_manifest(manifest: &SnapshotManifest) -> Result<()> {
             supported: FORMAT_VERSION,
         });
     }
-    if !matches!(manifest.schema_version, 1 | 2) {
+    if !matches!(manifest.schema_version, 1..=3) {
         return Err(StorageError::UnsupportedSchema {
             found: manifest.schema_version.into(),
             supported: SCHEMA_VERSION,
         });
     }
-    if !matches!(&manifest.scope, SnapshotScope::BootstrapMetadata)
+    if manifest.scope != scope_for_schema(manifest.schema_version)?
         || (manifest.schema_version == 1 && manifest.change_seq.is_some())
-        || (manifest.schema_version == 2 && manifest.change_seq.is_none())
+        || (manifest.schema_version >= 2 && manifest.change_seq.is_none())
         || manifest.database_bytes.value() == 0
     {
         return Err(StorageError::InvalidSnapshot(
-            "bootstrap snapshots require nonempty database bytes and a schema-appropriate change watermark",
+            "metadata snapshots require nonempty database bytes and a schema-appropriate change watermark",
         ));
     }
     Ok(())
+}
+
+/// Select the exact artifact scope supported by a known database schema.
+///
+/// `schema` is the captured `u32` layout version. Returns `Result<SnapshotScope>`:
+/// bootstrap metadata for 1/2 or metadata including the job ledger for 3. Unknown
+/// versions fail rather than silently claiming a broader or narrower backup.
+fn scope_for_schema(schema: u32) -> Result<SnapshotScope> {
+    match schema {
+        1 | 2 => Ok(SnapshotScope::BootstrapMetadata),
+        3 => Ok(SnapshotScope::Metadata),
+        _ => Err(StorageError::UnsupportedSchema {
+            found: schema.into(),
+            supported: SCHEMA_VERSION,
+        }),
+    }
 }
 
 /// Reserve a private destination and copy checked metadata using SQLite's API.
@@ -518,6 +530,7 @@ mod tests {
     /// Verify that the checked-source guard holds its shared lock until dropped.
     #[test]
     fn checked_source_guard_keeps_exclusive_writer_blocked_until_drop() {
+        let _isolation = crate::isolate_process_tests();
         let parent = TempDir::new().expect("temporary parent");
         let root = parent.path().join("source");
         initialize(&root).expect("initialize fixture metadata");
@@ -532,6 +545,7 @@ mod tests {
     /// Verify that an expired deadline cannot report a successful SQLite copy.
     #[test]
     fn expired_copy_deadline_fails_and_releases_destination() {
+        let _isolation = crate::isolate_process_tests();
         let source = Connection::open_in_memory().expect("source connection");
         source
             .execute_batch(

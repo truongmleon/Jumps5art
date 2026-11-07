@@ -18,9 +18,10 @@ The commands run on Linux and macOS. On Windows they exit with an error that sto
 | `inspect` | Reads an existing metadata folder and prints that identity. The folder stays unchanged. |
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
 | `snapshot verify` | Checks an existing bundle. The original metadata folder is not required. |
+| `migrate` | Upgrades older metadata after saving a verified recovery copy; see [migration instructions](../../CONTRIBUTING.md#recoverable-metadata-upgrades). |
 | `storage inspect` | Reports how much space the filesystem has for an existing directory. |
 
-`init` and `snapshot create` require `--development`. The other commands do not.
+`init`, `migrate`, and `snapshot create` require `--development`. The other commands do not.
 
 A successful command prints its report on stdout and exits successfully. A failure prints `error:` and the reason on stderr, leaves stdout empty, and exits with a failure status. Add `--json` for pretty-printed JSON. Without `--json`, the first line is a heading and the fields follow, indented two spaces per level.
 
@@ -50,7 +51,8 @@ Heading: `Verified offline development metadata:`
 | `server_id` | UUID string for this server |
 | `sync_epoch` | UUID string recorded with the server ID |
 | `format_version` | Number, currently `1` |
-| `schema_version` | Number, currently `1` |
+| `schema_version` | Number, currently `3` |
+| `change_seq` | Stored decimal-string position; unavailable (`null`) in schema 1 |
 | `journal_mode` | SQLite journal mode of the stored database |
 | `integrity_check` | `"ok"` after the check succeeds |
 
@@ -79,7 +81,7 @@ cargo run -p jumpstart-server -- snapshot create --metadata-root /tmp/jumpstart-
 |---|---|---|
 | `--metadata-root` | yes | Existing offline, checkpointed metadata folder to read. |
 | `--output` | yes | New directory outside that folder. Its parent must already exist. |
-| `--development` | yes | Acknowledges that the bundle is bootstrap metadata only. |
+| `--development` | yes | Acknowledges the limited metadata snapshot scope. |
 | `--json` | no | Print the report as JSON. |
 
 The command copies `database/jumpstart.sqlite` with SQLite's backup API, stores the copy as a single database file, and writes `snapshot.json` beside it. The manifest records the server ID, sync epoch, schema versions, database size, and a BLAKE3 digest of the database bytes. The bundle is published only after that copy checks out. An existing output directory is left unchanged.
@@ -88,13 +90,13 @@ The published directory contains only `snapshot.json` and `metadata.sqlite`.
 
 `change_seq` is JSON `null`. Schema 1 has no change feed, so there is no watermark to record. The field is still present. A manifest that omits it, or that uses `0`, fails verification.
 
-Heading: `Verified local bootstrap metadata snapshot (not a full backup):`
+Heading: `Verified local metadata snapshot (not a full backup):`
 
 | Field | JSON value |
 |---|---|
 | `root` | Absolute path of the published bundle |
 | `snapshot_format_version` | Number, currently `1` |
-| `scope` | `"bootstrap_metadata"` |
+| `scope` | `"bootstrap_metadata"` for schemas 1/2, `"metadata"` for schema 3 |
 | `server_id` | Server UUID copied from the source |
 | `sync_epoch` | Sync-epoch UUID copied from the source |
 | `format_version` | Source metadata format, currently `1` |
@@ -103,7 +105,7 @@ Heading: `Verified local bootstrap metadata snapshot (not a full backup):`
 | `database_bytes` | Decimal string, the exact length of `metadata.sqlite` |
 | `database_hash` | `b3:` followed by 64 lowercase hex digits |
 
-`bootstrap_metadata` means the server identity and the initial schema record. The bundle does not contain media, Worlds data, secrets, logs, or library changes. There is no command here that turns the bundle back into a metadata folder or a running server. Keeping the bundle on the same disk as the source does not protect either copy if that disk fails.
+`bootstrap_metadata` covers initial server bookkeeping in schemas 1/2. Schema 3 uses `metadata` because its database also includes saved snapshot jobs and their changes. Neither scope contains media, Worlds data, secrets, or logs. There is no command here that turns the bundle back into a metadata folder or a running server. Keeping the bundle on the same disk as the source does not protect either copy if that disk fails.
 
 ## `snapshot verify`
 
@@ -118,7 +120,7 @@ cargo run -p jumpstart-server -- snapshot verify --snapshot-root /tmp/jumpstart-
 
 Verification reads `snapshot.json` and `metadata.sqlite` and prints the same report as `snapshot create`. It still succeeds after the original metadata folder is deleted. It does not modify the bundle. A missing bundle is not created. A damaged or extra file fails the command and is left as it was.
 
-Heading: `Verified local bootstrap metadata snapshot (not a full backup):`
+Heading: `Verified local metadata snapshot (not a full backup):`
 
 ## `storage inspect`
 

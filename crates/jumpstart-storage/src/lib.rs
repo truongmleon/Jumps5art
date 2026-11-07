@@ -14,10 +14,20 @@
 //! This development snapshot excludes media, Worlds, and secrets, and is not a
 //! complete server backup or a way to restore an installation.
 //!
+//! `migrate` upgrades an existing root after saving a verified snapshot. A retained
+//! journal bridges the database commit and the separate format-marker replacement,
+//! so an interrupted upgrade can be finished explicitly instead of guessed at by
+//! inspection. Schema 2 stores a change position for future mutation bookkeeping.
+//!
 //! `inspect_capacity` observes how much space an existing directory's filesystem
 //! reports as available to ordinary users. For example, it can explain why a
 //! future import should wait for storage. It reports the default warning and
 //! safety-reserve thresholds without registering a volume or accepting writes.
+//!
+//! Schema 3 also saves local snapshot jobs and their changes. For example, a queued
+//! copy remains visible after the CLI exits, and a finished copy has a recorded
+//! outcome. The synchronous runner keeps exclusive offline access while it works;
+//! it is not a daemon, parallel worker pool, or automatic retry scheduler.
 //!
 //! Initialization publishes a fully verified sibling staging directory using an
 //! atomic no-replace rename. Existing targets, including empty directories, are
@@ -34,9 +44,23 @@
 #[cfg(test)]
 extern crate self as jumpstart_storage;
 
+/// Isolate lock-lifetime assertions from another test's subprocess creation.
+///
+/// A child can briefly inherit even close-on-exec file descriptors before exec,
+/// retaining a flock after its parent closes the descriptor. Returns a scheduling
+/// guard held for the whole test; no production locking or retry policy changes.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn isolate_process_tests() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GATE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 use std::path::{Path, PathBuf};
 
-use jumpstart_domain::{BlobId, Counter, ServerId, SyncEpoch};
+use jumpstart_domain::{
+    BlobId, Counter, JobId, JobState, JobTransitionError, PositiveCounter, ServerId, SyncEpoch,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -47,7 +71,7 @@ pub use capacity::{
 };
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
 pub const FORMAT_FILE: &str = "format.json";
 pub const LOCK_FILE: &str = "metadata.lock";
@@ -55,7 +79,7 @@ pub const DATABASE_DIRECTORY: &str = "database";
 pub const DATABASE_FILE: &str = "jumpstart.sqlite";
 /// Journal retained until an explicit metadata upgrade finishes durably.
 pub const MIGRATION_FILE: &str = "migration.json";
-/// Current version of the separate bootstrap metadata snapshot format.
+/// Current version of the standalone metadata snapshot manifest format.
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 /// JSON manifest naming a verified local metadata snapshot's contents.
 pub const SNAPSHOT_MANIFEST_FILE: &str = "snapshot.json";
@@ -83,8 +107,8 @@ pub struct MetadataReport {
     pub schema_version: u32,
     /// Stored change high-water mark, unavailable in schema 1 and initially zero in 2.
     ///
-    /// Schema 2 records this value explicitly so a future change feed can capture
-    /// its actual position. No application mutations or change feed are added here.
+    /// Schema 2 records this value explicitly; schema 3 advances it with saved job
+    /// changes. Application RPCs and a device synchronization service remain future work.
     pub change_seq: Option<Counter>,
     /// Persistent SQLite header mode, not the inspection connection's mode.
     pub journal_mode: String,
@@ -94,19 +118,19 @@ pub struct MetadataReport {
 
 /// Labels which data a snapshot includes, so callers can explain what was protected.
 ///
-/// For example, copying the initial bookkeeping database does not copy a music
-/// library's audio files. The current `BootstrapMetadata` choice gives that limited
-/// copy an explicit, machine-readable scope instead of relying on a folder name
-/// or an ambiguous "backup succeeded" message. It covers server identity and the
-/// initial database layout; media, Worlds, secrets, and app/device state are excluded.
+/// Schemas 1/2 contain initial server bookkeeping. Schema 3 also includes saved
+/// snapshot jobs and their changes. Both scopes exclude media, Worlds, and secrets.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotScope {
     /// Initial server bookkeeping before sequenced library changes exist.
     BootstrapMetadata,
+    /// Server bookkeeping including durable local jobs and their recorded changes.
+    /// Media files, secrets, and Worlds remain outside this snapshot's coverage.
+    Metadata,
 }
 
-/// The answer to "which snapshot was checked, and what database did it capture?"
+/// Verified identity and contents of one standalone metadata snapshot.
 ///
 /// Creation and verification return the bundle's path, source identity, versions,
 /// scope, byte count, and fingerprint together. This lets a caller identify a copy
@@ -156,12 +180,45 @@ pub struct MigrationReport {
     pub metadata: MetadataReport,
     /// Schema before this upgrade, or the current schema for a no-op.
     pub from_schema_version: u32,
-    /// Supported schema selected by this binary.
+    /// Target of the recorded workflow; a legacy journal may finish at schema 2.
     pub to_schema_version: u32,
     /// Independently verified pre-upgrade snapshot; absent for a clean no-op.
     pub backup: Option<SnapshotReport>,
     /// Whether a previously published migration journal was resumed.
     pub resumed: bool,
+}
+
+/// A saved request to copy metadata, together with its current recorded outcome.
+///
+/// For example, enqueueing a snapshot records its destination before execution,
+/// so another CLI invocation can find it later. The state/revision/worker token
+/// are checked against committed change records; successful output is recorded
+/// only after actual publication and verification. This value describes the job;
+/// constructing or deserializing it does not start work or prove an artifact valid.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotJob {
+    /// Stable identity of this queued user request.
+    pub job_id: JobId,
+    /// Absolute UTF-8 destination selected before the worker starts.
+    pub output_path: PathBuf,
+    /// Current recorded stage; this runner supports a closed snapshot workflow.
+    pub state: JobState,
+    /// Positive revision used to reject outdated control requests.
+    pub revision: PositiveCounter,
+    /// Worker token counter, advanced when starting or fencing an attempt.
+    pub attempt_generation: Counter,
+    /// Change position that created this job, used for stable listing order.
+    pub created_seq: PositiveCounter,
+    /// Informational server UTC milliseconds at creation; not a conflict clock.
+    pub created_at_ms: i64,
+    /// Informational server UTC milliseconds at the latest recorded change.
+    /// Wall-clock corrections can make this earlier than a prior observation.
+    pub updated_at_ms: i64,
+    /// Verified snapshot result, present only after successful completion.
+    pub result: Option<SnapshotReport>,
+    /// Bounded actionable failure explanation, present only for failed work.
+    pub error: Option<String>,
 }
 
 /// On-disk JSON marker containing the format versions and server identity.
@@ -233,6 +290,29 @@ pub enum StorageError {
     /// Snapshot creation could not finish within its bounded copy workflow.
     #[error("metadata snapshot could not be completed: {0}")]
     SnapshotUnavailable(&'static str),
+    /// The retained journal or its recovery snapshot disagrees with this upgrade.
+    #[error("invalid metadata migration: {0}")]
+    InvalidMigration(&'static str),
+    /// A migration journal is not strict, bounded JSON of the supported shape.
+    #[error("invalid metadata migration journal: {0}")]
+    InvalidMigrationJournal(#[source] serde_json::Error),
+    /// Older readable metadata must be explicitly upgraded before storing jobs.
+    #[error(
+        "snapshot jobs require metadata schema 3; found {found}; migrate the offline root first"
+    )]
+    JobsUnavailable { found: u32 },
+    /// No saved request has the supplied job identity.
+    #[error("snapshot job does not exist: {0}")]
+    JobNotFound(JobId),
+    /// Saved job data or a requested local job action violates this workflow.
+    #[error("invalid snapshot job: {0}")]
+    InvalidJob(&'static str),
+    /// The shared job policy rejected a stale or illegal state change.
+    #[error("job transition rejected: {0}")]
+    JobTransition(#[from] JobTransitionError),
+    /// Another job change would exceed the supported global change counter.
+    #[error("metadata change sequence is exhausted")]
+    ChangeSequenceExhausted,
     /// Filesystem measurements cannot produce a valid bounded capacity report.
     #[error("storage capacity observation is invalid: {0}")]
     InvalidCapacity(&'static str),
@@ -284,7 +364,7 @@ pub fn inspect(root: &Path) -> Result<MetadataReport> {
     platform::inspect(root)
 }
 
-/// Create a verified standalone copy of an offline bootstrap metadata database.
+/// Create a verified standalone copy of an offline metadata database.
 ///
 /// # Arguments
 ///
@@ -306,7 +386,7 @@ pub fn create_snapshot(root: &Path, output: &Path) -> Result<SnapshotReport> {
     platform::create_snapshot(root, output)
 }
 
-/// Verify a bootstrap metadata snapshot without its original source or file changes.
+/// Verify a metadata snapshot without its original source or file changes.
 ///
 /// # Arguments
 ///
@@ -350,12 +430,119 @@ pub fn migrate(root: &Path, snapshot_output: &Path) -> Result<MigrationReport> {
     platform::migrate(root, snapshot_output)
 }
 
+/// Save a queued metadata-copy request without starting the copy.
+///
+/// `root: &Path` selects existing schema-3 metadata; `output: &Path` names a new
+/// UTF-8 destination outside it. Returns `Result<SnapshotJob>` after the request
+/// and its full change projection commit together. Invalid paths, busy storage,
+/// incompatible schema, and database errors leave no accepted request.
+pub fn enqueue_snapshot_job(root: &Path, output: &Path) -> Result<SnapshotJob> {
+    platform::enqueue_snapshot_job(root, output)
+}
+
+/// Execute one queued request synchronously and save its verified outcome.
+///
+/// `root: &Path` selects offline metadata and `job_id: JobId` selects the request.
+/// Returns `Result<SnapshotJob>`; a copy failure is a saved `Failed` job with an
+/// explanation, while an API/storage failure is `Err`. The caller must inspect
+/// the returned state. Exclusive maintenance access covers the run, without a
+/// database write transaction spanning the copy. No incomplete output is deleted.
+pub fn run_snapshot_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
+    platform::run_snapshot_job(root, job_id)
+}
+
+/// Read one saved job after checking its committed state-change history.
+///
+/// `root: &Path` selects checkpointed metadata; `job_id: JobId` selects the record.
+/// Returns `Result<SnapshotJob>` or a not-found, busy, recovery, or validation
+/// error. Reading does not initialize storage, repair WAL, or execute the request.
+pub fn inspect_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
+    platform::inspect_job(root, job_id)
+}
+
+/// Read a bounded page of the newest saved jobs, ordered by creation sequence.
+///
+/// `root: &Path` selects checkpointed metadata and `limit: u16` is in `1..=100`.
+/// Returns `Result<Vec<SnapshotJob>>`; invalid limits or inconsistent stored jobs
+/// fail instead of silently presenting a partial successful list.
+pub fn list_jobs(root: &Path, limit: u16) -> Result<Vec<SnapshotJob>> {
+    platform::list_jobs(root, limit)
+}
+
+/// Cancel queued work only if the caller observed its current revision.
+///
+/// `root: &Path` selects offline metadata, `job_id: JobId` selects the request,
+/// and `expected_revision: PositiveCounter` detects an outdated control action.
+/// Returns `Result<SnapshotJob>` after committing cancellation and its change
+/// projection. Running and terminal work cannot be canceled through this API.
+pub fn cancel_job(
+    root: &Path,
+    job_id: JobId,
+    expected_revision: PositiveCounter,
+) -> Result<SnapshotJob> {
+    platform::cancel_job(root, job_id, expected_revision)
+}
+
+/// Explicitly reconcile a stopped command's WAL and incomplete active jobs.
+///
+/// `root: &Path` selects existing schema-3 metadata. Returns
+/// `Result<Vec<SnapshotJob>>` with jobs changed from active to failed, fencing
+/// their old tokens. Queued work remains queued. Recovery requires exclusive
+/// access, validates committed WAL before writing, and never infers completion
+/// from an existing output or deletes retained artifacts.
+pub fn recover_jobs(root: &Path) -> Result<Vec<SnapshotJob>> {
+    platform::recover_jobs(root)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
-    use super::{MetadataReport, MigrationReport, Path, Result, SnapshotReport, StorageError};
+    use super::{
+        JobId, MetadataReport, MigrationReport, Path, PositiveCounter, Result, SnapshotJob,
+        SnapshotReport, StorageError,
+    };
+
+    /// Refuse queue writes without touching `root` or `output` (`&Path`).
+    /// Returns `Result<SnapshotJob>`, always the unsupported-platform error.
+    pub fn enqueue_snapshot_job(_root: &Path, _output: &Path) -> Result<SnapshotJob> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse executing `job_id: JobId` at `root: &Path` on this platform.
+    /// Returns `Result<SnapshotJob>`, always the unsupported-platform error.
+    pub fn run_snapshot_job(_root: &Path, _job_id: JobId) -> Result<SnapshotJob> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse inspecting `job_id: JobId` at `root: &Path` without filesystem work.
+    /// Returns `Result<SnapshotJob>`, always the unsupported-platform error.
+    pub fn inspect_job(_root: &Path, _job_id: JobId) -> Result<SnapshotJob> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse listing `limit: u16` jobs at `root: &Path` without filesystem work.
+    /// Returns `Result<Vec<SnapshotJob>>`, always the unsupported-platform error.
+    pub fn list_jobs(_root: &Path, _limit: u16) -> Result<Vec<SnapshotJob>> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse canceling a job at a `PositiveCounter` revision on this platform.
+    /// The path/ID are unused; `Result<SnapshotJob>` is always unsupported.
+    pub fn cancel_job(
+        _root: &Path,
+        _job_id: JobId,
+        _revision: PositiveCounter,
+    ) -> Result<SnapshotJob> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse recovery at `root: &Path` without reading or changing files.
+    /// Returns `Result<Vec<SnapshotJob>>`, always the unsupported-platform error.
+    pub fn recover_jobs(_root: &Path) -> Result<Vec<SnapshotJob>> {
+        Err(StorageError::UnsupportedPlatform)
+    }
 
     /// Refuse upgrades without touching paths on unsupported storage platforms.
     ///
