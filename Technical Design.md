@@ -1374,9 +1374,9 @@ The following are acceptance targets to measure during implementation, not resul
 
 Track scaling by item count, active resource set, and concurrent jobs. Exceeding a performance target triggers a measured change to batching, indexing, admission, or cache limits; it does not permit weakening original retention or crash-consistency guarantees.
 
-### 17.4 Verification Map for the Proposed Implementation Slices
+### 17.4 Verification Map for the Audited Implementation Slices
 
-These scenarios describe what the open PRs test. Section 18.1 identifies behavior that still needs a design decision. The release gates in §§6.5 and 17.2–17.3 also require the integrated and platform evidence in the right column.
+These scenarios describe what the linked PRs test. Section 18.1 identifies behavior that still needs a design decision. The release gates in §§6.5 and 17.2–17.3 also require the integrated and platform evidence in the right column.
 
 | Slice and contract | Behavior the tests verify | Release evidence still needed |
 |---|---|---|
@@ -1408,9 +1408,9 @@ Dependencies are explicit: routing into an unfinished receiving module remains u
 
 A feature is done only when its user-visible success/failure/offline states, persistence records, migration path, export representation, authorization checks, and recovery tests are implemented and its evidence is attached to the release. Exact dependency/tool/model versions are frozen in the release manifest and lockfiles before building that release; version selection is maintained release data rather than an unbounded alternative in this architecture.
 
-### 18.1 Open Design Decisions From the Current PRs
+### 18.1 Open Design Decisions From the Implementation Audit
 
-This audit records choices introduced by open implementation PRs. Approval of this audit records the open questions. Each dependent implementation needs its own reviewed design decision.
+This audit records choices introduced by the linked implementation PRs. These choices describe development code. Each decision needs review before the daemon or its clients depend on it.
 
 - **Local job workflow.** The PRs introduce an offline snapshot queue with a synchronous operator command, oldest-first selection, queued-only cancellation, and manual recovery that records interrupted attempts as failed. The daemon contract in §§4.1, 5.4, 6.1, and 7 calls for authenticated control, receipts, admission, and restart reconciliation. Decide whether the local queue belongs in the delivery plan and which operator commands it needs.
 - **Persisted jobs and history.** Proposed schema 3 stores one job projection per change and checks that retained positions are consecutive. Its local change reader starts at the migrated floor and leaves cursors unacknowledged. Section 6.2 allows gaps and multiple affected entities in one batch. Decide the schema and migration path before adopting these records. Review which fields, such as local filesystem paths and diagnostic errors, can cross the authenticated boundary.
