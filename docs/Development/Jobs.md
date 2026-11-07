@@ -6,7 +6,7 @@ A **job** is one long-running request from the user, such as “convert this vid
 
 Several events can arrive at different times: a person cancels while a worker finishes, an app sends an action based on an old screen, or a provider keeps failing. The types below provide rules for handling those events consistently.
 
-The implementation described here is in [PR #23](https://github.com/truongmleon/Jumps5art/pull/23) and [PR #24](https://github.com/truongmleon/Jumps5art/pull/24). These rules operate in memory. Application code still needs to save jobs, run and stop processes, arrange waits, check output, and publish accepted files.
+The shared lifecycle and retry rules operate in memory. The storage crate now uses the lifecycle to save and execute local metadata-snapshot requests. Other job kinds, external worker supervision, retry timers, and app publication still require implementation. The local runner implements queued/running/verifying/completed/failed/canceled; the additional policy states below do not make pause or resume available in that runner.
 
 ## `JobState` names the stage of the work
 
@@ -78,7 +78,7 @@ The counters belong to one lifecycle. This type does not store a `JobId`; applic
 
 Workers can report output ready for verification, failure, or permitted waiting states. Only the application's control path can record `Completed`, after it has independently checked and published the output. Calling that method is not itself an output check.
 
-Source: [job types](https://github.com/truongmleon/Jumps5art/blob/c615b04a7d37e032b5a1f4eefc3f30d14a3a81ea/crates/jumpstart-domain/src/jobs.rs). Review the cancellation, replacement-worker, and trusted-completion cases in the [job tests](https://github.com/truongmleon/Jumps5art/blob/c615b04a7d37e032b5a1f4eefc3f30d14a3a81ea/crates/jumpstart-domain/tests/job_lifecycle.rs).
+Source: [job types](../../crates/jumpstart-domain/src/jobs.rs). Review the cancellation, replacement-worker, and trusted-completion cases in the [job tests](../../crates/jumpstart-domain/tests/job_lifecycle.rs).
 
 ## Retry types limit repeated failures
 
@@ -104,7 +104,50 @@ A stop is a valid policy decision, returned as `Ok(RetryDecision::Stop(...))`. `
 
 The policy receives elapsed time and a random delay from its caller. It reads no clock, draws no randomness, and starts no timer or worker. Its relationship with `JobLifecycle` must be implemented by future scheduling code; constructing the two values does not connect them automatically.
 
-Source: [retry types](https://github.com/truongmleon/Jumps5art/blob/f596bee572ad4ed65b4c7a595322f01494168729/crates/jumpstart-domain/src/retry.rs) and [retry tests](https://github.com/truongmleon/Jumps5art/blob/f596bee572ad4ed65b4c7a595322f01494168729/crates/jumpstart-domain/tests/retry_policy.rs).
+Source: [retry types](../../crates/jumpstart-domain/src/retry.rs) and [retry tests](../../crates/jumpstart-domain/tests/retry_policy.rs).
+
+## `SnapshotJob` keeps the request and outcome after exit
+
+`JobLifecycle` enforces transition rules in memory. `SnapshotJob` is the saved record that lets another command find the request after the accepting process exits. It combines the job ID and chosen output path with the recorded state, revision, worker token, acceptance position, observation times, and eventual result or error. Saving a request does not start its copy.
+
+For example, enqueue request A, then request B, then run A:
+
+| Global change position | Job | Its revision | Saved state |
+|---:|---|---:|---|
+| 1 | A | 1 | Queued |
+| 2 | B | 1 | Queued |
+| 3 | A | 2 | Running |
+| 4 | A | 3 | Verifying |
+| 5 | A | 4 | Completed |
+
+A's revision counts changes to A. The global position orders commits across both requests. Its worker token identifies eligible reports, as in the lifecycle example above. These three numbers answer different questions.
+
+The storage engine updates the current row, full historical projection, and global position in one transaction. On inspection, it checks that the saved history can be replayed through `JobLifecycle`. This connects the policy to persistence rather than trusting an arbitrary saved status string.
+
+`result: Option<SnapshotReport>` is absent before completion. A completed report records the snapshot accepted at that time; it does not prove the artifact is healthy today. Repeating `jobs run` for a completed request returns the same saved record. Use `snapshot verify` to check the artifact at its current location. A saved failed record means the work failed even though the API successfully returned that record.
+
+`jobs history` returns one job's original projections. `jobs list --state queued` finds waiting requests before applying the result limit. Reads never execute the requests. Running holds the exclusive maintenance lock, so these offline commands cannot monitor a concurrent active copy. After a process interruption, explicit recovery fences incomplete active work as failed while preserving a committed completion and retained artifacts.
+
+Source: [saved job fields and public APIs](../../crates/jumpstart-storage/src/lib.rs), [transaction and runner](../../crates/jumpstart-storage/src/platform/jobs.rs), and [history reader](../../crates/jumpstart-storage/src/platform/history.rs).
+
+## Change pages follow commits across jobs
+
+A reader that has seen changes through position 2 needs A's running, verifying, and completed records from the table above. Reading A's current row three times would lose the earlier states.
+
+| Type | What it is for | Why it exists |
+|---|---|---|
+| `SnapshotJobChange` | One global sequence, projection-format version, and original full `SnapshotJob`. | Associates each past value with the commit that accepted it. The projection-format version is separate from the database schema version. |
+| `SnapshotJobChangePage` | A bounded group of changes with authority, epoch, and continuation bounds. | Lets a reader catch up in steps without allocating the entire history or silently skipping unavailable records. |
+
+With `after=2` and a two-record limit, the first page includes positions 3 and 4. Its `next=4` tells the reader where to continue; `high_water=5` says there is more at the captured position. The next pull after 4 returns position 5. An empty page at the high-water mark keeps `next` equal to `after`.
+
+The server ID identifies the authority; `sync_epoch` identifies its history. A number from a different epoch cannot safely continue this one. `minimum` is the lowest usable `after` position, inclusive. A migrated root can retain a nonzero floor without inventing earlier job changes. A cursor below that floor needs a verified baseline; moving the number forward alone would omit state the reader never obtained. Future cursors are refused too.
+
+The API returns at most 500 whole records and 1 MiB of compact JSON including the page fields. The byte limit can shorten a page before the row limit does. A record omitted for space never advances `next`. Full ledger verification still happens, so a small returned page does not imply a constant amount of database validation.
+
+This is local inspection of snapshot jobs. It does not apply a client cache, acknowledge a device cursor, compact history, or expose authenticated network synchronization.
+
+Source: [page types](../../crates/jumpstart-storage/src/lib.rs), [bounded reader](../../crates/jumpstart-storage/src/platform/changes.rs), and [cursor tests](../../crates/jumpstart-storage/tests/job_changes.rs).
 
 ## How to review a change to these types
 

@@ -1,6 +1,6 @@
 # Development
 
-Start with [why the Rust types exist](docs/Development/README.md) when reading these crates. It explains each type's purpose and the problem it addresses, with a worked `JobLifecycle` example and an index of the newer and earlier types. It marks types described from open feature PRs separately from the code available on this branch.
+Start with [why the Rust types exist](docs/Development/README.md) when reading these crates. It explains each type's purpose and the problem it addresses, with a worked `JobLifecycle` example and an index of the newer and earlier types. The guide links to the implementation in this checkout and distinguishes shared policies from the local snapshot runner.
 
 Install [rustup](https://rustup.rs/). The compiler and tools are pinned in `rust-toolchain.toml`, and `Cargo.lock` pins dependencies.
 
@@ -12,7 +12,7 @@ cargo test --workspace --locked
 
 `jumpstart-domain` implements validated identities, decimal-string counters, immutable content hashes and app ownership. `jumpstart-protocol` implements the version 1 handshake and bounded JSON framing. Neither opens a network listener. Wire fixtures live under `protocol/v1/`; neither crate claims the application RPC handlers or authenticated transport are implemented.
 
-The domain crate also checks job state transitions, fences stale worker results, and bounds automatic retries. For example, a canceled import cannot accept its old worker's late result, and an unavailable provider cannot trigger retries forever. These are in-memory rules for a future scheduler; durable job records, worker execution, timers, and publication still need implementation.
+The domain crate also checks job state transitions, fences stale worker results, and bounds automatic retries. For example, a canceled import cannot accept its old worker's late result, and an unavailable provider cannot trigger retries forever. These shared policies operate in memory. The storage crate now persists and executes the closed metadata-snapshot workflow using the lifecycle rules; general workers, automatic retry timers, and application publication remain future work.
 
 CI runs the Rust checks on Linux, macOS and Windows. These library checks do not qualify the future Linux daemon, native applications or virtual-drive helpers for production.
 
