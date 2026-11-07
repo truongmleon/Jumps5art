@@ -137,6 +137,26 @@ Job revisions, worker token counters, and change positions use decimal strings i
 
 If a successful `jobs run` reply is lost, repeat the same command with the same job ID. A saved `Completed` job returns its recorded `SnapshotJob` unchanged: no new copy, event, revision, worker token, or update timestamp. This reads a historical success; it does not verify the output again, find a moved artifact, or declare that the recorded path is healthy today. Use `snapshot verify --snapshot-root PATH` to check the artifact at its current location. Failed and canceled jobs remain closed. A process exit can leave uncheckpointed WAL even after completion commits; if the command reports that recovery is required, run `jobs recover` before repeating it. Recovery preserves committed completion and fences interrupted active work as failed.
 
+To execute one waiting request without selecting its ID, use:
+
+```sh
+cargo run -p jumpstart-server -- jobs run-next --metadata-root /tmp/jumpstart-metadata-demo --development --json
+```
+
+`run-next` selects the oldest queued acceptance position and holds exclusive
+maintenance access through execution. One call attempts at most one request,
+including when that request fails. The JSON report contains `job`: a complete
+saved outcome, or `null` when no queued work exists. An empty queue exits
+successfully without adding a change; a saved `Failed` job is printed before a
+nonzero exit. Terminal requests are skipped, and later queued requests wait for
+another invocation. The command requires `--development` even for an empty queue.
+
+Each invocation makes a fresh queue selection. After a lost reply or interrupted
+command, inspect the saved jobs and explicitly recover when required before
+selecting more work. Use `jobs run --job-id ID` to retrieve a known request's
+recorded completion. Queue execution remains synchronous; polling, background
+scheduling, automatic retries, and resource admission remain future work.
+
 A still-queued request can be canceled using its inspected revision:
 
 ```sh
@@ -153,7 +173,7 @@ cargo run -p jumpstart-server -- jobs recover --metadata-root /tmp/jumpstart-met
 
 Recovery obtains exclusive access, fences interrupted active attempts, and records them as failed while retaining their artifacts. An existing output file does not prove the original job completed. Queued work remains queued. Create a new request with a new output path when retrying; this preview does not yet link retry requests, automatically restart old work, or delete partial output. If a storage failure prevents saving an outcome, the API returns an error and the job can remain active until explicit recovery succeeds.
 
-List and inspect are read-only and need no acknowledgment. Enqueue, run, cancel, and recover check `--development` before opening storage. Lists are bounded to 1–100 records, defaulting to 50; list and recovery reports contain a `jobs` array. Other platforms return an explicit unsupported error. These are local administrative tools; authenticated app APIs, daemon admission, generic workers, automatic retries/timers, and full-server restore remain separate work.
+List and inspect are read-only and need no acknowledgment. Enqueue, run, run-next, cancel, and recover check `--development` before opening storage. Lists are bounded to 1–100 records, defaulting to 50; list and recovery reports contain a `jobs` array. Other platforms return an explicit unsupported error. These are local administrative tools; authenticated app APIs, daemon admission, generic workers, automatic retries/timers, and full-server restore remain separate work.
 
 ### Read a job's history
 
