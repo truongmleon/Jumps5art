@@ -9,6 +9,7 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use jumpstart_domain::{BlobId, Counter};
 use jumpstart_protocol::{
     UPLOAD_CHUNK_BYTES, UploadChunk, UploadChunkError, copy_upload_chunk, read_frame, write_frame,
+    write_upload_chunk,
 };
 
 /// Return a checked `Counter` for `value: u64`; invalid fixture inputs panic.
@@ -42,6 +43,7 @@ impl Write for NoDestinationIo {
 struct FragmentedBody<'a> {
     bytes: Cursor<&'a [u8]>,
     interrupt: bool,
+    interrupt_seek: bool,
 }
 
 impl Read for FragmentedBody<'_> {
@@ -53,6 +55,17 @@ impl Read for FragmentedBody<'_> {
         }
         let length = buffer.len().min(2);
         self.bytes.read(&mut buffer[..length])
+    }
+}
+
+impl Seek for FragmentedBody<'_> {
+    /// Seek to `position: SeekFrom`, returning one initial interruption first.
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        if self.interrupt_seek {
+            self.interrupt_seek = false;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        self.bytes.seek(position)
     }
 }
 
@@ -289,6 +302,7 @@ fn fragmented_reads_writes_and_interruptions_complete_the_piece() {
     let mut source = FragmentedBody {
         bytes: Cursor::new(body.as_slice()),
         interrupt: true,
+        interrupt_seek: true,
     };
     let mut staging = StagingWriter::new(vec![9; 8], usize::MAX);
     assert_eq!(
@@ -349,4 +363,156 @@ fn full_sized_chunk_is_accepted_without_consuming_the_following_byte() {
     let mut next = [0];
     source.read_exact(&mut next).unwrap();
     assert_eq!(next, [42]);
+}
+
+/// Send the selected local resource piece, receive it into staging, and preserve
+/// the next control frame. Only raw body bytes are emitted by the sender itself.
+#[test]
+fn sender_and_receiver_preserve_piece_offsets_and_control_boundaries() {
+    let body = [0, 255, b'\n'];
+    let mut resource = vec![7; UPLOAD_CHUNK_BYTES as usize];
+    resource.extend_from_slice(&body);
+    let chunk = UploadChunk::new(
+        count(UPLOAD_CHUNK_BYTES),
+        count(3),
+        count(resource.len() as u64),
+        BlobId::hash_bytes(&body),
+    )
+    .unwrap();
+    let mut source = Cursor::new(resource);
+    let mut outgoing = Vec::new();
+    assert_eq!(
+        write_upload_chunk(&mut source, &mut outgoing, chunk).unwrap(),
+        count(3)
+    );
+    assert_eq!(outgoing, body);
+    assert_eq!(source.position(), UPLOAD_CHUNK_BYTES + 3);
+    let next = serde_json::json!({"next":true});
+    write_frame(&mut outgoing, &next).unwrap();
+    let mut incoming = Cursor::new(outgoing);
+    let mut staging = Cursor::new(vec![9; UPLOAD_CHUNK_BYTES as usize + 3]);
+    assert_eq!(
+        copy_upload_chunk(&mut incoming, &mut staging, chunk).unwrap(),
+        count(3)
+    );
+    assert!(
+        staging.get_ref()[..UPLOAD_CHUNK_BYTES as usize]
+            .iter()
+            .all(|b| *b == 9)
+    );
+    assert_eq!(&staging.get_ref()[UPLOAD_CHUNK_BYTES as usize..], &body);
+    assert_eq!(
+        read_frame::<_, serde_json::Value>(&mut incoming).unwrap(),
+        next
+    );
+}
+
+/// Source changes and truncation cannot emit a body for an earlier fingerprint.
+#[test]
+fn sender_rejects_changed_or_truncated_source_before_output() {
+    let chunk = UploadChunk::new(
+        Counter::ZERO,
+        count(4),
+        count(4),
+        BlobId::hash_bytes(b"good"),
+    )
+    .unwrap();
+    let error =
+        write_upload_chunk(&mut Cursor::new(b"evil"), &mut NoDestinationIo, chunk).unwrap_err();
+    assert!(matches!(error, UploadChunkError::DigestMismatch { .. }));
+    let error =
+        write_upload_chunk(&mut Cursor::new(b"goo"), &mut NoDestinationIo, chunk).unwrap_err();
+    assert!(matches!(error, UploadChunkError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof));
+}
+
+/// The sender handles interrupted seeks/reads/writes and short I/O at both ends.
+#[test]
+fn sender_handles_fragmented_resource_and_outgoing_writes() {
+    let resource = b"payload";
+    let chunk = UploadChunk::new(
+        Counter::ZERO,
+        count(7),
+        count(7),
+        BlobId::hash_bytes(resource),
+    )
+    .unwrap();
+    let mut source = FragmentedBody {
+        bytes: Cursor::new(resource.as_slice()),
+        interrupt: true,
+        interrupt_seek: true,
+    };
+    let mut outgoing = StagingWriter::new(Vec::new(), usize::MAX);
+    assert_eq!(
+        write_upload_chunk(&mut source, &mut outgoing, chunk).unwrap(),
+        count(7)
+    );
+    assert_eq!(outgoing.bytes.get_ref(), resource);
+    assert_eq!(source.bytes.position(), 7);
+}
+
+/// Inject source failures before body output, to distinguish them from an
+/// outgoing write failure that leaves an incomplete already-verified prefix.
+struct FaultyResource {
+    fail_seek: bool,
+}
+
+impl Read for FaultyResource {
+    /// Return the original read error instead of filling `_buffer: &mut [u8]`.
+    fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "resource read failed",
+        ))
+    }
+}
+
+impl Seek for FaultyResource {
+    /// Seek to `_position: SeekFrom` or return a configured PermissionDenied error.
+    fn seek(&mut self, _position: SeekFrom) -> io::Result<u64> {
+        if self.fail_seek {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "resource seek failed",
+            ));
+        }
+        Ok(0)
+    }
+}
+
+/// Sender errors preserve their source and retain any partially emitted body.
+#[test]
+fn sender_preserves_source_and_output_errors_without_false_completion() {
+    let chunk = UploadChunk::new(
+        Counter::ZERO,
+        count(4),
+        count(4),
+        BlobId::hash_bytes(b"good"),
+    )
+    .unwrap();
+    for (fail_seek, kind, message) in [
+        (
+            true,
+            io::ErrorKind::PermissionDenied,
+            "resource seek failed",
+        ),
+        (
+            false,
+            io::ErrorKind::ConnectionReset,
+            "resource read failed",
+        ),
+    ] {
+        let error = write_upload_chunk(
+            &mut FaultyResource { fail_seek },
+            &mut NoDestinationIo,
+            chunk,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, UploadChunkError::Io(e) if e.kind() == kind && e.to_string() == message)
+        );
+    }
+    let mut outgoing = StagingWriter::new(Vec::new(), 2);
+    let error = write_upload_chunk(&mut Cursor::new(b"good"), &mut outgoing, chunk).unwrap_err();
+    assert!(matches!(error, UploadChunkError::Io(e) if e.kind() == io::ErrorKind::BrokenPipe));
+    assert_eq!(outgoing.bytes.get_ref(), b"go");
 }

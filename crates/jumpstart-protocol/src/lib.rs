@@ -31,7 +31,9 @@ pub use handshake::{
     ProtocolLimits, ServerHandshake, Welcome, negotiate,
 };
 pub use range::{MAX_READ_RANGE_BYTES, ReadRange, ReadRangeError, copy_read_range};
-pub use upload::{UPLOAD_CHUNK_BYTES, UploadChunk, UploadChunkError, copy_upload_chunk};
+pub use upload::{
+    UPLOAD_CHUNK_BYTES, UploadChunk, UploadChunkError, copy_upload_chunk, write_upload_chunk,
+};
 
 /// The regular application protocol; pairing uses its own restricted listener.
 pub const APPLICATION_ALPN: &[u8] = b"jumpstart/1";

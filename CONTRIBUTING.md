@@ -35,6 +35,13 @@ acknowledgment. Full-resource verification remains required before publication.
 See the [upload primitive](crates/jumpstart-protocol/src/upload.rs) and
 [verification/failure tests](crates/jumpstart-protocol/tests/uploads.rs).
 
+`write_upload_chunk` supplies the sender side: it seeks the bound local resource,
+reads one checked piece, and verifies its expected digest before emitting raw
+body bytes. A changed, short, or unreadable source leaves the outgoing body writer
+untouched. Control metadata is written separately by the caller. Sender and
+receiver share the bounded verification logic; a successful send still needs
+the server's durable acceptance before client progress can be confirmed.
+
 The domain crate also checks job state transitions, fences stale worker results, and bounds automatic retries. For example, a canceled import cannot accept its old worker's late result, and an unavailable provider cannot trigger retries forever. These shared policies operate in memory. The storage crate now persists and executes the closed metadata-snapshot workflow using the lifecycle rules; general workers, automatic retry timers, and application publication remain future work.
 
 CI runs the Rust checks on Linux, macOS and Windows. These library checks do not qualify the future Linux daemon, native applications or virtual-drive helpers for production.
