@@ -18,7 +18,7 @@ The commands run on Linux and macOS. On Windows they exit with an error that sto
 | `inspect` | Reads an existing metadata folder and prints that identity. The folder stays unchanged. |
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
 | `snapshot verify` | Checks an existing bundle. The original metadata folder is not required. |
-| `migrate` | Upgrades older metadata after saving a verified recovery copy; see [migration instructions](../../CONTRIBUTING.md#recoverable-metadata-upgrades). |
+| `migrate` | Upgrades older metadata after saving a verified recovery copy; see [migration instructions](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade). |
 | `storage inspect` | Reports how much space the filesystem has for an existing directory. |
 
 `init`, `migrate`, and `snapshot create` require `--development`. The other commands do not.

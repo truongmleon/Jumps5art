@@ -20,7 +20,7 @@ PR descriptions identify implemented behavior, validation, remaining dependencie
 
 ## Metadata development preview
 
-The `jumpstart-server` binary offers local initialization, offline inspection, verified metadata snapshots, recoverable metadata schema upgrades, and filesystem capacity observations. [docs/CLI/README.md](docs/CLI/README.md) describes the local commands. It does not start a daemon, pair devices, open a listener or manage a library.
+The `jumpstart-server` binary offers local initialization, offline inspection, verified metadata snapshots, recoverable metadata schema upgrades, filesystem capacity observations, and persisted local snapshot jobs. It does not start a daemon, pair devices, open a listener or manage a library.
 
 On Linux or macOS, select a new child path of an existing scratch directory:
 
@@ -84,11 +84,59 @@ A journal left by the earlier format-1 migration still finishes its recorded 1-t
 
 This is a development upgrade for local metadata. It supplies recovery of its interrupted upgrade steps, not a full backup restore, whole-library migration, durable scheduler, or production filesystem qualification. Existing schema 1 and 2 snapshots remain verifiable without upgrading them.
 
-## Snapshot-job storage library
 
-The storage crate now persists requests for real metadata snapshots, including their status, revision, worker token, outcome, and ordered change projections. Its APIs can enqueue and synchronously run a copy, read saved jobs, cancel queued work, and explicitly recover an interrupted runner. Status and history commit together; completion follows actual snapshot verification. A dependent CLI PR exposes these APIs as commands.
+## Persisted local snapshot jobs
 
-The runner is an offline maintenance preview: it holds exclusive access during its copy, with no write transaction spanning bulk I/O. Running cancellation, automatic retries, a daemon, app authentication, and linked retry requests remain future work. Source files explain the purpose of each record and guard.
+A job keeps a request and its outcome after the command that accepted it exits. This preview supports one real operation: copying the metadata database through the existing snapshot implementation. Enqueuing saves the request; running it performs the copy and verification. These commands require schema 3, so explicitly migrate older roots first.
+
+On Linux or macOS, choose a new output directory outside the metadata root:
+
+```sh
+cargo run -p jumpstart-server -- jobs enqueue-snapshot --metadata-root /tmp/jumpstart-metadata-demo --output /tmp/jumpstart-job-snapshot --development --json
+cargo run -p jumpstart-server -- jobs list --metadata-root /tmp/jumpstart-metadata-demo --limit 50 --json
+```
+
+Copy the returned `job_id` into the following commands:
+
+```sh
+cargo run -p jumpstart-server -- jobs inspect --metadata-root /tmp/jumpstart-metadata-demo --job-id JOB_ID --json
+cargo run -p jumpstart-server -- jobs run --metadata-root /tmp/jumpstart-metadata-demo --job-id JOB_ID --development --json
+```
+
+Each enqueue creates a new request. If its reply is lost, list and inspect the saved jobs before enqueuing again. Command-receipt deduplication is not implemented yet. Duplicate queued requests cannot replace an existing snapshot; the later run can instead fail because the destination is occupied.
+
+The saved `SnapshotJob` describes what the request is for and what happened:
+
+| Field | Purpose |
+|---|---|
+| `job_id`, `output_path` | Identify this request and its selected destination independently of its current stage. |
+| `state`, `revision`, `attempt_generation` | Describe the stage and retain the lifecycle's checks against outdated control requests and worker results. |
+| `created_seq` | Identifies the change position at which the request was accepted. |
+| `created_at_ms`, `updated_at_ms` | Supply UTC observation times for people; revisions and sequences decide update order. |
+| `result` | The verified `SnapshotReport` after successful completion. |
+| `error` | The retained explanation of a failed attempt. |
+
+Job revisions, worker token counters, and change positions use decimal strings in JSON. Each accepted mutation updates the job, appends its full versioned change projection, and advances the stored high-water mark in one database transaction. This keeps a saved status from becoming disconnected from its change history.
+
+`jobs run` executes synchronously while holding the exclusive maintenance lock. It commits lifecycle steps without keeping a SQLite transaction open across the bulk snapshot copy. Other controllers fail as busy while that command owns the root; this preview does not provide cancellation during a running copy. The command records completion only after the actual snapshot passes verification. If copying fails, it saves a `Failed` outcome, prints the job record, and exits unsuccessfully. A saved failure is not a successful snapshot.
+
+A still-queued request can be canceled using its inspected revision:
+
+```sh
+cargo run -p jumpstart-server -- jobs cancel --metadata-root /tmp/jumpstart-metadata-demo --job-id JOB_ID --expected-revision 1 --development --json
+```
+
+Use the revision currently shown by inspection. An outdated revision is refused, and terminal jobs cannot be reopened. Cancellation of queued work creates no snapshot and leaves an existing destination untouched.
+
+After an interrupted runner exits, explicitly recover before inspecting its saved outcome. Ordinary read-only inspection can refuse an uncheckpointed WAL:
+
+```sh
+cargo run -p jumpstart-server -- jobs recover --metadata-root /tmp/jumpstart-metadata-demo --development --json
+```
+
+Recovery obtains exclusive access, fences interrupted active attempts, and records them as failed while retaining their artifacts. An existing output file does not prove the original job completed. Queued work remains queued. Create a new request with a new output path when retrying; this preview does not yet link retry requests, automatically restart old work, or delete partial output. If a storage failure prevents saving an outcome, the API returns an error and the job can remain active until explicit recovery succeeds.
+
+List and inspect are read-only and need no acknowledgment. Enqueue, run, cancel, and recover check `--development` before opening storage. Lists are bounded to 1–100 records, defaulting to 50; list and recovery reports contain a `jobs` array. Other platforms return an explicit unsupported error. These are local administrative tools; authenticated app APIs, daemon admission, generic workers, automatic retries/timers, and full-server restore remain separate work.
 
 ## Storage capacity observations
 
