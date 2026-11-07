@@ -15,6 +15,7 @@
 //! interrupted run as failed rather than assuming that an output file means success.
 //! `storage inspect <folder>` observes filesystem capacity without granting write
 //! approval or diagnosing disk health.
+//! `jobs changes` returns bounded original projections after a saved epoch/position.
 //! The program accepts these arguments, delegates file/database work to the storage
 //! library, and prints a report or exits with an error.
 //!
@@ -25,11 +26,11 @@
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use jumpstart_domain::{JobId, JobState, PositiveCounter};
+use jumpstart_domain::{Counter, JobId, JobState, PositiveCounter, SyncEpoch};
 use jumpstart_storage::{
-    SnapshotJob, cancel_job, create_snapshot, enqueue_snapshot_job, initialize, inspect,
-    inspect_capacity, inspect_job, job_history, list_jobs, list_jobs_in_state, migrate,
-    recover_jobs, run_snapshot_job, verify_snapshot,
+    SnapshotJob, SnapshotJobChangePage, cancel_job, create_snapshot, enqueue_snapshot_job,
+    initialize, inspect, inspect_capacity, inspect_job, job_history, list_jobs, list_jobs_in_state,
+    migrate, pull_job_changes, recover_jobs, run_snapshot_job, verify_snapshot,
 };
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
@@ -135,6 +136,8 @@ enum SnapshotCommand {
 /// with cancellation. This lets execution reject an outdated cancellation rather
 /// than treating every command as an arbitrary status edit. The enum routes
 /// requests; the storage library owns persistence and snapshot verification.
+/// Change pages carry a `SyncEpoch` and `Counter` so a position from another
+/// synchronization history cannot be mistaken for a continuation of this one.
 #[derive(Subcommand)]
 enum JobCommand {
     /// Save a queued snapshot request without creating its output yet.
@@ -179,6 +182,21 @@ enum JobCommand {
         metadata_root: PathBuf,
         #[arg(long)]
         job_id: JobId,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a bounded page of saved job changes after an existing history position.
+    Changes {
+        #[arg(long)]
+        metadata_root: PathBuf,
+        /// Synchronization history from metadata inspection or a verified baseline.
+        #[arg(long)]
+        epoch: SyncEpoch,
+        /// Last change position already held; the returned page starts after it.
+        #[arg(long)]
+        after: Counter,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
         #[arg(long)]
         json: bool,
     },
@@ -447,6 +465,16 @@ fn run_jobs(command: JobCommand) -> Result<(), Box<dyn Error>> {
             let history = job_history(&metadata_root, job_id)?;
             return print_job_history(job_id, &history, json);
         }
+        JobCommand::Changes {
+            metadata_root,
+            epoch,
+            after,
+            limit,
+            json,
+        } => {
+            let page = pull_job_changes(&metadata_root, epoch, after, limit)?;
+            return print_job_changes(&page, json);
+        }
         JobCommand::Cancel {
             metadata_root,
             job_id,
@@ -519,6 +547,41 @@ fn print_job_history(
         )?;
         if let Some(error) = &job.error {
             writeln!(output, "    error: {}", serde_json::to_string(error)?)?;
+        }
+    }
+    output.flush()?;
+    Ok(())
+}
+
+/// Display a change page as compact JSON or a concise saved-state timeline.
+///
+/// `page: &SnapshotJobChangePage` contains checked historical projections and
+/// cursor bounds; `json: bool` selects the full response. Returns
+/// `Result<(), Box<dyn Error>>` after flushing stdout. Compact JSON preserves the
+/// backend's 1-MiB JSON-body bound; its final newline is outside that body.
+/// Serialization and write failures propagate and can leave partial output.
+fn print_job_changes(page: &SnapshotJobChangePage, json: bool) -> Result<(), Box<dyn Error>> {
+    let mut output = std::io::stdout().lock();
+    if json {
+        serde_json::to_writer(&mut output, page)?;
+        writeln!(output)?;
+    } else {
+        writeln!(output, "Persisted snapshot-job changes:")?;
+        writeln!(output, "  server_id: {}", page.server_id)?;
+        writeln!(output, "  sync_epoch: {}", page.sync_epoch)?;
+        writeln!(output, "  after: {}", page.after)?;
+        writeln!(output, "  next: {}", page.next)?;
+        writeln!(output, "  high_water: {}", page.high_water)?;
+        writeln!(output, "  minimum: {}", page.minimum)?;
+        writeln!(output, "  batches: {}", page.batches.len())?;
+        for batch in &page.batches {
+            let state = serde_json::to_value(batch.job.state)?;
+            let state = state.as_str().ok_or("invalid serialized job state")?;
+            writeln!(
+                output,
+                "  {}: job {}, revision {}, {state}",
+                batch.seq, batch.job.job_id, batch.job.revision
+            )?;
         }
     }
     output.flush()?;
