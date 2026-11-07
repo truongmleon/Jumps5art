@@ -74,7 +74,7 @@ pub use capacity::{
 };
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
 pub const FORMAT_FILE: &str = "format.json";
 pub const LOCK_FILE: &str = "metadata.lock";
@@ -354,7 +354,7 @@ pub enum StorageError {
     InvalidMigrationJournal(#[source] serde_json::Error),
     /// Older readable metadata must be explicitly upgraded before storing jobs.
     #[error(
-        "snapshot jobs require metadata schema 3; found {found}; migrate the offline root first"
+        "snapshot jobs require metadata schema 3 or later; found {found}; migrate the offline root first"
     )]
     JobsUnavailable { found: u32 },
     /// No saved request has the supplied job identity.
@@ -504,7 +504,7 @@ pub fn migrate(root: &Path, snapshot_output: &Path) -> Result<MigrationReport> {
 
 /// Save a queued metadata-copy request without starting the copy.
 ///
-/// `root: &Path` selects existing schema-3 metadata; `output: &Path` names a new
+/// `root: &Path` selects existing metadata with a job ledger; `output: &Path` names a new
 /// UTF-8 destination outside it. Returns `Result<SnapshotJob>` after the request
 /// and its full change projection commit together. Invalid paths, busy storage,
 /// incompatible schema, and database errors leave no accepted request.
@@ -528,7 +528,7 @@ pub fn run_snapshot_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
 
 /// Execute the oldest queued snapshot request without first choosing its ID.
 ///
-/// `root: &Path` selects existing offline schema-3 metadata. Returns
+/// `root: &Path` selects existing offline metadata with a job ledger. Returns
 /// `Result<Option<SnapshotJob>>`: `None` means no queued work exists; `Some(job)`
 /// describes the one attempted request, including a saved `Failed` outcome when
 /// copying fails. The caller must inspect that state. Durable acceptance sequence
@@ -551,7 +551,7 @@ pub fn inspect_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
 
 /// Show how a saved request reached its current status without running it again.
 ///
-/// `root: &Path` selects checkpointed schema-3 metadata and `job_id: JobId` selects
+/// `root: &Path` selects checkpointed metadata with a job ledger and `job_id: JobId` selects
 /// the request. Returns `Result<Vec<SnapshotJob>>` with its original full values
 /// in revision order, bounded to 16 entries for this closed runner. The checked
 /// reader rejects inconsistent history, unknown jobs, busy roots, and pending WAL
@@ -572,7 +572,7 @@ pub fn list_jobs(root: &Path, limit: u16) -> Result<Vec<SnapshotJob>> {
 /// Find jobs in one recorded state before limiting the newest matching results.
 ///
 /// For example, queued requests remain discoverable when newer completed work
-/// fills an unfiltered page. `root: &Path` selects checkpointed schema-3 metadata,
+/// fills an unfiltered page. `root: &Path` selects checkpointed metadata with a job ledger,
 /// `state: JobState` is queued/running/verifying/completed/failed/canceled, and
 /// `limit: u16` must be `1..=100`. Returns `Result<Vec<SnapshotJob>>` in reverse
 /// acceptance order without executing work or changing files. Other states and
@@ -616,7 +616,7 @@ pub fn cancel_job(
 
 /// Explicitly reconcile a stopped command's WAL and incomplete active jobs.
 ///
-/// `root: &Path` selects existing schema-3 metadata. Returns
+/// `root: &Path` selects existing metadata with a job ledger. Returns
 /// `Result<Vec<SnapshotJob>>` with jobs changed from active to failed, fencing
 /// their old tokens. Queued work remains queued. Recovery requires exclusive
 /// access, validates committed WAL before writing, and never infers completion

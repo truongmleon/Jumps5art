@@ -177,7 +177,7 @@ fn initialized_metadata_reopens_with_same_identity_and_verified_schema() {
     let reopened = inspect(&root).expect("offline reopen");
     assert_eq!(initial, reopened);
     assert_eq!(reopened.format_version, 1);
-    assert_eq!(reopened.schema_version, 3);
+    assert_eq!(reopened.schema_version, 4);
     assert_eq!(reopened.change_seq.map(|value| value.value()), Some(0));
     assert_eq!(reopened.journal_mode, "wal");
     assert_eq!(reopened.integrity_check, "ok");
@@ -598,12 +598,15 @@ fn uri_reserved_characters_in_paths_do_not_change_inspection_flags() {
 
 /// Require the complete known ledger schema instead of accepting a partial upgrade.
 #[test]
-fn schema3_requires_exact_ledger_tables_and_queue_index() {
+fn current_schema_requires_exact_ledger_and_catalog_definitions() {
     for sql in [
         "DROP INDEX jobs_queue",
         "ALTER TABLE jobs ADD COLUMN surprise TEXT",
         "CREATE INDEX unexpected_job_index ON jobs(updated_at_ms)",
         "DELETE FROM schema_migrations WHERE version=3",
+        "DELETE FROM schema_migrations WHERE version=4",
+        "DROP INDEX mass_live_sibling_names",
+        "ALTER TABLE media_marker ADD COLUMN surprise TEXT",
     ] {
         let (_parent, root, _) = fixture();
         change_database(&root, sql);

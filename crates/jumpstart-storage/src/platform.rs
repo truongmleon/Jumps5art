@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use fs2::FileExt;
 use jumpstart_domain::{Counter, ServerId, SyncEpoch};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, params};
 use rustix::fs::{Mode, OFlags, RenameFlags};
 use uuid::Uuid;
 
@@ -38,6 +38,7 @@ mod history;
 mod jobs;
 mod migration;
 mod schema3;
+mod schema4;
 mod snapshot;
 
 pub(super) use changes::pull_job_changes;
@@ -276,6 +277,7 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     transaction.commit()?;
     apply_schema2(&mut connection)?;
     apply_schema3(&mut connection)?;
+    schema4::apply(&mut connection)?;
     verify_database(&connection, marker)?;
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -407,7 +409,7 @@ fn read_marker(root: &Path) -> Result<FormatMarker> {
             supported: FORMAT_VERSION,
         });
     }
-    if !matches!(marker.schema_version, 1..=3) {
+    if !(1..=SCHEMA_VERSION).contains(&marker.schema_version) {
         return Err(StorageError::UnsupportedSchema {
             found: marker.schema_version.into(),
             supported: SCHEMA_VERSION,
@@ -530,7 +532,7 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
         ));
     }
     let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if !matches!(version, 1..=3) {
+    if !(1..=i64::from(SCHEMA_VERSION)).contains(&version) {
         return Err(StorageError::UnsupportedSchema {
             found: version,
             supported: SCHEMA_VERSION,
@@ -539,55 +541,7 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
     if version != i64::from(marker.schema_version) {
         return Err(StorageError::MigrationMismatch);
     }
-    for (name, expected) in [
-        ("schema_migrations", MIGRATIONS_TABLE),
-        (
-            "server_state",
-            match version {
-                1 => STATE_TABLE,
-                2 => STATE_TABLE_V2,
-                3 => STATE_TABLE_V3,
-                _ => unreachable!(),
-            },
-        ),
-    ] {
-        let actual: Option<String> = connection
-            .query_row(
-                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                [name],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if actual.as_deref().map(str::trim) != Some(expected.trim()) {
-            return Err(StorageError::MigrationMismatch);
-        }
-    }
-    let schema_objects: i64 = connection.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
-        [],
-        |row| row.get(0),
-    )?;
-    if version == 3 {
-        for (kind, name, expected) in [
-            ("table", "jobs", schema3::JOBS_TABLE),
-            ("table", "change_batches", schema3::CHANGE_BATCHES_TABLE),
-            ("index", "jobs_queue", schema3::JOBS_QUEUE_INDEX),
-        ] {
-            let actual: Option<String> = connection
-                .query_row(
-                    "SELECT sql FROM sqlite_schema WHERE type=?1 AND name=?2",
-                    [kind, name],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if actual.as_deref().map(str::trim) != Some(expected.trim()) {
-                return Err(StorageError::MigrationMismatch);
-            }
-        }
-    }
-    if schema_objects != if version == 3 { 5 } else { 2 } {
-        return Err(StorageError::MigrationMismatch);
-    }
+    verify_schema_objects(connection, marker.schema_version)?;
     let checks = connection
         .prepare("PRAGMA integrity_check")?
         .query_map([], |row| row.get::<_, String>(0))?
@@ -625,8 +579,11 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
             watermark_migration_checksum(),
         ));
     }
-    if version == 3 {
+    if version >= 3 {
         expected_migrations.push((3, schema3::MIGRATION_NAME.to_owned(), schema3::checksum()));
+    }
+    if version >= 4 {
+        expected_migrations.push((4, schema4::MIGRATION_NAME.to_owned(), schema4::checksum()));
     }
     if migrations != expected_migrations {
         return Err(StorageError::MigrationMismatch);
@@ -643,9 +600,45 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
         return Err(StorageError::IdentityMismatch);
     }
     read_change_seq(connection, marker.schema_version)?;
-    if version == 3 {
+    if version >= 3 {
         schema3::verify_ledger(connection)?;
         jobs::verify_all_jobs(connection)?;
+    }
+    Ok(())
+}
+
+/// Require the complete DDL for the database's declared version.
+///
+/// `connection` is the SQLite database and `version` has already been checked
+/// against the marker. Returns `Ok(())` only for the exact set of application
+/// objects. This catches a missing constraint or index even when the migration
+/// checksum row itself was left untouched.
+fn verify_schema_objects(connection: &Connection, version: u32) -> Result<()> {
+    let mut expected = vec![
+        MIGRATIONS_TABLE,
+        match version {
+            1 => STATE_TABLE,
+            2 => STATE_TABLE_V2,
+            _ => STATE_TABLE_V3,
+        },
+    ];
+    if version >= 3 {
+        expected.extend([
+            schema3::JOBS_TABLE,
+            schema3::CHANGE_BATCHES_TABLE,
+            schema3::JOBS_QUEUE_INDEX,
+        ]);
+    }
+    if version >= 4 {
+        expected.extend(schema4::statements());
+    }
+    expected.sort_unstable();
+    let actual = connection
+        .prepare("SELECT sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY sql")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if actual != expected {
+        return Err(StorageError::MigrationMismatch);
     }
     Ok(())
 }
@@ -654,18 +647,18 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
 ///
 /// # Arguments
 /// * `connection` — checked `&Connection` containing the selected schema.
-/// * `schema` — `u32` schema version, either 1, 2, or 3.
+/// * `schema` — `u32` a supported schema version.
 ///
 /// # Returns
 /// `Result<Option<Counter>>`: `None` for schema 1, or the actual nonnegative value
-/// for schema 2 or 3. Zero means that no sequenced mutations have been committed yet.
+/// for schema 2 and later. Zero means that no sequenced mutations have been committed yet.
 ///
 /// # Errors
 /// Refuses unsupported versions, missing/invalid values, and failed queries.
 fn read_change_seq(connection: &Connection, schema: u32) -> Result<Option<Counter>> {
     match schema {
         1 => Ok(None),
-        2 | 3 => {
+        2..=SCHEMA_VERSION => {
             let sequence: i64 = connection.query_row(
                 "SELECT change_seq FROM server_state WHERE singleton = 1",
                 [],

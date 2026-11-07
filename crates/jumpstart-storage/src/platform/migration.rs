@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::{
     VerifiedMetadata, apply_schema2, apply_schema3, destination, io, lock_metadata, open_directory,
-    open_regular, read_change_seq, read_marker, readonly_uri, snapshot, sync_directory,
+    open_regular, read_change_seq, read_marker, readonly_uri, schema4, snapshot, sync_directory,
     verify_database, verify_locked_metadata,
 };
 use crate::{
@@ -103,9 +103,9 @@ fn migrate_with_hook(
         let backup = snapshot::create_snapshot_from_verified(&source, snapshot_output)?;
         milestone(MigrationStep::BackupPrepared)?;
         let journal = MigrationJournal {
-            journal_format_version: 2,
+            journal_format_version: 3,
             from_schema_version: source.marker.schema_version,
-            to_schema_version: 3,
+            to_schema_version: SCHEMA_VERSION,
             server_id: source.marker.server_id,
             sync_epoch: source.marker.sync_epoch,
             backup,
@@ -221,22 +221,25 @@ fn finish_upgrade(
     if database_marker.schema_version == 1 {
         apply_schema2(&mut connection)?;
         database_marker.schema_version = 2;
-        if journal.to_schema_version == 3 {
+        if journal.to_schema_version > 2 {
             milestone(MigrationStep::IntermediateCommitted)?;
         }
     }
-    if database_marker.schema_version == 2 && journal.to_schema_version == 3 {
+    if database_marker.schema_version == 2 && journal.to_schema_version >= 3 {
         apply_schema3(&mut connection)?;
+        database_marker.schema_version = 3;
+        if journal.to_schema_version > 3 {
+            milestone(MigrationStep::IntermediateCommitted)?;
+        }
+    }
+    if database_marker.schema_version == 3 && journal.to_schema_version == 4 {
+        schema4::apply(&mut connection)?;
     }
     milestone(MigrationStep::DatabaseCommitted)?;
-    database_marker.schema_version = journal.to_schema_version;
-    verify_database(&connection, &database_marker)?;
-    let preserved_position = journal.backup.change_seq.map_or(0, |value| value.value());
-    if read_change_seq(&connection, journal.to_schema_version)?.map(|value| value.value())
-        != Some(preserved_position)
-    {
+    let database_marker = validate_database_state(&connection, &marker, &journal)?;
+    if database_marker.schema_version != journal.to_schema_version {
         return Err(StorageError::InvalidMigration(
-            "interrupted bootstrap upgrade has an unexpected change position",
+            "migration did not reach the journal's target schema",
         ));
     }
     let (busy, _, _): (i64, i64, i64) =
@@ -319,7 +322,7 @@ fn validate_database_state(
     journal: &MigrationJournal,
 ) -> Result<FormatMarker> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !matches!(version, 1..=3)
+    if !(1..=SCHEMA_VERSION).contains(&version)
         || version < journal.from_schema_version
         || version > journal.to_schema_version
         || ![journal.from_schema_version, journal.to_schema_version]
@@ -343,7 +346,7 @@ fn validate_database_state(
             "interrupted upgrade has a changed position",
         ));
     }
-    if version == 3 {
+    if version >= 3 && journal.from_schema_version < 3 {
         let (floor, jobs): (i64, i64) = connection.query_row(
             "SELECT change_floor, (SELECT count(*) FROM jobs) FROM server_state WHERE singleton=1",
             [],
@@ -358,11 +361,12 @@ fn validate_database_state(
     Ok(expected)
 }
 
-/// Check that every old migration record still matches the preserved snapshot.
+/// Check that old migration records and the existing job ledger match the snapshot.
 ///
 /// `connection` is the checked database; `backup` identifies its verified baseline.
 /// Returns `Result<()>` after comparing the complete original migration prefix,
-/// including its timestamps. Identity is checked separately by database/journal validation.
+/// including its timestamps. For a schema-3 baseline, it also compares every
+/// saved job and change in order, so resume cannot silently adopt altered work.
 fn compare_preserved_state(connection: &Connection, backup: &SnapshotReport) -> Result<()> {
     let saved = Connection::open_with_flags(
         readonly_uri(&backup.root.join(crate::SNAPSHOT_DATABASE_FILE)),
@@ -382,10 +386,52 @@ fn compare_preserved_state(connection: &Connection, backup: &SnapshotReport) -> 
             "migration history differs from the preserved snapshot",
         ));
     }
+    if backup.schema_version >= 3 {
+        for query in [
+            "SELECT * FROM server_state ORDER BY singleton",
+            "SELECT * FROM jobs ORDER BY job_id",
+            "SELECT * FROM change_batches ORDER BY seq",
+        ] {
+            if !same_rows(connection, &saved, query)? {
+                return Err(StorageError::InvalidMigration(
+                    "job ledger differs from the preserved snapshot",
+                ));
+            }
+        }
+    }
     saved
         .close()
         .map_err(|(_, error)| StorageError::Database(error))?;
     Ok(())
+}
+
+/// Compare one ordered projection in the current and saved databases.
+///
+/// `query` is a fixed internal SELECT with a stable ordering. Returns whether
+/// the rows and their SQLite values agree. Reads one row from each connection
+/// at a time so a large job history does not become a second in-memory copy.
+fn same_rows(current: &Connection, saved: &Connection, query: &str) -> Result<bool> {
+    let mut current_statement = current.prepare(query)?;
+    let mut saved_statement = saved.prepare(query)?;
+    let columns = current_statement.column_count();
+    if columns != saved_statement.column_count() {
+        return Ok(false);
+    }
+    let mut current_rows = current_statement.query([])?;
+    let mut saved_rows = saved_statement.query([])?;
+    loop {
+        match (current_rows.next()?, saved_rows.next()?) {
+            (Some(current_row), Some(saved_row)) => {
+                for column in 0..columns {
+                    if current_row.get_ref(column)? != saved_row.get_ref(column)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            (None, None) => return Ok(true),
+            _ => return Ok(false),
+        }
+    }
 }
 
 /// Read a strict, bounded journal without following its final symlink.
@@ -409,14 +455,17 @@ fn read_journal(root: &Path) -> Result<MigrationJournal> {
 ///
 /// `root` is the canonical metadata directory; `output` is the caller's requested
 /// backup path; `journal` is untrusted decoded data. Returns `Result<()>` only for
-/// the supported legacy 1-to-2 or current 1/2-to-3 upgrade and matching old identity, path, and artifact.
+/// a supported recorded upgrade and matching old identity, path, and artifact.
 fn validate_journal(root: &Path, output: &Path, journal: &MigrationJournal) -> Result<()> {
     let supported = (journal.journal_format_version == 1
         && journal.from_schema_version == 1
         && journal.to_schema_version == 2)
         || (journal.journal_format_version == 2
             && matches!(journal.from_schema_version, 1 | 2)
-            && journal.to_schema_version == 3);
+            && journal.to_schema_version == 3)
+        || (journal.journal_format_version == 3
+            && matches!(journal.from_schema_version, 1..=3)
+            && journal.to_schema_version == 4);
     if !supported
         || journal.backup.schema_version != journal.from_schema_version
         || journal.backup.format_version != FORMAT_VERSION
@@ -668,7 +717,7 @@ mod tests {
                 .is_err()
             );
             let resumed = migrate(&root, &backup).unwrap();
-            assert_eq!(resumed.metadata.schema_version, 3);
+            assert_eq!(resumed.metadata.schema_version, SCHEMA_VERSION);
             assert_eq!(resumed.metadata.server_id, before.server_id);
             assert_eq!(resumed.metadata.sync_epoch, before.sync_epoch);
             assert_eq!(resumed.metadata.change_seq.unwrap().value(), 42);

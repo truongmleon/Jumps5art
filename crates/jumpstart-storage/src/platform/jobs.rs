@@ -58,7 +58,7 @@ enum RunStep {
 
 /// Accept a snapshot request durably without starting its file copy.
 ///
-/// `root` is an existing schema-3 metadata `&Path`; `output` names a new directory
+/// `root` is an existing metadata with a job ledger `&Path`; `output` names a new directory
 /// outside it. Returns `Result<SnapshotJob>` in Queued after commit/checkpoint.
 /// Invalid destinations and storage failures return errors without adoption.
 pub(crate) fn enqueue_snapshot_job(root: &Path, output: &Path) -> Result<SnapshotJob> {
@@ -84,7 +84,7 @@ pub(crate) fn enqueue_snapshot_job(root: &Path, output: &Path) -> Result<Snapsho
 
 /// Run queued work, or return a successful outcome that was already recorded.
 ///
-/// `root` selects schema-3 metadata and `job_id` is its validated `JobId`.
+/// `root` selects metadata with a job ledger and `job_id` is its validated `JobId`.
 /// Returns `Result<SnapshotJob>` after new execution or an unchanged saved
 /// Completed record. Reading that completion neither copies nor verifies the
 /// current output; it lets a caller recover a lost success reply without rerunning.
@@ -97,7 +97,7 @@ pub(crate) fn run_snapshot_job(root: &Path, job_id: JobId) -> Result<SnapshotJob
 
 /// Run at most one queued request, choosing the oldest durable acceptance first.
 ///
-/// `root: &Path` selects existing schema-3 metadata. Returns
+/// `root: &Path` selects existing metadata with a job ledger. Returns
 /// `Result<Option<SnapshotJob>>`: `None` means the checked queue is empty;
 /// `Some` contains one completed or failed outcome, which the caller must inspect.
 /// Selection and execution retain the same exclusive lock, without reopening a
@@ -235,7 +235,7 @@ fn run_loaded(
 
 /// Read one checked job and replay its bounded persisted transition history.
 ///
-/// `root` is schema-3 metadata; `job_id` selects the record. Returns
+/// `root` is metadata with a job ledger; `job_id` selects the record. Returns
 /// `Result<SnapshotJob>` without changing files. A missing job or invalid history
 /// is an explicit error rather than a synthesized empty result.
 pub(crate) fn inspect_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
@@ -248,7 +248,7 @@ pub(crate) fn inspect_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
 
 /// List a bounded number of jobs in reverse durable acceptance order.
 ///
-/// `root` is schema-3 metadata and `limit` must be `1..=100`. Returns
+/// `root` is metadata with a job ledger and `limit` must be `1..=100`. Returns
 /// `Result<Vec<SnapshotJob>>`; order uses created change positions, not clocks.
 /// Invalid limits are refused before accessing `root`.
 pub(crate) fn list_jobs(root: &Path, limit: u16) -> Result<Vec<SnapshotJob>> {
@@ -272,7 +272,7 @@ pub(crate) fn list_jobs(root: &Path, limit: u16) -> Result<Vec<SnapshotJob>> {
 /// caller asks for the first waiting jobs. The state/acceptance index narrows the
 /// SQL selection; each returned record still receives normal history validation.
 ///
-/// `root` is schema-3 metadata, `state` is one of this runner's six states, and
+/// `root` is metadata with a job ledger, `state` is one of this runner's six states, and
 /// `limit` must be `1..=100`. Returns `Result<Vec<SnapshotJob>>` in reverse durable
 /// acceptance order. Invalid states and limits fail before filesystem access.
 pub(crate) fn list_jobs_in_state(
@@ -343,7 +343,7 @@ pub(crate) fn cancel_job(
 
 /// Fence interrupted active runs and checkpoint already committed job decisions.
 ///
-/// `root` is schema-3 metadata. Returns `Result<Vec<SnapshotJob>>` containing only
+/// `root` is metadata with a job ledger. Returns `Result<Vec<SnapshotJob>>` containing only
 /// Running/Verifying records changed to Failed. Queued and terminal jobs remain
 /// unchanged. Existing output is retained and never treated as proof of completion.
 /// The exclusive maintenance lock refuses recovery alongside an active runner.
@@ -363,7 +363,7 @@ pub(crate) fn recover_jobs(root: &Path) -> Result<Vec<SnapshotJob>> {
     Ok(recovered)
 }
 
-/// Open a schema-3 writer only after a checked read-only view has passed validation.
+/// Open a job ledger writer only after a checked read-only view has passed validation.
 ///
 /// `root` selects metadata and `recovery` permits committed WAL from a dead process.
 /// Returns `Result<Writer>` with continuous exclusive maintenance ownership.
@@ -439,7 +439,7 @@ fn recovery_reader(root: PathBuf, lock: File) -> Result<VerifiedMetadata> {
         Err(error) => return Err(io("inspect migration journal", &root, error)),
     }
     let marker = read_marker(&root)?;
-    if marker.schema_version != 3 {
+    if marker.schema_version < 3 {
         return Err(StorageError::JobsUnavailable {
             found: marker.schema_version,
         });
@@ -567,10 +567,10 @@ fn finish_reader(source: VerifiedMetadata) -> Result<()> {
 
 /// Require the schema that actually contains the persistent job ledger.
 ///
-/// `report` describes checked metadata. Returns `Result<()>` for schema 3, or an
+/// `report` describes checked metadata. Returns `Result<()>` for schema 3 or later, or an
 /// actionable `JobsUnavailable` error without silently upgrading an older root.
 fn require_jobs(report: &MetadataReport) -> Result<()> {
-    if report.schema_version == 3 {
+    if report.schema_version >= 3 {
         Ok(())
     } else {
         Err(StorageError::JobsUnavailable {
@@ -740,10 +740,10 @@ fn load_job(connection: &Connection, id: JobId) -> Result<(SnapshotJob, JobLifec
     let mut count = 0;
     let mut previous_seq = 0;
     let mut captured_position = None;
-    let (server_id, sync_epoch): (Vec<u8>, Vec<u8>) = connection.query_row(
-        "SELECT server_id,sync_epoch FROM server_state WHERE singleton=1",
+    let (server_id, sync_epoch, schema_version): (Vec<u8>, Vec<u8>, u32) = connection.query_row(
+        "SELECT server_id,sync_epoch,user_version FROM server_state,pragma_user_version WHERE singleton=1",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let mut last = None;
     while let Some(row) = rows.next()? {
@@ -790,7 +790,7 @@ fn load_job(connection: &Connection, id: JobId) -> Result<(SnapshotJob, JobLifec
         if let Some(result) = projection.result.as_ref()
             && (result.server_id.as_uuid().as_bytes().as_slice() != server_id.as_slice()
                 || result.sync_epoch.as_uuid().as_bytes().as_slice() != sync_epoch.as_slice()
-                || result.schema_version != 3
+                || !(3..=schema_version).contains(&result.schema_version)
                 || result.scope != SnapshotScope::Metadata
                 || result.format_version != crate::FORMAT_VERSION
                 || result.snapshot_format_version != crate::SNAPSHOT_FORMAT_VERSION
