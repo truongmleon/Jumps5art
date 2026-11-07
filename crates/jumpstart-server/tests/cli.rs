@@ -708,8 +708,8 @@ fn queued_jobs_persist_and_read_commands_leave_metadata_unchanged() {
     assert!(!output.exists());
 }
 
-/// Execute an accepted request and inspect its completed result in a later process.
-/// Completion requires an actual snapshot that the independent verifier accepts.
+/// Execute an accepted request and repeat it after a lost reply without changing
+/// the recorded result, metadata bytes, change position, or verified snapshot.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn running_a_snapshot_job_persists_verified_completion() {
@@ -754,18 +754,49 @@ fn running_a_snapshot_job_persists_verified_completion() {
         finished["result"]
     );
 
-    let database_before = fs::read(output.join("metadata.sqlite")).unwrap();
+    let snapshot_before = fs::read(output.join("metadata.sqlite")).unwrap();
+    let database_before = fs::read(root.join("database/jumpstart.sqlite")).unwrap();
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+    let position_before = command()
+        .args(["inspect", "--json", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(position_before.status.success());
+    let metadata_before: Value = serde_json::from_slice(&position_before.stdout).unwrap();
     let repeated = command()
-        .args(["jobs", "run", "--development", "--metadata-root"])
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
         .arg(&root)
         .args(["--job-id", id])
         .output()
         .unwrap();
-    assert!(!repeated.status.success());
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(repeated.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&repeated.stdout).unwrap(),
+        finished
+    );
     assert_eq!(
         fs::read(output.join("metadata.sqlite")).unwrap(),
+        snapshot_before
+    );
+    assert_eq!(
+        fs::read(root.join("database/jumpstart.sqlite")).unwrap(),
         database_before
     );
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+    let position_after = command()
+        .args(["inspect", "--json", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(position_after.status.success());
+    let metadata_after: Value = serde_json::from_slice(&position_after.stdout).unwrap();
+    assert_eq!(metadata_after["change_seq"], metadata_before["change_seq"]);
     assert_eq!(inspect_snapshot_job(&root, id), finished);
 }
 

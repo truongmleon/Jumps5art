@@ -128,12 +128,14 @@ The saved `SnapshotJob` describes what the request is for and what happened:
 | `state`, `revision`, `attempt_generation` | Describe the stage and retain the lifecycle's checks against outdated control requests and worker results. |
 | `created_seq` | Identifies the change position at which the request was accepted. |
 | `created_at_ms`, `updated_at_ms` | Supply UTC observation times for people; revisions and sequences decide update order. |
-| `result` | The verified `SnapshotReport` after successful completion. |
+| `result` | The `SnapshotReport` verified and recorded at completion; current artifact health requires separate verification. |
 | `error` | The retained explanation of a failed attempt. |
 
 Job revisions, worker token counters, and change positions use decimal strings in JSON. Each accepted mutation updates the job, appends its full versioned change projection, and advances the stored high-water mark in one database transaction. This keeps a saved status from becoming disconnected from its change history.
 
 `jobs run` executes synchronously while holding the exclusive maintenance lock. It commits lifecycle steps without keeping a SQLite transaction open across the bulk snapshot copy. Other controllers fail as busy while that command owns the root; this preview does not provide cancellation during a running copy. The command records completion only after the actual snapshot passes verification. If copying fails, it saves a `Failed` outcome, prints the job record, and exits unsuccessfully. A saved failure is not a successful snapshot.
+
+If a successful `jobs run` reply is lost, repeat the same command with the same job ID. A saved `Completed` job returns its recorded `SnapshotJob` unchanged: no new copy, event, revision, worker token, or update timestamp. This reads a historical success; it does not verify the output again, find a moved artifact, or declare that the recorded path is healthy today. Use `snapshot verify --snapshot-root PATH` to check the artifact at its current location. Failed and canceled jobs remain closed. A process exit can leave uncheckpointed WAL even after completion commits; if the command reports that recovery is required, run `jobs recover` before repeating it. Recovery preserves committed completion and fences interrupted active work as failed.
 
 A still-queued request can be canceled using its inspected revision:
 

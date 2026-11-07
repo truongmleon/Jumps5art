@@ -440,13 +440,16 @@ pub fn enqueue_snapshot_job(root: &Path, output: &Path) -> Result<SnapshotJob> {
     platform::enqueue_snapshot_job(root, output)
 }
 
-/// Execute one queued request synchronously and save its verified outcome.
+/// Execute queued work or retrieve its already recorded successful outcome.
 ///
 /// `root: &Path` selects offline metadata and `job_id: JobId` selects the request.
 /// Returns `Result<SnapshotJob>`; a copy failure is a saved `Failed` job with an
 /// explanation, while an API/storage failure is `Err`. The caller must inspect
-/// the returned state. Exclusive maintenance access covers the run, without a
-/// database write transaction spanning the copy. No incomplete output is deleted.
+/// the returned state. Repeating a Completed job returns the exact saved record
+/// without another copy or current artifact verification. Failed/canceled jobs
+/// stay closed. Exclusive maintenance access covers the call, without a database
+/// write transaction spanning the copy. Pending WAL still requires explicit
+/// recovery before replay; no incomplete output is deleted.
 pub fn run_snapshot_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
     platform::run_snapshot_job(root, job_id)
 }
