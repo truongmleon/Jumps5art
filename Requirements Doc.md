@@ -1,5 +1,7 @@
 # Jumpstart Requirements
 
+Delivery-stage breakdowns and acceptance scenarios are indexed in [docs/PRDs](docs/PRDs/README.md). This document remains the source of truth for product behavior; the breakdowns identify evidence and implementation gaps without replacing these requirements.
+
 ## I. System-Wide Foundation and Constraints
 
 ### Target Environment

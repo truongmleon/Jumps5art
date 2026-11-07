@@ -2,18 +2,18 @@
 
 [Back to the type guide](README.md)
 
-The storage library currently prepares and checks a server's bookkeeping folder and makes standalone copies of its initial SQLite database. A separate capacity feature observes available disk space. The types below keep the observations, their meaning, and the resources needed to make them separate.
+The storage library currently prepares and checks a server's bookkeeping folder and makes standalone copies of its SQLite metadata database. A separate capacity feature observes available disk space. The types below keep the observations, their meaning, and the resources needed to make them separate.
 
 ## Snapshots: what did we copy?
 
 Suppose you create a metadata snapshot and later move it to another folder. You need to know which server it came from, whether its files still match the recorded contents, and what was included. A directory name such as `backup-1` cannot answer those questions.
 
-The snapshot contains `metadata.sqlite` and `snapshot.json`. The database currently holds bootstrap bookkeeping, such as the server's identity and initial schema. It does not contain songs, photos, Worlds data, or secrets.
+The snapshot contains `metadata.sqlite` and `snapshot.json`. The database holds server bookkeeping and, in schema 3, saved snapshot jobs and their ordered changes. Schemas 1/2 retain the earlier bootstrap scope. It does not contain songs, photos, Worlds data, or secrets.
 
 | Type | What it is for | Why we need it |
 |---|---|---|
 | `SnapshotReport` | The answer returned after creating or verifying a snapshot: its current path, source identity, versions, database size, fingerprint, and scope. | The CLI and future callers need one consistent description of the result. A bare success flag would hide which server and exact artifact were checked. |
-| `SnapshotScope` | A machine-readable label for what the artifact includes. Its current choice is `BootstrapMetadata`. | A successful metadata copy must identify its actual contents. Otherwise callers might describe it as a complete server backup and assume missing media were protected. |
+| `SnapshotScope` | A machine-readable label for what the artifact includes. It uses `BootstrapMetadata` for schemas 1/2 and `Metadata` for schema 3, which also stores snapshot jobs and their changes. | A successful metadata copy must identify its actual contents. Otherwise callers might describe it as a complete server backup and assume missing media were protected. |
 
 The report uses existing foundation types for individual fields:
 
@@ -44,7 +44,7 @@ Source: [snapshot report and scope](../../crates/jumpstart-storage/src/lib.rs), 
 
 ## Capacity: how much room is available?
 
-This feature is described by [PR #25](https://github.com/truongmleon/Jumps5art/pull/25), which was open when this guide was written.
+Capacity observations are implemented in this checkout.
 
 Suppose a filesystem has 100 GiB total capacity and reports 8 GiB available to ordinary users. The measurement answers “how much room is there right now?” The default policy then says that 8 GiB is below its 10 GiB warning threshold and calculates a 256 MiB recovery reserve.
 
@@ -58,7 +58,20 @@ The default reserve leaves room for failure recording, safe shutdown, and recove
 
 The current report observes and calculates. It does not set aside bytes or pause a producer; future job admission must enforce those decisions. Another process can consume space immediately after measurement.
 
-Source: [capacity types and calculations](https://github.com/truongmleon/Jumps5art/blob/7d6e2577f4eb38307963f5b4cf6dc8cf922568d9/crates/jumpstart-storage/src/capacity.rs).
+Source: [capacity types and calculations](../../crates/jumpstart-storage/src/capacity.rs).
+
+## Upgrades bridge the database and format marker
+
+A metadata upgrade changes two separately stored things: the SQLite schema and `format.json`. A database transaction cannot atomically replace that separate marker file. An interruption can leave the database upgraded while the marker still identifies the older layout.
+
+| Type | What it is for | Why it exists |
+|---|---|---|
+| `MigrationReport` | Returns the checked resulting metadata, starting/target schema versions, retained backup, and whether work resumed. | A caller must distinguish a real upgrade, a resumed upgrade, and an already-current no-op, and locate the verified prior state. |
+| Private `MigrationJournal` | Retains the workflow's identities, source/target versions, baseline and verified recovery-copy information. | A later explicit retry needs evidence of the exact upgrade to finish; it cannot guess from a mismatch or reuse an unrelated snapshot. |
+
+Migration first saves a verified recovery snapshot, then records the journal before changing the source. With a journal present, ordinary inspection refuses recovery work. Repeating migration with the same paths validates the recorded evidence and finishes the interrupted workflow. Schema 3 preserves the earlier change position as its history floor and retains the server identity and epoch. Completing a legacy journal keeps its recorded target; another forward upgrade needs its own recovery copy.
+
+Source: [upgrade report](../../crates/jumpstart-storage/src/lib.rs), [journal and recovery](../../crates/jumpstart-storage/src/platform/migration.rs), and [migration tests](../../crates/jumpstart-storage/tests/migrations.rs).
 
 ## Existing metadata and error types
 
@@ -84,6 +97,7 @@ When a person runs a command, the parser turns argument strings into one of thes
 | `Cli` | Holds the parsed invocation. | The rest of the program can receive one structured request rather than repeatedly interpret raw argument strings. |
 | `Command` | Chooses the top-level action, such as initialization, metadata inspection, or snapshot work, together with its arguments. | Different actions require different data. An initialization request should carry its new path and development acknowledgment together. |
 | `SnapshotCommand` | Chooses snapshot creation or verification. | Creation needs a source and new output directory; verification needs an existing bundle. Keeping them as alternatives makes the required arguments clear. |
+| `JobCommand` | Groups enqueue, run, read, cancel, and recovery actions with their typed arguments. | A cancellation needs an observed revision; change-page reads need an epoch and position. Keeping those fields with their action makes required inputs explicit. |
 | `StorageCommand` | Groups storage observations, currently capacity inspection. | Observing an ordinary folder's space is a different request from checking an initialized Jumpstart metadata root. This type gives `storage inspect PATH` its own argument shape. |
 
 The parser creates values describing the request. The `run` function then chooses which storage function to call; the enum itself performs no copying or inspection.

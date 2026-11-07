@@ -12,18 +12,21 @@ Suppose you cancel a video conversion just as its worker finishes. The app needs
 
 `JobLifecycle::new()` makes the initial bookkeeping for that request. Running the conversion, saving the job, and stopping a process are separate responsibilities. The [worked example](Jobs.md#joblifecycle-keeps-a-jobs-status-and-safety-numbers-together) shows exactly what the bookkeeping contains and how it changes.
 
-## The new types, by question they answer
+## Types by the question they answer
 
-These are the 17 production types introduced by the five recent feature PRs. Some are private helpers; “private” means other crates cannot use them directly.
+This index groups related types by purpose. Some are private helpers; “private” means other crates cannot use them directly.
 
 | Question | Types | Explanation |
 |---|---|---|
 | What stage is this request in, and may this event change it? | `JobState`, `JobLifecycle`, `JobTransitionError` | [Job state and outdated results](Jobs.md#jobstate-names-the-stage-of-the-work) |
 | May this failure be retried, and how long should we wait? | `FailureClass`, `RetryPolicy`, `RetryDecision`, `RetryStop`, `RetryPolicyError` | [Retry decisions](Jobs.md#retry-types-limit-repeated-failures) |
+| What request and outcome survive command exit? | `SnapshotJob` | [Saved requests](Jobs.md#snapshotjob-keeps-the-request-and-outcome-after-exit) |
+| What changed since a saved position? | `SnapshotJobChange`, `SnapshotJobChangePage` | [Change pages](Jobs.md#change-pages-follow-commits-across-jobs) |
 | What did the metadata snapshot capture? | `SnapshotScope`, `SnapshotReport` | [Snapshot descriptions](Storage.md#snapshots-what-did-we-copy) |
 | How do we retain the checked source and describe a saved copy? | Private `VerifiedMetadata`, `SnapshotManifest` | [Snapshot implementation helpers](Storage.md#why-the-snapshot-helpers-are-separate-types) |
 | How much space is available, and what do the default thresholds say? | `CapacityReport`, `CapacityAssessment`, `CapacityScope` | [Capacity observations](Storage.md#capacity-how-much-room-is-available) |
-| Which command did the person type? | Private `SnapshotCommand`, `StorageCommand` | [Command arguments](Storage.md#command-types-describe-what-the-person-asked-for) |
+| What happened during an explicit schema upgrade? | `MigrationReport`, private `MigrationJournal` | [Recoverable upgrades](Storage.md#upgrades-bridge-the-database-and-format-marker) |
+| Which command did the person type? | Private `SnapshotCommand`, `StorageCommand`, `JobCommand` | [Command arguments](Storage.md#command-types-describe-what-the-person-asked-for) |
 
 ## Reading `struct`, `enum`, and `impl`
 
@@ -41,13 +44,8 @@ The `struct JobLifecycle` declaration tells you what the value holds. The `impl 
 
 ## What is available in this checkout?
 
-This guide was checked against the following code on **27 October 2026**. It adds documentation without bringing the open feature implementations into `main`.
+This guide describes the code in this checkout. Job lifecycle, retry policy, capacity observations, and metadata upgrades are merged into main. The durable snapshot-job, history, filtering, recorded-completion, and change-page features are included through the preceding PR stack. Source links are relative to the checkout so they follow the code being reviewed.
 
-| Area | Code described |
-|---|---|
-| IDs, counters, protocol, metadata initialization, and snapshots | Already on this documentation PR's `main` base; source links in the guide are relative links into the repository. |
-| Job lifecycle | [PR #23](https://github.com/truongmleon/Jumps5art/pull/23), still open when this guide was written. The guide links to its reviewed source revision. |
-| Retry policy | [PR #24](https://github.com/truongmleon/Jumps5art/pull/24), still open when this guide was written. |
-| Capacity inspection and `StorageCommand` | [PR #25](https://github.com/truongmleon/Jumps5art/pull/25), still open when this guide was written. |
+For runnable examples and current command limits, use the [CLI reference](../CLI/README.md) and [development instructions](../../CONTRIBUTING.md). A documentation page or successful policy test does not establish completion of the Foundation release stage.
 
 These are foundation libraries and local development tools. An example about importing music or converting video explains the intended use of a type; it does not mean those app features or a durable job scheduler are implemented.

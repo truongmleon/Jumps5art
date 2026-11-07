@@ -1,4 +1,4 @@
-//! Runs the local storage command-line tools and checks their observable results.
+//! Runs the metadata command-line program and checks its observable results.
 //!
 //! For example, init without --development must exit with an error and leave the
 //! requested folder absent. A successful init followed by inspect must print the
@@ -6,8 +6,11 @@
 //! development acknowledgment, preserve existing destinations, and report its
 //! limited scope. Verification must work after the source is removed and fail
 //! without modifying a damaged bundle. Existing files must remain untouched.
-//! A capacity check of an ordinary folder must report internally consistent byte
-//! counts without creating metadata or treating available space as write approval.
+//! Migration also requires acknowledgment before storage access. An already-current
+//! root must report a no-op without creating or changing a recovery snapshot.
+//! Job tests cross process boundaries: enqueue must retain a request, running it
+//! must create a verified snapshot, and later inspection must read its saved result.
+//! Failed work must be visible in the saved record and in the command's exit code.
 //!
 //! These tests check argument handling, exit status, reports, and filesystem results
 //! together. Storage-library tests alone do not exercise that program boundary.
@@ -161,13 +164,13 @@ fn snapshot_creation_requires_acknowledgment_before_storage_io() {
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("--development"), "{error}");
-    assert!(error.contains("bootstrap metadata"), "{error}");
+    assert!(error.contains("local metadata"), "{error}");
     assert!(output.stdout.is_empty());
     assert!(!missing_parent.exists());
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
-/// Verify creation reports the exact bootstrap scope and preserves authority IDs;
+/// Verify creation reports the exact metadata scope and preserves authority IDs;
 /// readonly verification works after source deletion without rewriting the bundle.
 /// Assertion or fixture failures panic.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -196,7 +199,7 @@ fn snapshot_create_and_verify_report_scope_and_survive_source_removal() {
         String::from_utf8_lossy(&output.stderr)
     );
     let created: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(created["scope"], "bootstrap_metadata");
+    assert_eq!(created["scope"], "metadata");
     assert_eq!(created["snapshot_format_version"], 1);
     assert_eq!(created["server_id"], initial["server_id"]);
     assert_eq!(created["sync_epoch"], initial["sync_epoch"]);
@@ -391,6 +394,899 @@ fn snapshot_commands_report_unsupported_platform_without_creating_paths() {
         assert!(output.stdout.is_empty());
     }
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Require acknowledgment before migration can inspect unavailable paths or create
+/// a missing parent. Assertion or fixture failures panic.
+#[test]
+fn migration_requires_acknowledgment_before_storage_io() {
+    let parent = TempDir::new().unwrap();
+    let missing_parent = parent.path().join("missing-parent");
+    let source = missing_parent.join("source");
+    let snapshot = missing_parent.join("before-upgrade");
+    let output = command()
+        .args(["migrate", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("--development"), "{error}");
+    assert!(error.contains("migration"), "{error}");
+    assert!(output.stdout.is_empty());
+    assert!(!missing_parent.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Verify migration of current schema 3 reports a no-op, preserves identity and
+/// database bytes, and does not create a recovery artifact. Fixture failures panic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn migration_of_current_schema_reports_json_noop_without_creating_snapshot() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    let snapshot = parent.path().join("unused-snapshot");
+    let initial = initialize_source(&source);
+    assert_eq!(initial["schema_version"], 3);
+    let marker_before = fs::read(source.join("format.json")).unwrap();
+    let database_before = fs::read(source.join("database/jumpstart.sqlite")).unwrap();
+    let output = command()
+        .args(["migrate", "--development", "--json", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["metadata"], initial);
+    assert_eq!(report["from_schema_version"], 3);
+    assert_eq!(report["to_schema_version"], 3);
+    assert_eq!(report["backup"], Value::Null);
+    assert_eq!(report["resumed"], false);
+    assert_eq!(fs::read(source.join("format.json")).unwrap(), marker_before);
+    assert_eq!(
+        fs::read(source.join("database/jumpstart.sqlite")).unwrap(),
+        database_before
+    );
+    assert!(!source.join("migration.json").exists());
+    assert!(!snapshot.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 1);
+}
+
+/// Verify a current root does not adopt or overwrite an existing snapshot-output
+/// directory when migration has nothing to do. Assertion or fixture failures panic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn migration_noop_preserves_existing_snapshot_output() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    initialize_source(&source);
+    let snapshot = parent.path().join("occupied-output");
+    fs::create_dir(&snapshot).unwrap();
+    let sentinel = snapshot.join("original.txt");
+    fs::write(&sentinel, b"preserve occupied output").unwrap();
+    let output = command()
+        .args(["migrate", "--development", "--json", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["backup"], Value::Null);
+    assert_eq!(fs::read(sentinel).unwrap(), b"preserve occupied output");
+    assert_eq!(fs::read_dir(snapshot).unwrap().count(), 1);
+}
+
+/// Keep migration's human-readable no-op report explicit about versions and the
+/// absent recovery snapshot. Assertion or fixture failures panic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn migration_noop_text_reports_versions_and_absent_backup() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    initialize_source(&source);
+    let snapshot = parent.path().join("unused-snapshot");
+    let output = command()
+        .args(["migrate", "--development", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.starts_with("Verified offline development metadata migration:\n"));
+    assert!(text.contains("  from_schema_version: 3\n"));
+    assert!(text.contains("  to_schema_version: 3\n"));
+    assert!(text.contains("  backup: null\n"));
+    assert!(text.contains("  resumed: false\n"));
+    assert!(!snapshot.exists());
+}
+
+/// Refuse a missing source without creating a replacement root or snapshot.
+/// Assertion or fixture failures panic.
+#[test]
+fn migration_of_missing_root_does_not_initialize_it() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("missing-source");
+    let snapshot = parent.path().join("snapshot");
+    let output = command()
+        .args(["migrate", "--development", "--json", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!source.exists());
+    assert!(!snapshot.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Refuse an unrelated existing directory and leave its contents untouched rather
+/// than adopting it as an old metadata root. Assertion or fixture failures panic.
+#[test]
+fn migration_does_not_adopt_existing_user_content() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("existing-folder");
+    fs::create_dir(&source).unwrap();
+    let sentinel = source.join("original.txt");
+    fs::write(&sentinel, b"keep unrelated contents").unwrap();
+    let snapshot = parent.path().join("snapshot");
+    let output = command()
+        .args(["migrate", "--development", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(fs::read(sentinel).unwrap(), b"keep unrelated contents");
+    assert_eq!(fs::read_dir(source).unwrap().count(), 1);
+    assert!(!snapshot.exists());
+}
+
+/// Require unsupported platforms to fail explicitly before creating either path.
+/// Assertion or fixture failures panic.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn migration_reports_unsupported_platform_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    let snapshot = parent.path().join("snapshot");
+    let output = command()
+        .args(["migrate", "--development", "--metadata-root"])
+        .arg(&source)
+        .arg("--snapshot-output")
+        .arg(&snapshot)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("supported only on Linux and macOS"));
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Enqueue a real snapshot request through the executable without running it.
+///
+/// `root` is an initialized metadata `&Path`; `output` is the new snapshot `&Path`.
+/// Returns its JSON `Value`. Panics on process, command, or decoding failure.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn enqueue_snapshot(root: &Path, output: &Path) -> Value {
+    let result = command()
+        .args([
+            "jobs",
+            "enqueue-snapshot",
+            "--development",
+            "--json",
+            "--metadata-root",
+        ])
+        .arg(root)
+        .arg("--output")
+        .arg(output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    serde_json::from_slice(&result.stdout).unwrap()
+}
+
+/// Read one persisted job through a fresh process, requiring no acknowledgment.
+///
+/// `root` is the initialized `&Path`; `id` is the job's UUID `&str`. Returns its
+/// JSON `Value`; panics if the command fails or produces invalid JSON.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inspect_snapshot_job(root: &Path, id: &str) -> Value {
+    let result = command()
+        .args(["jobs", "inspect", "--json", "--metadata-root"])
+        .arg(root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    serde_json::from_slice(&result.stdout).unwrap()
+}
+
+/// Check every job-writing command acknowledges the preview before opening a root.
+/// Valid IDs/revisions avoid making argument parsing the reason for refusal.
+#[test]
+fn job_writes_require_acknowledgment_before_storage_io() {
+    let parent = TempDir::new().unwrap();
+    let missing = parent.path().join("missing-root");
+    let output = parent.path().join("snapshot");
+    for action in ["enqueue-snapshot", "run", "run-next", "cancel", "recover"] {
+        let mut invocation = command();
+        invocation
+            .args(["jobs", action, "--metadata-root"])
+            .arg(&missing);
+        if action == "enqueue-snapshot" {
+            invocation.arg("--output").arg(&output);
+        }
+        if matches!(action, "run" | "cancel") {
+            invocation.args(["--job-id", "019c2039-4c6b-7000-8000-000000000001"]);
+        }
+        if action == "cancel" {
+            invocation.args(["--expected-revision", "1"]);
+        }
+        let result = invocation.output().unwrap();
+        assert!(!result.status.success(), "{action}");
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(error.contains("--development"), "{action}: {error}");
+        assert!(result.stdout.is_empty());
+    }
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Retain a queued request across processes, and prove read commands do not alter
+/// the metadata files or create the snapshot before execution.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn queued_jobs_persist_and_read_commands_leave_metadata_unchanged() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let output = parent.path().join("snapshot");
+    let initial = initialize_source(&root);
+    assert_eq!(initial["schema_version"], 3);
+    let queued = enqueue_snapshot(&root, &output);
+    let id = queued["job_id"].as_str().unwrap();
+    assert_eq!(queued["state"], "queued");
+    assert_eq!(queued["revision"], "1");
+    assert_eq!(queued["attempt_generation"], "0");
+    assert_eq!(queued["created_seq"], "1");
+    assert!(queued["result"].is_null());
+    assert!(queued["error"].is_null());
+    assert!(!output.exists());
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+    let database_before = fs::read(root.join("database/jumpstart.sqlite")).unwrap();
+
+    assert_eq!(inspect_snapshot_job(&root, id), queued);
+    let listed = command()
+        .args(["jobs", "list", "--json", "--limit", "1", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(report["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(report["jobs"][0], queued);
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+    assert_eq!(
+        fs::read(root.join("database/jumpstart.sqlite")).unwrap(),
+        database_before
+    );
+    assert!(!output.exists());
+}
+
+/// Execute an accepted request and repeat it after a lost reply without changing
+/// the recorded result, metadata bytes, change position, or verified snapshot.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn running_a_snapshot_job_persists_verified_completion() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let output = parent.path().join("snapshot");
+    let initial = initialize_source(&root);
+    let queued = enqueue_snapshot(&root, &output);
+    let id = queued["job_id"].as_str().unwrap();
+    let run = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let finished: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(finished["job_id"], id);
+    assert_eq!(finished["state"], "completed");
+    assert_eq!(finished["revision"], "4");
+    assert_eq!(finished["attempt_generation"], "2");
+    assert!(finished["error"].is_null());
+    assert_eq!(finished["result"]["scope"], "metadata");
+    assert_eq!(finished["result"]["server_id"], initial["server_id"]);
+    assert_eq!(inspect_snapshot_job(&root, id), finished);
+    let verified = command()
+        .args(["snapshot", "verify", "--json", "--snapshot-root"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&verified.stdout).unwrap(),
+        finished["result"]
+    );
+
+    let snapshot_before = fs::read(output.join("metadata.sqlite")).unwrap();
+    let database_before = fs::read(root.join("database/jumpstart.sqlite")).unwrap();
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+    let position_before = command()
+        .args(["inspect", "--json", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(position_before.status.success());
+    let metadata_before: Value = serde_json::from_slice(&position_before.stdout).unwrap();
+    let repeated = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(repeated.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&repeated.stdout).unwrap(),
+        finished
+    );
+    assert_eq!(
+        fs::read(output.join("metadata.sqlite")).unwrap(),
+        snapshot_before
+    );
+    assert_eq!(
+        fs::read(root.join("database/jumpstart.sqlite")).unwrap(),
+        database_before
+    );
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+    let position_after = command()
+        .args(["inspect", "--json", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(position_after.status.success());
+    let metadata_after: Value = serde_json::from_slice(&position_after.stdout).unwrap();
+    assert_eq!(metadata_after["change_seq"], metadata_before["change_seq"]);
+    assert_eq!(inspect_snapshot_job(&root, id), finished);
+}
+
+/// A destination occupied after acceptance must preserve that data, save Failed,
+/// print the saved outcome, and return a nonzero status to callers.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn failed_snapshot_job_records_outcome_and_exits_unsuccessfully() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let output = parent.path().join("snapshot");
+    initialize_source(&root);
+    let queued = enqueue_snapshot(&root, &output);
+    let id = queued["job_id"].as_str().unwrap();
+    fs::create_dir(&output).unwrap();
+    let sentinel = output.join("original.txt");
+    fs::write(&sentinel, b"keep occupied destination").unwrap();
+    let run = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(!run.status.success());
+    let failed: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(failed["state"], "failed");
+    assert!(
+        failed["error"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+    );
+    assert!(failed["result"].is_null());
+    assert!(String::from_utf8_lossy(&run.stderr).contains("failed"));
+    assert_eq!(inspect_snapshot_job(&root, id), failed);
+    assert_eq!(fs::read(sentinel).unwrap(), b"keep occupied destination");
+    assert_eq!(fs::read_dir(output).unwrap().count(), 1);
+}
+
+/// Cancellation uses the inspected revision and applies only to queued work;
+/// rejected stale controls and later run requests cannot reopen a canceled job.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn queued_job_cancellation_checks_revision_and_prevents_execution() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let output = parent.path().join("snapshot");
+    initialize_source(&root);
+    let queued = enqueue_snapshot(&root, &output);
+    let id = queued["job_id"].as_str().unwrap();
+    let stale = command()
+        .args([
+            "jobs",
+            "cancel",
+            "--development",
+            "--json",
+            "--expected-revision",
+            "2",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(!stale.status.success());
+    assert_eq!(inspect_snapshot_job(&root, id), queued);
+    let canceled = command()
+        .args([
+            "jobs",
+            "cancel",
+            "--development",
+            "--json",
+            "--expected-revision",
+            "1",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(
+        canceled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&canceled.stderr)
+    );
+    let saved: Value = serde_json::from_slice(&canceled.stdout).unwrap();
+    assert_eq!(saved["state"], "canceled");
+    assert_eq!(saved["revision"], "2");
+    assert_eq!(saved["attempt_generation"], "0");
+    let attempted = command()
+        .args(["jobs", "run", "--development", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(!attempted.status.success());
+    assert_eq!(inspect_snapshot_job(&root, id), saved);
+    assert!(!output.exists());
+}
+
+/// Recovery leaves queued work waiting and returns an explicit empty result rather
+/// than treating an unexecuted request as failed or completed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_recovery_preserves_queued_requests() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let output = parent.path().join("snapshot");
+    initialize_source(&root);
+    let queued = enqueue_snapshot(&root, &output);
+    let id = queued["job_id"].as_str().unwrap();
+    let recovered = command()
+        .args([
+            "jobs",
+            "recover",
+            "--development",
+            "--json",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    let report: Value = serde_json::from_slice(&recovered.stdout).unwrap();
+    assert_eq!(report["jobs"], serde_json::json!([]));
+    assert_eq!(inspect_snapshot_job(&root, id), queued);
+    assert!(!output.exists());
+}
+
+/// Text-mode listing must display its job records rather than silently dropping
+/// a top-level JSON array when writing a human-readable report.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_list_text_displays_saved_job_identity_and_state() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let queued = enqueue_snapshot(&root, &parent.path().join("snapshot"));
+    let listed = command()
+        .args(["jobs", "list", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let text = String::from_utf8(listed.stdout).unwrap();
+    assert!(text.starts_with("Persisted local snapshot jobs:\n"));
+    assert!(text.contains(queued["job_id"].as_str().unwrap()));
+    assert!(text.contains("queued"));
+}
+
+/// List bounds and domain IDs are validated by the argument parser before any
+/// missing metadata path can be opened or initialized.
+#[test]
+fn job_arguments_reject_invalid_limits_ids_and_zero_revisions() {
+    let parent = TempDir::new().unwrap();
+    let missing = parent.path().join("missing");
+    for limit in ["0", "101"] {
+        let result = command()
+            .args(["jobs", "list", "--limit", limit, "--metadata-root"])
+            .arg(&missing)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+    }
+    for state in ["paused", "waiting_for_storage", "unknown", "Queued"] {
+        let result = command()
+            .args(["jobs", "list", "--state", state, "--metadata-root"])
+            .arg(&missing)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("state must be"));
+    }
+    let invalid_id = command()
+        .args([
+            "jobs",
+            "inspect",
+            "--job-id",
+            "not-a-uuid",
+            "--metadata-root",
+        ])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(invalid_id.status.code(), Some(2));
+    let zero = command()
+        .args([
+            "jobs",
+            "cancel",
+            "--development",
+            "--job-id",
+            "019c2039-4c6b-7000-8000-000000000001",
+            "--expected-revision",
+            "0",
+            "--metadata-root",
+        ])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(zero.status.code(), Some(2));
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// State filtering must find older queued requests ahead of the result limit,
+/// show the selected state in both formats, and perform no mutation or execution.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_list_state_filter_finds_waiting_work_in_a_mixed_queue() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let oldest_output = parent.path().join("oldest");
+    let oldest = enqueue_snapshot(&root, &oldest_output);
+    let next_output = parent.path().join("next");
+    let next = enqueue_snapshot(&root, &next_output);
+    let completed = enqueue_snapshot(&root, &parent.path().join("completed"));
+    let run = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", completed["job_id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let completed: Value = serde_json::from_slice(&run.stdout).unwrap();
+    let failed_output = parent.path().join("occupied");
+    let failed = enqueue_snapshot(&root, &failed_output);
+    fs::create_dir(&failed_output).unwrap();
+    fs::write(failed_output.join("keep.txt"), b"keep occupied output").unwrap();
+    let run = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", failed["job_id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!run.status.success());
+    let failed: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(completed["state"], "completed");
+    assert_eq!(failed["state"], "failed");
+    let database = root.join("database/jumpstart.sqlite");
+    let database_before = fs::read(&database).unwrap();
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+
+    for (state, expected) in [
+        ("queued", vec![next.clone(), oldest.clone()]),
+        ("completed", vec![completed]),
+        ("failed", vec![failed]),
+        ("running", vec![]),
+        ("verifying", vec![]),
+        ("canceled", vec![]),
+    ] {
+        let listed = command()
+            .args([
+                "jobs",
+                "list",
+                "--json",
+                "--state",
+                state,
+                "--limit",
+                "100",
+                "--metadata-root",
+            ])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+        assert_eq!(report["state"], state);
+        assert_eq!(report["jobs"], serde_json::to_value(expected).unwrap());
+    }
+    let limited = command()
+        .args([
+            "jobs",
+            "list",
+            "--json",
+            "--state",
+            "queued",
+            "--limit",
+            "1",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(limited.status.success());
+    let report: Value = serde_json::from_slice(&limited.stdout).unwrap();
+    assert_eq!(report["jobs"], serde_json::json!([next.clone()]));
+    let text = command()
+        .args([
+            "jobs",
+            "list",
+            "--state",
+            "queued",
+            "--limit",
+            "1",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("  state: queued\n"));
+    assert!(text.contains(next["job_id"].as_str().unwrap()));
+    assert!(!text.contains(oldest["job_id"].as_str().unwrap()));
+    assert_eq!(fs::read(&database).unwrap(), database_before);
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+    assert!(!oldest_output.exists());
+    assert!(!next_output.exists());
+    assert_eq!(
+        fs::read(failed_output.join("keep.txt")).unwrap(),
+        b"keep occupied output"
+    );
+}
+
+/// Read and write actions on missing roots must fail without creating a replacement
+/// metadata database, an output folder, or an accepted job record.
+#[test]
+fn job_commands_do_not_initialize_missing_metadata() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("missing");
+    let output = parent.path().join("snapshot");
+    for action in [
+        "enqueue-snapshot",
+        "run",
+        "run-next",
+        "list",
+        "inspect",
+        "cancel",
+        "recover",
+    ] {
+        let mut invocation = command();
+        invocation
+            .args(["jobs", action, "--json", "--metadata-root"])
+            .arg(&root);
+        if matches!(
+            action,
+            "enqueue-snapshot" | "run" | "run-next" | "cancel" | "recover"
+        ) {
+            invocation.arg("--development");
+        }
+        if action == "enqueue-snapshot" {
+            invocation.arg("--output").arg(&output);
+        }
+        if matches!(action, "run" | "inspect" | "cancel") {
+            invocation.args(["--job-id", "019c2039-4c6b-7000-8000-000000000001"]);
+        }
+        if action == "cancel" {
+            invocation.args(["--expected-revision", "1"]);
+        }
+        let result = invocation.output().unwrap();
+        assert!(!result.status.success(), "{action}");
+        assert!(result.stdout.is_empty(), "{action}");
+    }
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Unsupported platforms refuse the job API explicitly without creating files,
+/// even when an operator acknowledges the development preview.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn job_commands_report_unsupported_platform_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("missing");
+    let result = command()
+        .args([
+            "jobs",
+            "recover",
+            "--development",
+            "--json",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("supported only on Linux and macOS"));
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Read historical values through fresh processes without repeating the saved work.
+/// JSON keeps full projections; text provides a concise state/revision/token timeline.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_history_explains_completed_work_in_json_and_text_without_mutation() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let queued = enqueue_snapshot(&root, &parent.path().join("snapshot"));
+    let id = queued["job_id"].as_str().unwrap();
+    let run = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let completed: Value = serde_json::from_slice(&run.stdout).unwrap();
+    let database = root.join("database/jumpstart.sqlite");
+    let before = fs::read(&database).unwrap();
+    let history = command()
+        .args(["jobs", "history", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(
+        history.status.success(),
+        "{}",
+        String::from_utf8_lossy(&history.stderr)
+    );
+    let report: Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(report["job_id"], id);
+    let entries = report["history"].as_array().unwrap();
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0], queued);
+    assert_eq!(entries[3], completed);
+    assert!(entries[..3].iter().all(|entry| entry["result"].is_null()));
+    let text = command()
+        .args(["jobs", "history", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", id])
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.starts_with(&format!("Snapshot job {id} history:\n")));
+    assert!(text.contains("worker token"));
+    for state in ["queued", "running", "verifying", "completed"] {
+        assert!(text.contains(state));
+    }
+    assert_eq!(fs::read(database).unwrap(), before);
+    assert_eq!(inspect_snapshot_job(&root, id), completed);
+}
+
+/// Unknown jobs and missing roots are errors, without an empty success or initialization.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_history_refuses_unknown_or_missing_data_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let missing = parent.path().join("missing");
+    for path in [&root, &missing] {
+        let result = command()
+            .args(["jobs", "history", "--json", "--metadata-root"])
+            .arg(path)
+            .args(["--job-id", "019c2039-4c6b-7000-8000-000000000001"])
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(!result.stderr.is_empty());
+    }
+    assert!(!missing.exists());
+}
+
+/// Keep the history command recognizable while explicitly refusing unsupported storage.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn job_history_reports_unsupported_storage_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("missing");
+    let result = command()
+        .args(["jobs", "history", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", "019c2039-4c6b-7000-8000-000000000001"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("supported only on Linux and macOS"));
+    assert!(!root.exists());
 }
 
 /// Reads a capacity report's byte field and checks its exact decimal-string format.
@@ -590,4 +1486,360 @@ fn storage_inspect_reports_unsupported_platform_without_filesystem_changes() {
         b"keep unsupported-platform contents"
     );
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+/// Construct a change-page invocation without executing it or accessing storage.
+///
+/// `root` is the requested metadata `&Path`; `epoch`, `after`, and `limit` are raw
+/// argument `&str` values so tests can exercise parser failures as well as valid
+/// cursors. Returns a `Command` selecting compact JSON and requiring no acknowledgment.
+fn job_changes_command(root: &std::path::Path, epoch: &str, after: &str, limit: &str) -> Command {
+    let mut invocation = command();
+    invocation
+        .args(["jobs", "changes", "--json", "--metadata-root"])
+        .arg(root)
+        .args(["--epoch", epoch, "--after", after, "--limit", limit]);
+    invocation
+}
+
+/// Page interleaved requests using global positions while preserving each saved
+/// projection, including earlier queued values that differ from today's rows.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_changes_paginate_saved_projections_in_json_and_text_without_mutation() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let initial = initialize_source(&root);
+    let epoch = initial["sync_epoch"].as_str().unwrap();
+    let first = enqueue_snapshot(&root, &parent.path().join("first"));
+    let second = enqueue_snapshot(&root, &parent.path().join("second"));
+    let canceled = command()
+        .args([
+            "jobs",
+            "cancel",
+            "--development",
+            "--json",
+            "--expected-revision",
+            "1",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .args(["--job-id", first["job_id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        canceled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&canceled.stderr)
+    );
+    let canceled: Value = serde_json::from_slice(&canceled.stdout).unwrap();
+    let completed = command()
+        .args(["jobs", "run", "--development", "--json", "--metadata-root"])
+        .arg(&root)
+        .args(["--job-id", second["job_id"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let completed: Value = serde_json::from_slice(&completed.stdout).unwrap();
+    let database = root.join("database/jumpstart.sqlite");
+    let database_before = fs::read(&database).unwrap();
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+    let mut pages = Vec::new();
+    for after in ["0", "2", "4", "6"] {
+        let result = job_changes_command(&root, epoch, after, "2")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stderr.is_empty());
+        assert_eq!(result.stdout.last(), Some(&b'\n'));
+        assert_eq!(
+            result.stdout.iter().filter(|byte| **byte == b'\n').count(),
+            1
+        );
+        assert!(result.stdout.len() - 1 <= 1024 * 1024);
+        let page: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(page["server_id"], initial["server_id"]);
+        assert_eq!(page["sync_epoch"], epoch);
+        assert_eq!(page["after"], after);
+        assert_eq!(page["minimum"], "0");
+        assert_eq!(page["high_water"], "6");
+        pages.push(page);
+    }
+    assert_eq!(pages[0]["next"], "2");
+    assert_eq!(pages[1]["next"], "4");
+    assert_eq!(pages[2]["next"], "6");
+    assert_eq!(pages[3]["next"], "6");
+    assert_eq!(pages[3]["batches"], serde_json::json!([]));
+    assert_eq!(pages[0]["batches"][0]["seq"], "1");
+    assert_eq!(pages[0]["batches"][1]["seq"], "2");
+    assert_eq!(pages[0]["batches"][0]["payload_version"], 1);
+    assert_eq!(pages[0]["batches"][0]["job"], first);
+    assert_eq!(pages[0]["batches"][1]["job"], second);
+    assert_eq!(pages[1]["batches"][0]["seq"], "3");
+    assert_eq!(pages[1]["batches"][0]["job"], canceled);
+    assert_eq!(pages[1]["batches"][1]["seq"], "4");
+    assert_eq!(pages[1]["batches"][1]["job"]["state"], "running");
+    assert_eq!(pages[2]["batches"][0]["job"]["state"], "verifying");
+    assert!(pages[2]["batches"][0]["job"]["result"].is_null());
+    assert_eq!(pages[2]["batches"][1]["job"], completed);
+    let text = command()
+        .args(["jobs", "changes", "--metadata-root"])
+        .arg(&root)
+        .args(["--epoch", epoch, "--after", "0", "--limit", "2"])
+        .output()
+        .unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.starts_with("Persisted snapshot-job changes:\n"));
+    assert!(text.contains(&format!("  sync_epoch: {epoch}\n")));
+    assert!(text.contains("  after: 0\n"));
+    assert!(text.contains("  next: 2\n"));
+    assert!(text.contains("  high_water: 6\n"));
+    assert!(text.contains("  minimum: 0\n"));
+    assert!(text.contains(first["job_id"].as_str().unwrap()));
+    assert!(text.contains(second["job_id"].as_str().unwrap()));
+    assert!(text.contains("revision 1, queued"));
+    assert!(!text.contains("output_path"));
+    assert_eq!(fs::read(database).unwrap(), database_before);
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+}
+
+/// Wrong histories and future positions must be errors rather than empty success;
+/// missing roots must not create a replacement database or an output artifact.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn job_changes_refuse_missing_wrong_epoch_and_future_cursors() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let initial = initialize_source(&root);
+    let epoch = initial["sync_epoch"].as_str().unwrap();
+    let wrong = jumpstart_domain::SyncEpoch::new().to_string();
+    let missing = parent.path().join("missing");
+    let database = root.join("database/jumpstart.sqlite");
+    let database_before = fs::read(&database).unwrap();
+    let marker_before = fs::read(root.join("format.json")).unwrap();
+    for (path, supplied_epoch, after) in [
+        (&root, wrong.as_str(), "0"),
+        (&root, epoch, "1"),
+        (&missing, epoch, "0"),
+    ] {
+        let result = job_changes_command(path, supplied_epoch, after, "100")
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(!result.stderr.is_empty());
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("--development"));
+    }
+    assert_eq!(fs::read(database).unwrap(), database_before);
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker_before);
+    assert!(!missing.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 1);
+}
+
+/// Typed epochs, canonical counters, and list budgets fail during argument parsing
+/// before a missing path can be accessed, on every platform.
+#[test]
+fn job_changes_arguments_reject_invalid_epochs_counters_and_limits() {
+    let parent = TempDir::new().unwrap();
+    let missing = parent.path().join("missing");
+    let valid = "550e8400-e29b-41d4-a716-446655440000";
+    for epoch in [
+        "not-a-uuid",
+        "00000000-0000-0000-0000-000000000000",
+        "019c2039-4c6b-7000-8000-000000000001",
+    ] {
+        let result = job_changes_command(&missing, epoch, "0", "100")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+    }
+    for after in ["-1", "01", "+1", "1.0", "9223372036854775808"] {
+        let result = job_changes_command(&missing, valid, after, "100")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+    }
+    for limit in ["0", "501"] {
+        let result = job_changes_command(&missing, valid, "0", limit)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+    }
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Keep the read-only change command available to the parser while unsupported
+/// storage platforms explicitly refuse it without creating the requested path.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn job_changes_report_unsupported_platform_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let missing = parent.path().join("missing");
+    let result = job_changes_command(&missing, "550e8400-e29b-41d4-a716-446655440000", "0", "100")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("supported only on Linux and macOS"));
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+/// Run one accepted request per process without an ID, preserve FIFO order, and
+/// report a checked empty queue as success without changing its stored position.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn run_next_executes_one_queued_request_and_reports_empty_without_mutation() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let first_output = parent.path().join("first");
+    let first = enqueue_snapshot(&root, &first_output);
+    let second_output = parent.path().join("second");
+    let second = enqueue_snapshot(&root, &second_output);
+    let result = command()
+        .args([
+            "jobs",
+            "run-next",
+            "--development",
+            "--json",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["job"]["job_id"], first["job_id"]);
+    assert_eq!(report["job"]["state"], "completed");
+    assert!(first_output.join("snapshot.json").exists());
+    assert_eq!(
+        inspect_snapshot_job(&root, second["job_id"].as_str().unwrap()),
+        second
+    );
+    assert!(!second_output.exists());
+
+    let result = command()
+        .args(["jobs", "run-next", "--development", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = String::from_utf8(result.stdout).unwrap();
+    assert!(text.starts_with("Persisted next snapshot job outcome:\n"));
+    assert!(text.contains(second["job_id"].as_str().unwrap()));
+    assert!(text.contains("    state: completed\n"));
+    assert!(second_output.join("snapshot.json").exists());
+
+    let database = root.join("database/jumpstart.sqlite");
+    let before = fs::read(&database).unwrap();
+    let marker = fs::read(root.join("format.json")).unwrap();
+    let result = command()
+        .args([
+            "jobs",
+            "run-next",
+            "--development",
+            "--json",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(result.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        serde_json::json!({"job": null})
+    );
+    assert_eq!(fs::read(database).unwrap(), before);
+    assert_eq!(fs::read(root.join("format.json")).unwrap(), marker);
+}
+
+/// A saved failure remains visible in JSON and exits unsuccessfully, while the
+/// next queued request and somebody else's occupied destination remain untouched.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn run_next_prints_failed_outcome_and_leaves_later_work_queued() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    initialize_source(&root);
+    let occupied = parent.path().join("occupied");
+    let first = enqueue_snapshot(&root, &occupied);
+    let later_output = parent.path().join("later");
+    let later = enqueue_snapshot(&root, &later_output);
+    fs::create_dir(&occupied).unwrap();
+    fs::write(occupied.join("keep.txt"), b"retain existing data").unwrap();
+    let result = command()
+        .args([
+            "jobs",
+            "run-next",
+            "--development",
+            "--json",
+            "--metadata-root",
+        ])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["job"]["job_id"], first["job_id"]);
+    assert_eq!(report["job"]["state"], "failed");
+    assert!(report["job"]["error"].is_string());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains(first["job_id"].as_str().unwrap()));
+    assert_eq!(
+        inspect_snapshot_job(&root, first["job_id"].as_str().unwrap()),
+        report["job"]
+    );
+    assert_eq!(
+        inspect_snapshot_job(&root, later["job_id"].as_str().unwrap()),
+        later
+    );
+    assert!(!later_output.exists());
+    assert_eq!(
+        fs::read(occupied.join("keep.txt")).unwrap(),
+        b"retain existing data"
+    );
+}
+
+/// Unsupported storage cannot turn an unavailable queue into successful no-work.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn run_next_reports_unsupported_storage_without_creating_paths() {
+    let parent = TempDir::new().unwrap();
+    let result = command()
+        .args([
+            "jobs",
+            "run-next",
+            "--development",
+            "--json",
+            "--metadata-root",
+        ])
+        .arg(parent.path().join("missing"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("supported only on Linux and macOS"));
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
