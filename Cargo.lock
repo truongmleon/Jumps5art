@@ -318,6 +318,7 @@ name = "jumpstart-server"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "jumpstart-domain",
  "jumpstart-storage",
  "serde_json",
  "tempfile",
