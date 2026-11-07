@@ -419,10 +419,10 @@ For secret input, first store bytes under an immutable random input ID/version i
 
 ### 5.5 Transfer and Range Semantics
 
-- Upload manifests pin resource roles, expected lengths and full hashes, source identity, and destination. Chunk offsets start at zero and are multiples of 4 MiB. Every chunk is exactly 4 MiB except a shorter final chunk. An empty resource has no chunks. The sender checks the selected source bytes against the declared chunk digest before emitting the raw body. The receiver checks the entire body length and digest before writing any bytes to staging. A staging write failure leaves the chunk unconfirmed. Persisted bitmap checkpoints become confirmed only after bytes and checkpoint metadata are synchronized. Repeated identical chunks are no-ops; overlapping non-identical chunks fail and retain the job for review.
+- Upload manifests pin resource roles, expected lengths and full hashes, source identity, and destination. Use 4 MiB chunks except the final chunk; persisted bitmap checkpoints become confirmed only after bytes and checkpoint metadata are synchronized. Repeated identical chunks are no-ops; overlapping non-identical chunks fail and retain the job for review.
 - `WriteChunk` is scoped by authenticated device, durable transfer ID, resource, offset, length, and chunk digest. Reconnect queries the verified bitmap and retransmits only missing chunks. Full-resource hash and domain validation still run before publication; a complete bitmap alone is insufficient.
 - Transfer sessions survive restart as jobs. Reserve declared destination size plus validation/output budget before accepting bulk bytes. Unknown-length sources use bounded incremental reservations and pause when the next reservation fails; never promise final completion before size and verification finish.
-- Read ranges are half-open `[offset,offset+length)`, checked for integer overflow and resource bounds. Length zero succeeds at any valid offset through EOF without reading resource bytes. A request beyond EOF returns `invalid`, not padded bytes. Limit one range stream to 8 MiB; clients issue successive ranges for playback or random access.
+- Read ranges are half-open `[offset,offset+length)`, checked for integer overflow and resource bounds; length zero returns an empty successful range. A request beyond EOF returns `invalid`, not padded bytes. Limit one range stream to 8 MiB; clients issue successive ranges for playback or random access.
 - A read binds an immutable version and verified placement and pins it until the stream closes. Return exact accepted offset/length and blob identity before bytes. A missing required range closes with `unavailable`; clients never expose a partial transfer as a completed local file.
 - Bulk credentials are not transferable: every reconnect and stream validates the device's current authority and transfer/read ownership. Revocation cancels them immediately. Partial uploads stay durable as incomplete jobs; unaccepted chunks do not become library content.
 
@@ -1342,7 +1342,7 @@ Offline recovery takes an exclusive maintenance lock and refuses to run alongsid
 
 Use a deterministic fake clock and provider fixtures for state-machine behavior, plus real clocks/filesystems/processes for durability and platform tests. Successful mocked output does not replace tool or native-device tests. Persist the release manifest, fixture identities, command logs, hashes, and result artifacts with each release candidate.
 
-Each implementation PR identifies the design section it implements, the success and failure outcomes its tests cover, and any release evidence still needed. Put new observable behavior, persistence and wire invariants, and required failure or recovery scenarios in the design for review. Keep individual test names, fixtures, and I/O fakes with the code. If the design already specifies a behavior, cite it in the PR and add regression coverage at the layer that owns it. Add coverage at another layer when it proves a separate boundary, such as a CLI exit status or a committed database outcome after a process exits.
+Each implementation PR identifies the design section it implements, the success and failure outcomes its tests cover, and any release evidence still needed. Keep individual test names, fixtures, and I/O fakes with the code. If the design already specifies a behavior, cite it in the PR and add regression coverage at the layer that owns it. Add coverage at another layer when it proves a separate boundary, such as a CLI exit status or a committed database outcome after a process exits.
 
 ### 17.2 Required Fault Scenarios
 
@@ -1376,7 +1376,7 @@ Track scaling by item count, active resource set, and concurrent jobs. Exceeding
 
 ### 17.4 Verification Map for the Proposed Implementation Slices
 
-These scenarios identify the evidence to review in the linked PRs. The release gates in §§6.5 and 17.2–17.3 also require the integrated and platform evidence in the right column.
+These scenarios describe what the open PRs test. Section 18.1 identifies behavior that still needs a design decision. The release gates in §§6.5 and 17.2–17.3 also require the integrated and platform evidence in the right column.
 
 | Slice and contract | Behavior the tests verify | Release evidence still needed |
 |---|---|---|
@@ -1388,6 +1388,8 @@ These scenarios identify the evidence to review in the linked PRs. The release g
 ## 18. Delivery Plan and Definition of Done
 
 Implementation proceeds in vertical slices; each slice has a concrete release gate and retains the previous verified path until it passes.
+
+Before coding a slice, identify the approved design section and its success, failure, and recovery criteria. If the slice needs an unspecified decision about observable behavior, persisted state, protocol semantics, security, or delivery order, surface the question and review the design change first. Start the dependent implementation after that decision is approved. Internal implementation choices can stay in the code review when they preserve the approved contract.
 
 | Stage | Deliverable | Exit evidence |
 |---|---|---|
@@ -1406,13 +1408,13 @@ Dependencies are explicit: routing into an unfinished receiving module remains u
 
 A feature is done only when its user-visible success/failure/offline states, persistence records, migration path, export representation, authorization checks, and recovery tests are implemented and its evidence is attached to the release. Exact dependency/tool/model versions are frozen in the release manifest and lockfiles before building that release; version selection is maintained release data rather than an unbounded alternative in this architecture.
 
-### 18.1 Local Development Scope
+### 18.1 Open Design Decisions From the Current PRs
 
-The local snapshot-job preview exercises durable work with one operation whose output can be checked independently. It runs on a local offline metadata root on Linux or macOS. A synchronous command holds exclusive maintenance ownership while running one snapshot, with short transactions for lifecycle changes and no write transaction across the copy. It records completion after verification. Only queued jobs can be canceled. Explicit recovery fences unfinished attempts, records failure, and retains their artifacts. Repeating a known completed job ID reads its saved result. Enqueue creates a new request, and each run-next invocation selects the oldest eligible queued job anew. These semantics apply to local operator commands. The daemon still needs the authenticated writer, receipt, scheduling, cancellation, and restart contracts in §§4.1, 5.4, 6.1, and 7.
+This audit records choices introduced by open implementation PRs. Approval of this audit records the open questions. Each dependent implementation needs its own reviewed design decision.
 
-The proposed schema 3 stores one full job projection and advances the global change position in the same transaction as each job update. Migration retains the authority, epoch, and prior high-water mark. It starts the local ledger after that mark without fabricating missing history. The local page reader accepts cursors from that retained floor through the current high-water mark, returns at most 500 whole records and 1 MiB of compact JSON, and leaves cursors unacknowledged. Contiguous retained positions are a consistency check for this schema's closed ledger. The general feed contract in §6.2 permits gaps and batches with multiple affected entities. Before reusing the ledger in the daemon, define its forward migration and which projection fields are safe to expose. The local records include the operator's filesystem paths and diagnostic errors.
-
-Transfer byte helpers can be reviewed ahead of F2 because they exercise the shared framing, offset, and digest rules without opening an endpoint. F2 integration needs the F1 authority and writer boundaries before exposing reads or accepting uploads. Enabling either capability still requires its full authorization, persistence, and recovery evidence from §17.4.
+- **Local job workflow.** The PRs introduce an offline snapshot queue with a synchronous operator command, oldest-first selection, queued-only cancellation, and manual recovery that records interrupted attempts as failed. The daemon contract in §§4.1, 5.4, 6.1, and 7 calls for authenticated control, receipts, admission, and restart reconciliation. Decide whether the local queue belongs in the delivery plan and which operator commands it needs.
+- **Persisted jobs and history.** Proposed schema 3 stores one job projection per change and checks that retained positions are consecutive. Its local change reader starts at the migrated floor and leaves cursors unacknowledged. Section 6.2 allows gaps and multiple affected entities in one batch. Decide the schema and migration path before adopting these records. Review which fields, such as local filesystem paths and diagnostic errors, can cross the authenticated boundary.
+- **Transfer byte handling.** Sections 5.3 and 5.5 already specify exact raw byte counts, 4 MiB upload chunks, 8 MiB read ranges, and durable confirmation after synchronization. The helper PRs additionally fix the chunk grid and empty-resource behavior, and check a complete chunk digest before emitting raw bytes or writing to staging. Review those choices where they constrain interoperability or storage behavior. Endpoint work follows the F1 authority and writer contracts.
 
 ## 19. Baseline Decisions and Release Gates
 
