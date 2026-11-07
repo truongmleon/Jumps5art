@@ -1342,6 +1342,8 @@ Offline recovery takes an exclusive maintenance lock and refuses to run alongsid
 
 Use a deterministic fake clock and provider fixtures for state-machine behavior, plus real clocks/filesystems/processes for durability and platform tests. Successful mocked output does not replace tool or native-device tests. Persist the release manifest, fixture identities, command logs, hashes, and result artifacts with each release candidate.
 
+Each implementation PR identifies the design section it implements, the success and failure outcomes its tests cover, and any release evidence still needed. Keep individual test names, fixtures, and I/O fakes with the code. If the design already specifies a behavior, cite it in the PR and add regression coverage at the layer that owns it. Add coverage at another layer when it proves a separate boundary, such as a CLI exit status or a committed database outcome after a process exits.
+
 ### 17.2 Required Fault Scenarios
 
 1. Commit a mutation and lose its acknowledgment; status lookup and retry return one effect and one durable outcome.
@@ -1372,9 +1374,22 @@ The following are acceptance targets to measure during implementation, not resul
 
 Track scaling by item count, active resource set, and concurrent jobs. Exceeding a performance target triggers a measured change to batching, indexing, admission, or cache limits; it does not permit weakening original retention or crash-consistency guarantees.
 
+### 17.4 Verification Map for the Audited Implementation Slices
+
+These scenarios describe what the linked PRs test. Section 18.1 identifies behavior that still needs a design decision. The release gates in §§6.5 and 17.2–17.3 also require the integrated and platform evidence in the right column.
+
+| Slice and contract | Behavior the tests verify | Release evidence still needed |
+|---|---|---|
+| Metadata upgrade and local job ledger (§§4.1, 7, 16.2, 18.1). [Job ledger](https://github.com/truongmleon/Jumps5art/pull/30), [migration build repair](https://github.com/truongmleon/Jumps5art/pull/41) | Upgrade preserves identity and the prior change position. Interrupted runs preserve a committed outcome or explicitly fence unfinished work. An occupied destination is preserved. Current state, history, and change position agree after reopening. | Power-loss qualification, disk-full and missing-volume recovery, worker reconciliation, and clean-host restore. |
+| Local job commands (§18.1). [CLI](https://github.com/truongmleon/Jumps5art/pull/31), [history](https://github.com/truongmleon/Jumps5art/pull/32), [filter](https://github.com/truongmleon/Jumps5art/pull/33), [completion replay](https://github.com/truongmleon/Jumps5art/pull/34), [next job](https://github.com/truongmleon/Jumps5art/pull/39), [next-job CLI](https://github.com/truongmleon/Jumps5art/pull/40) | Mutations require explicit development acknowledgment before touching storage. A stale revision cannot cancel a queued job. A known completed ID returns its saved result. Reads preserve metadata. One invocation runs at most one job, even with competing runners. The CLI distinguishes an empty queue, saved job failure, and command failure. | Authenticated job control, operation receipts for new requests, automatic admission, and active cancellation. |
+| Local job changes (§§5.3, 6.2–6.3, 18.1). [Page reader](https://github.com/truongmleon/Jumps5art/pull/35), [CLI](https://github.com/truongmleon/Jumps5art/pull/36) | Pages return whole historical projections in order within record and byte caps. Wrong-epoch cursors and positions outside the retained floor and high-water mark fail explicitly. Empty pages keep the cursor. | General transaction batches, compaction, device acknowledgments, and atomic client cache/cursor updates. |
+| Transfer byte boundaries (§§5.3, 5.5). [Read ranges](https://github.com/truongmleon/Jumps5art/pull/42), [upload receiver](https://github.com/truongmleon/Jumps5art/pull/43), [upload sender](https://github.com/truongmleon/Jumps5art/pull/44) | Range and chunk bounds reject invalid positions and sizes. Successful copies transfer exactly the declared raw bytes and leave subsequent control bytes intact in a composed stream fixture. Short or corrupt bodies fail, changed or truncated source pieces emit no raw body, and write failures leave the copy incomplete. | Authenticated endpoints, placement pins, reservations, durable checkpoint and reconnect behavior, full-resource verification, and live revocation. |
+
 ## 18. Delivery Plan and Definition of Done
 
 Implementation proceeds in vertical slices; each slice has a concrete release gate and retains the previous verified path until it passes.
+
+Before coding a slice, identify the approved design section and its success, failure, and recovery criteria. If the slice needs an unspecified decision about observable behavior, persisted state, protocol semantics, security, or delivery order, surface the question and review the design change first. Start the dependent implementation after that decision is approved. Internal implementation choices can stay in the code review when they preserve the approved contract.
 
 | Stage | Deliverable | Exit evidence |
 |---|---|---|
@@ -1392,6 +1407,14 @@ Implementation proceeds in vertical slices; each slice has a concrete release ga
 Dependencies are explicit: routing into an unfinished receiving module remains unavailable while Mass retains the download; complete-suite backup cannot claim an unfinished Worlds integration is covered. Earlier stages may ship as previews with disclosed capability scope, but the full Jumpstart release is not complete until every required platform and module gate passes. Optional AI features may be disabled when hardware is insufficient, as their requirements allow.
 
 A feature is done only when its user-visible success/failure/offline states, persistence records, migration path, export representation, authorization checks, and recovery tests are implemented and its evidence is attached to the release. Exact dependency/tool/model versions are frozen in the release manifest and lockfiles before building that release; version selection is maintained release data rather than an unbounded alternative in this architecture.
+
+### 18.1 Open Design Decisions From the Implementation Audit
+
+This audit records choices introduced by the linked implementation PRs. These choices describe development code. Each decision needs review before the daemon or its clients depend on it.
+
+- **Local job workflow.** The PRs introduce an offline snapshot queue with a synchronous operator command, oldest-first selection, queued-only cancellation, and manual recovery that records interrupted attempts as failed. The daemon contract in §§4.1, 5.4, 6.1, and 7 calls for authenticated control, receipts, admission, and restart reconciliation. Decide whether the local queue belongs in the delivery plan and which operator commands it needs.
+- **Persisted jobs and history.** Proposed schema 3 stores one job projection per change and checks that retained positions are consecutive. Its local change reader starts at the migrated floor and leaves cursors unacknowledged. Section 6.2 allows gaps and multiple affected entities in one batch. Decide the schema and migration path before adopting these records. Review which fields, such as local filesystem paths and diagnostic errors, can cross the authenticated boundary.
+- **Transfer byte handling.** Sections 5.3 and 5.5 already specify exact raw byte counts, 4 MiB upload chunks, 8 MiB read ranges, and durable confirmation after synchronization. The helper PRs additionally fix the chunk grid and empty-resource behavior, and check a complete chunk digest before emitting raw bytes or writing to staging. Review those choices where they constrain interoperability or storage behavior. Endpoint work follows the F1 authority and writer contracts.
 
 ## 19. Baseline Decisions and Release Gates
 
