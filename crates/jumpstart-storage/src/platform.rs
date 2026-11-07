@@ -33,11 +33,13 @@ use super::{
     LOCK_FILE, MIGRATION_FILE, MetadataReport, Result, SCHEMA_VERSION, StorageError,
 };
 
+mod history;
 mod jobs;
 mod migration;
 mod schema3;
 mod snapshot;
 
+pub(super) use history::job_history;
 pub(super) use jobs::{
     cancel_job, enqueue_snapshot_job, inspect_job, list_jobs, recover_jobs, run_snapshot_job,
 };

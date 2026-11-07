@@ -460,6 +460,17 @@ pub fn inspect_job(root: &Path, job_id: JobId) -> Result<SnapshotJob> {
     platform::inspect_job(root, job_id)
 }
 
+/// Show how a saved request reached its current status without running it again.
+///
+/// `root: &Path` selects checkpointed schema-3 metadata and `job_id: JobId` selects
+/// the request. Returns `Result<Vec<SnapshotJob>>` with its original full values
+/// in revision order, bounded to 16 entries for this closed runner. The checked
+/// reader rejects inconsistent history, unknown jobs, busy roots, and pending WAL
+/// recovery without changing files or inventing missing entries.
+pub fn job_history(root: &Path, job_id: JobId) -> Result<Vec<SnapshotJob>> {
+    platform::job_history(root, job_id)
+}
+
 /// Read a bounded page of the newest saved jobs, ordered by creation sequence.
 ///
 /// `root: &Path` selects checkpointed metadata and `limit: u16` is in `1..=100`.
@@ -519,6 +530,12 @@ mod platform {
     /// Refuse inspecting `job_id: JobId` at `root: &Path` without filesystem work.
     /// Returns `Result<SnapshotJob>`, always the unsupported-platform error.
     pub fn inspect_job(_root: &Path, _job_id: JobId) -> Result<SnapshotJob> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse history for `job_id: JobId` at `root: &Path` without filesystem work.
+    /// Returns `Result<Vec<SnapshotJob>>`, always the unsupported-platform error.
+    pub fn job_history(_root: &Path, _job_id: JobId) -> Result<Vec<SnapshotJob>> {
         Err(StorageError::UnsupportedPlatform)
     }
 
