@@ -177,7 +177,7 @@ fn initialized_metadata_reopens_with_same_identity_and_verified_schema() {
     let reopened = inspect(&root).expect("offline reopen");
     assert_eq!(initial, reopened);
     assert_eq!(reopened.format_version, 1);
-    assert_eq!(reopened.schema_version, 2);
+    assert_eq!(reopened.schema_version, 3);
     assert_eq!(reopened.change_seq.map(|value| value.value()), Some(0));
     assert_eq!(reopened.journal_mode, "wal");
     assert_eq!(reopened.integrity_check, "ok");
@@ -216,7 +216,9 @@ fn original_schema1_remains_readable_without_mutation() {
 /// Preserve the actual schema-2 high-water mark, including the maximum exact counter.
 #[test]
 fn schema2_inspection_reads_the_stored_change_sequence() {
-    let (_parent, root, _) = fixture();
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("schema-two");
+    support::create_schema2(&root);
     for sequence in [42, i64::MAX] {
         change_database(
             &root,
@@ -243,7 +245,9 @@ fn schema2_requires_both_exact_sequential_migration_records() {
         "UPDATE schema_migrations SET name = 'another-change' WHERE version = 2",
         "INSERT INTO schema_migrations VALUES (3, 'extra', 'unexpected', 'now')",
     ] {
-        let (_parent, root, _) = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("schema-two");
+        support::create_schema2(&root);
         change_database(&root, sql);
         let before = fingerprint(&root);
         assert!(matches!(
@@ -590,4 +594,35 @@ fn uri_reserved_characters_in_paths_do_not_change_inspection_flags() {
     let before = fingerprint(&root);
     assert_eq!(inspect(&root).expect("inspect escaped path"), report);
     assert_eq!(before, fingerprint(&root));
+}
+
+/// Require the complete known ledger schema instead of accepting a partial upgrade.
+#[test]
+fn schema3_requires_exact_ledger_tables_and_queue_index() {
+    for sql in [
+        "DROP INDEX jobs_queue",
+        "ALTER TABLE jobs ADD COLUMN surprise TEXT",
+        "CREATE INDEX unexpected_job_index ON jobs(updated_at_ms)",
+        "DELETE FROM schema_migrations WHERE version=3",
+    ] {
+        let (_parent, root, _) = fixture();
+        change_database(&root, sql);
+        let before = fingerprint(&root);
+        let result = inspect(&root);
+        assert!(
+            matches!(result, Err(StorageError::MigrationMismatch)),
+            "{sql}: {result:?}"
+        );
+        assert_eq!(fingerprint(&root), before);
+    }
+}
+
+/// Reject a high-water mark whose corresponding durable change row is missing.
+#[test]
+fn schema3_change_positions_require_a_contiguous_retained_range() {
+    let (_parent, root, _) = fixture();
+    change_database(&root, "UPDATE server_state SET change_seq=1");
+    let before = fingerprint(&root);
+    assert!(matches!(inspect(&root), Err(StorageError::Integrity(_))));
+    assert_eq!(fingerprint(&root), before);
 }

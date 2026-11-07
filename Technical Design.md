@@ -1378,7 +1378,7 @@ Implementation proceeds in vertical slices; each slice has a concrete release ga
 
 | Stage | Deliverable | Exit evidence |
 |---|---|---|
-| F1 Foundation | Storage/schema, authenticated pairing, framed protocol, sync, durable jobs and health | Publication fault matrix; replay/revocation tests; first clean-host recovery |
+| [F1 Foundation](docs/PRDs/Foundation.md) | Storage/schema, authenticated pairing, framed protocol, sync, durable jobs and health | Publication fault matrix; replay/revocation tests; first clean-host recovery |
 | F2 Mass core | File transfer, durable local save, ownership routing and source adapters | Changed-source resume tests, rename/save conflicts and partial batch recovery |
 | F3 Backup and migration | Complete generations, 30-day history, export and offline recovery CLI | Occupied-destination and missing-database recovery drills |
 | F4 Muse | Provider adapters, matching, playlists, metadata, offline playback and handoff | Recording corpus, no duplicate successful imports, handoff failures preserve source |

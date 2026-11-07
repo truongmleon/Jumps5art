@@ -108,3 +108,46 @@ pub fn create_schema1(root: &Path) -> MetadataReport {
     file.sync_all().unwrap();
     inspect(root).expect("original schema-1 fixture must remain readable")
 }
+
+/// Create the frozen schema-2 layout without following today's initializer.
+///
+/// `root` names a new test directory. Returns `MetadataReport` after applying the
+/// original watermark SQL/checksum to the independent schema-1 fixture. Panics on
+/// fixture errors; this keeps old-schema tests meaningful when new init advances.
+pub fn create_schema2(root: &Path) -> MetadataReport {
+    create_schema1(root);
+    let path = root.join("database/jumpstart.sqlite");
+    let mut connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=0;",
+        )
+        .unwrap();
+    let original_sql = "ALTER TABLE server_state ADD COLUMN change_seq INTEGER NOT NULL DEFAULT 0 CHECK (change_seq >= 0)";
+    let mut checksum = blake3::Hasher::new();
+    checksum.update(original_sql.as_bytes());
+    checksum.update(b";\n");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    transaction.execute_batch(original_sql).unwrap();
+    transaction.execute(
+        "INSERT INTO schema_migrations VALUES (2, 'change_watermark', ?1, '2026-10-27T00:00:00.000Z')",
+        [format!("b3:{}", checksum.finalize().to_hex())],
+    ).unwrap();
+    transaction.pragma_update(None, "user_version", 2).unwrap();
+    transaction.commit().unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    connection.close().unwrap();
+    let mut marker: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("format.json")).unwrap()).unwrap();
+    marker["schema_version"] = 2.into();
+    fs::write(
+        root.join("format.json"),
+        serde_json::to_vec_pretty(&marker).unwrap(),
+    )
+    .unwrap();
+    inspect(root).expect("frozen schema-2 fixture must remain readable")
+}

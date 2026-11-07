@@ -128,9 +128,9 @@ mod filesystem {
     /// Panics if the simulated journal cannot be serialized or written.
     fn write_journal(root: &Path, source: &MetadataReport, backup: &SnapshotReport) {
         let journal = json!({
-            "journal_format_version": 1,
-            "from_schema_version": 1,
-            "to_schema_version": 2,
+            "journal_format_version": 2,
+            "from_schema_version": source.schema_version,
+            "to_schema_version": 3,
             "server_id": source.server_id,
             "sync_epoch": source.sync_epoch,
             "backup": backup,
@@ -191,7 +191,7 @@ mod filesystem {
         let result = migrate(&root, &recovery_path).expect("upgrade schema 1");
 
         assert_eq!(result.from_schema_version, 1);
-        assert_eq!(result.to_schema_version, 2);
+        assert_eq!(result.to_schema_version, 3);
         assert!(!result.resumed);
         assert_eq!(
             result.metadata,
@@ -223,8 +223,8 @@ mod filesystem {
             recovery
         );
         let upgraded_path = parent.path().join("after-upgrade");
-        let upgraded = create_snapshot(&root, &upgraded_path).expect("snapshot schema 2");
-        assert_eq!(upgraded.schema_version, 2);
+        let upgraded = create_snapshot(&root, &upgraded_path).expect("snapshot schema 3");
+        assert_eq!(upgraded.schema_version, 3);
         assert_eq!(
             upgraded
                 .change_seq
@@ -254,8 +254,8 @@ mod filesystem {
         let result = migrate(&root, &output).expect("already-current no-op");
 
         assert_eq!(result.metadata, initial);
-        assert_eq!(result.from_schema_version, 2);
-        assert_eq!(result.to_schema_version, 2);
+        assert_eq!(result.from_schema_version, 3);
+        assert_eq!(result.to_schema_version, 3);
         assert_eq!(result.backup, None);
         assert!(!result.resumed);
         assert_eq!(fingerprint(&root), root_before);
@@ -326,11 +326,11 @@ mod filesystem {
 
         assert!(result.resumed);
         assert_eq!(result.from_schema_version, 1);
-        assert_eq!(result.to_schema_version, 2);
+        assert_eq!(result.to_schema_version, 3);
         assert_eq!(result.backup, Some(backup));
         assert_eq!(fingerprint(&output), backup_before);
         assert!(!root.join(MIGRATION_FILE).exists());
-        assert_eq!(inspect(&root).unwrap().schema_version, 2);
+        assert_eq!(inspect(&root).unwrap().schema_version, 3);
     }
 
     /// A crash after the new database and marker are ready may leave the journal;
@@ -374,11 +374,11 @@ mod filesystem {
 
         assert!(resumed.resumed);
         assert_eq!(resumed.from_schema_version, 1);
-        assert_eq!(resumed.to_schema_version, 2);
+        assert_eq!(resumed.to_schema_version, 3);
         assert_eq!(resumed.metadata, first.metadata);
         assert_eq!(resumed.backup, Some(backup.clone()));
         assert_eq!(verify_snapshot(&output).unwrap(), backup);
-        assert_eq!(inspect(&root).unwrap().schema_version, 2);
+        assert_eq!(inspect(&root).unwrap().schema_version, 3);
         assert!(!root.join(MIGRATION_FILE).exists());
     }
 
@@ -417,7 +417,7 @@ mod filesystem {
         let valid: Value =
             serde_json::from_slice(&fs::read(root.join(MIGRATION_FILE)).unwrap()).unwrap();
         let mut future = valid.clone();
-        future["journal_format_version"] = json!(2);
+        future["journal_format_version"] = json!(3);
         let mut wrong_identity = valid.clone();
         wrong_identity["server_id"] = json!(jumpstart_domain::ServerId::new());
         for bytes in [
@@ -629,6 +629,101 @@ mod filesystem {
             rejected_without_changes(&root, &parent.path().join("symlink-backup"));
             assert_eq!(fingerprint(&target), target_before);
         }
+    }
+    /// Preserve an older stored position as the new ledger's floor, even at its limit.
+    #[test]
+    fn schema2_upgrade_preserves_the_existing_change_floor() {
+        for sequence in [42_i64, i64::MAX] {
+            let parent = tempfile::tempdir().unwrap();
+            let root = parent.path().join("schema-two");
+            let before = super::support::create_schema2(&root);
+            let connection =
+                Connection::open(root.join(DATABASE_DIRECTORY).join(DATABASE_FILE)).unwrap();
+            connection
+                .execute("UPDATE server_state SET change_seq=?1", [sequence])
+                .unwrap();
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            connection.close().unwrap();
+            let backup_path = parent.path().join("before-three");
+            let result = migrate(&root, &backup_path).unwrap();
+            assert_eq!(result.from_schema_version, 2);
+            assert_eq!(result.to_schema_version, 3);
+            assert_eq!(result.metadata.server_id, before.server_id);
+            assert_eq!(result.metadata.sync_epoch, before.sync_epoch);
+            assert_eq!(result.metadata.change_seq.unwrap().value(), sequence as u64);
+            let database =
+                Connection::open(root.join(DATABASE_DIRECTORY).join(DATABASE_FILE)).unwrap();
+            let floor: i64 = database
+                .query_row("SELECT change_floor FROM server_state", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(floor, sequence);
+            database.close().unwrap();
+            let after_path = parent.path().join("schema-three-snapshot");
+            let after = create_snapshot(&root, &after_path).unwrap();
+            assert_eq!(after.scope, jumpstart_storage::SnapshotScope::Metadata);
+            fs::remove_dir_all(&root).unwrap();
+            assert_eq!(verify_snapshot(&after_path).unwrap(), after);
+            let old = verify_snapshot(&backup_path).unwrap();
+            assert_eq!(old.schema_version, 2);
+            assert_eq!(old.change_seq.unwrap().value(), sequence as u64);
+        }
+    }
+
+    /// Finish a journal emitted by the previous binary at its original schema-2 target.
+    #[test]
+    fn legacy_journal_finishes_two_before_a_separate_upgrade_to_three() {
+        let (parent, root, before) = old_fixture();
+        let first_output = parent.path().join("legacy-backup");
+        let backup = create_snapshot(&root, &first_output).unwrap();
+        write_journal(&root, &before, &backup);
+        let journal_path = root.join(MIGRATION_FILE);
+        let mut journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        journal["journal_format_version"] = 1.into();
+        journal["to_schema_version"] = 2.into();
+        fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+        let legacy = migrate(&root, &first_output).unwrap();
+        assert!(legacy.resumed);
+        assert_eq!(legacy.to_schema_version, 2);
+        assert_eq!(legacy.metadata.schema_version, 2);
+        assert_eq!(legacy.backup, Some(backup));
+        assert!(!journal_path.exists());
+        let final_result = migrate(&root, &parent.path().join("next-backup")).unwrap();
+        assert_eq!(final_result.from_schema_version, 2);
+        assert_eq!(final_result.to_schema_version, 3);
+        assert_eq!(final_result.metadata.server_id, before.server_id);
+        assert_eq!(final_result.metadata.sync_epoch, before.sync_epoch);
+    }
+
+    /// Validate the complete schema-2 migration prefix before resuming a new upgrade.
+    #[test]
+    fn schema2_resume_rejects_a_changed_second_migration_record() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("schema-two");
+        let before = super::support::create_schema2(&root);
+        let output = parent.path().join("before-three");
+        let backup = create_snapshot(&root, &output).unwrap();
+        write_journal(&root, &before, &backup);
+        let connection =
+            Connection::open(root.join(DATABASE_DIRECTORY).join(DATABASE_FILE)).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_migrations SET applied_at='changed' WHERE version=2",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        connection.close().unwrap();
+        let source_before = fingerprint(&root);
+        let backup_before = fingerprint(&output);
+        assert!(migrate(&root, &output).is_err());
+        assert_eq!(fingerprint(&root), source_before);
+        assert_eq!(fingerprint(&output), backup_before);
     }
 }
 
