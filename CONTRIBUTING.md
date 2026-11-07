@@ -23,6 +23,18 @@ are blocking library primitives; they do not expose a transfer service. See the
 [range implementation](crates/jumpstart-protocol/src/range.rs) and
 [raw-body/control-frame tests](crates/jumpstart-protocol/tests/ranges.rs).
 
+`UploadChunk::new` checks the upload grid: 4 MiB pieces and an exact smaller final
+piece when needed. Empty resources have no chunk bodies. `copy_upload_chunk`
+receives one bounded body and verifies its BLAKE3 fingerprint before seeking or
+writing caller-owned staging. Its buffer holds at most 4 MiB so corrupt or short
+input can be rejected without touching the destination. A staging write can still
+fail partway; returning a byte count does not synchronize it or confirm progress.
+The caller must enforce session ownership, accepted-chunk replay/overlap rules,
+space reservations, and synchronization of both bytes and bitmap before
+acknowledgment. Full-resource verification remains required before publication.
+See the [upload primitive](crates/jumpstart-protocol/src/upload.rs) and
+[verification/failure tests](crates/jumpstart-protocol/tests/uploads.rs).
+
 The domain crate also checks job state transitions, fences stale worker results, and bounds automatic retries. For example, a canceled import cannot accept its old worker's late result, and an unavailable provider cannot trigger retries forever. These shared policies operate in memory. The storage crate now persists and executes the closed metadata-snapshot workflow using the lifecycle rules; general workers, automatic retry timers, and application publication remain future work.
 
 CI runs the Rust checks on Linux, macOS and Windows. These library checks do not qualify the future Linux daemon, native applications or virtual-drive helpers for production.
