@@ -306,6 +306,20 @@ enum StorageCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect a registration candidate through the running Linux daemon.
+    Register {
+        /// Existing absolute directory to observe.
+        path: PathBuf,
+        #[arg(long, value_parser = ["primary", "backup"])]
+        role: String,
+        /// Request preflight evidence only.
+        #[arg(long)]
+        plan: bool,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Parse process arguments, execute the command, and report failures to stderr.
@@ -426,6 +440,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 json,
                 "Storage capacity observation (not disk health or write approval):",
             ),
+            StorageCommand::Register {
+                path,
+                role,
+                plan,
+                socket,
+                json,
+            } => {
+                if !plan {
+                    return Err(
+                        "volume registration currently supports --plan preflight only".into(),
+                    );
+                }
+                (
+                    admin::volume_preflight(&socket, &path, &role)?,
+                    json,
+                    "Read-only volume registration preflight:",
+                )
+            }
         },
         Command::Jobs { command } => return run_jobs(command),
     };

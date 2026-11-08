@@ -75,6 +75,11 @@ pub use capacity::{
 
 #[cfg(target_os = "linux")]
 pub use platform::AdminMetadata;
+#[cfg(target_os = "linux")]
+pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};
+
+#[cfg(target_os = "linux")]
+mod volume;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 4;
@@ -375,6 +380,9 @@ pub enum StorageError {
     /// Filesystem measurements cannot produce a valid bounded capacity report.
     #[error("storage capacity observation is invalid: {0}")]
     InvalidCapacity(&'static str),
+    /// The kernel could not establish the requested volume candidate's identity.
+    #[error("invalid volume candidate: {0}")]
+    InvalidVolume(&'static str),
     /// A local change-page request has an invalid budget or future position.
     #[error("invalid snapshot-job change cursor: {0}")]
     InvalidJobChangeCursor(&'static str),

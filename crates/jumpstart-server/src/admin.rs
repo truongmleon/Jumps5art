@@ -38,3 +38,21 @@ pub(super) fn status(socket: &Path) -> Result<serde_json::Value, Box<dyn Error>>
         Err("the administration daemon requires Linux".into())
     }
 }
+
+/// Ask the running daemon to observe a directory for an intended volume role.
+///
+/// `socket` identifies the local service, `path` is the directory, and `role`
+/// is primary or backup. Returns read-only preflight evidence or a refusal.
+pub(super) fn volume_preflight(
+    socket: &Path,
+    path: &Path,
+    role: &str,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    return linux::volume_preflight(socket, path, role);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (socket, path, role);
+        Err("the administration daemon requires Linux".into())
+    }
+}
