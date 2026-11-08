@@ -412,8 +412,13 @@ fn prepare_staging(staging: &Path) -> Result<MetadataReport> {
     let root = fs::canonicalize(staging)
         .map_err(|source| io("resolve staged metadata root", staging, source))?;
     let verified = verify_locked_metadata(root, lock)?;
-    FileExt::unlock(&verified._lock)
-        .map_err(|source| io("release staged maintenance lock", &lock_path, source))?;
+    FileExt::unlock(&verified._lock).map_err(|source| {
+        io(
+            "release staged maintenance lock",
+            &staging.join(LOCK_FILE),
+            source,
+        )
+    })?;
     Ok(verified.report)
 }
 
