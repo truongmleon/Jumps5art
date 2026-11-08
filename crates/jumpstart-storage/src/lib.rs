@@ -187,6 +187,33 @@ pub struct MetadataRestoreReport {
     pub archived_snapshot_jobs: Counter,
 }
 
+/// One primary's retained catalog resources at the snapshot's captured position.
+///
+/// Resource rows can share a blob. The unique blob and byte counts describe
+/// the minimum objects to copy within this primary. Placement state is catalog
+/// evidence, so verification must still read and hash the actual files.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PrimaryBackupInventory {
+    pub primary_id: uuid::Uuid,
+    pub items: Counter,
+    pub versions: Counter,
+    pub resources: Counter,
+    pub unique_blobs: Counter,
+    pub blob_bytes: Counter,
+    pub blobs_without_verified_placement: Counter,
+}
+
+/// Catalog inventory for planning a backup from one verified database snapshot.
+///
+/// The Worlds count describes indexed recovery points. Active-world capture
+/// and independent file verification happen outside this inventory.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SnapshotBackupInventory {
+    pub source: SnapshotReport,
+    pub primaries: Vec<PrimaryBackupInventory>,
+    pub worlds_recovery_points: Counter,
+}
+
 /// Describes an explicit metadata upgrade and where its prior state was preserved.
 ///
 /// For example, upgrading a scratch schema-1 root first saves a verified snapshot,
@@ -361,6 +388,11 @@ pub enum StorageError {
     /// A verified metadata bundle cannot be restored under the requested scope.
     #[error("metadata recovery refused: {0}")]
     InvalidMetadataRestore(&'static str),
+    /// Bootstrap-only snapshots have no application catalog to inventory.
+    #[error(
+        "backup inventory requires a snapshot containing the schema 4 catalog; found schema {found}"
+    )]
+    BackupCatalogUnavailable { found: u32 },
     /// The retained journal or its recovery snapshot disagrees with this upgrade.
     #[error("invalid metadata migration: {0}")]
     InvalidMigration(&'static str),
@@ -505,6 +537,15 @@ pub fn restore_metadata_snapshot(
     expected_hash: BlobId,
 ) -> Result<MetadataRestoreReport> {
     platform::restore_metadata_snapshot(snapshot_root, output, expected_hash)
+}
+
+/// Inventory retained versions and object references from a verified snapshot.
+///
+/// `root` names a standalone schema-4 snapshot. Returns exact per-primary
+/// counts, catalog placement evidence, and the count of indexed Worlds points.
+/// No active database, live primary, or daemon is required for this read.
+pub fn inventory_snapshot(root: &Path) -> Result<SnapshotBackupInventory> {
+    platform::inventory_snapshot(root)
 }
 
 /// Upgrade offline metadata after saving a verified copy of its previous database.
@@ -662,8 +703,8 @@ mod platform;
 mod platform {
     use super::{
         BlobId, Counter, JobId, JobState, MetadataReport, MetadataRestoreReport, MigrationReport,
-        Path, PositiveCounter, Result, SnapshotJob, SnapshotJobChangePage, SnapshotReport,
-        StorageError, SyncEpoch,
+        Path, PositiveCounter, Result, SnapshotBackupInventory, SnapshotJob, SnapshotJobChangePage,
+        SnapshotReport, StorageError, SyncEpoch,
     };
 
     /// Refuse queue writes without touching `root` or `output` (`&Path`).
@@ -807,6 +848,11 @@ mod platform {
         _output: &Path,
         _expected_hash: BlobId,
     ) -> Result<MetadataRestoreReport> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Refuse backup inventory on a platform without the local snapshot verifier.
+    pub fn inventory_snapshot(_root: &Path) -> Result<SnapshotBackupInventory> {
         Err(StorageError::UnsupportedPlatform)
     }
 }

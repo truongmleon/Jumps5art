@@ -9,7 +9,7 @@ use std::path::Path;
 
 use jumpstart_storage::{
     DATABASE_DIRECTORY, DATABASE_FILE, SNAPSHOT_DATABASE_FILE, create_snapshot, initialize,
-    inspect, verify_snapshot,
+    inspect, inventory_snapshot, verify_snapshot,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, params};
 
@@ -33,6 +33,87 @@ fn open_catalog(root: &Path) -> Connection {
         )
         .unwrap();
     connection
+}
+
+/// A shared object counts once per primary, with missing placements tracked per copy.
+#[test]
+fn backup_inventory_counts_retained_versions_and_deduplicates_within_each_primary() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("metadata");
+    let mut connection = open_catalog(&root);
+    let transaction = connection.transaction().unwrap();
+    let (photo, photo_version) = insert_versioned_item(&transaction, 10, "photogenic", "Photo");
+    let (_, mass_version) = insert_versioned_item(&transaction, 11, "mass", "File");
+    let (other, other_version) = insert_versioned_item(&transaction, 12, "mass", "Other primary");
+    let second_primary = [3_u8; 16];
+    transaction
+        .execute(
+            "INSERT INTO volumes VALUES (?1, 'primary', ?2, 'second-filesystem', 'unknown', NULL)",
+            params![[4_u8; 16], second_primary],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE items SET home_primary_id=?1 WHERE item_id=?2",
+            params![second_primary, other],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE items SET lifecycle='recently_deleted', deleted_at_ms=1000 WHERE item_id=?1",
+            [photo],
+        )
+        .unwrap();
+    let older_version = [99_u8; 16];
+    transaction
+        .execute(
+            "INSERT INTO versions VALUES (?1, ?2, 1, 1, 'b3', zeroblob(32))",
+            params![older_version, photo],
+        )
+        .unwrap();
+    transaction
+        .execute_batch("INSERT INTO blobs VALUES ('b3', zeroblob(32), 100);")
+        .unwrap();
+    for version in [photo_version, older_version, mass_version, other_version] {
+        transaction.execute(
+            "INSERT INTO version_resources VALUES (?1, zeroblob(16), 'original', 'file', NULL, 'b3', zeroblob(32), 1)",
+            [version],
+        ).unwrap();
+    }
+    transaction
+        .execute(
+            "INSERT INTO blob_placements VALUES ('b3', zeroblob(32), ?1, 'verified', 1000)",
+            [PRIMARY],
+        )
+        .unwrap();
+    transaction.execute(
+        "INSERT INTO worlds_backup_catalog VALUES (zeroblob(16), ?1, 1, 'b3', zeroblob(32), 1000, 2000)",
+        [VOLUME],
+    ).unwrap();
+    transaction.commit().unwrap();
+    connection.close().unwrap();
+
+    let output = parent.path().join("snapshot");
+    let snapshot = create_snapshot(&root, &output).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+    let inventory = inventory_snapshot(&output).unwrap();
+    assert_eq!(inventory.source, snapshot);
+    assert_eq!(inventory.worlds_recovery_points.value(), 1);
+    assert_eq!(inventory.primaries.len(), 2);
+    let first = &inventory.primaries[0];
+    assert_eq!(first.primary_id.as_bytes(), &PRIMARY);
+    assert_eq!(first.items.value(), 2);
+    assert_eq!(first.versions.value(), 3);
+    assert_eq!(first.resources.value(), 3);
+    assert_eq!(first.unique_blobs.value(), 1);
+    assert_eq!(first.blob_bytes.value(), 100);
+    assert_eq!(first.blobs_without_verified_placement.value(), 0);
+    let second = &inventory.primaries[1];
+    assert_eq!(second.primary_id.as_bytes(), &second_primary);
+    assert_eq!(second.unique_blobs.value(), 1);
+    assert_eq!(second.blob_bytes.value(), 100);
+    assert_eq!(second.blobs_without_verified_placement.value(), 1);
+    assert_eq!(verify_snapshot(&output).unwrap(), snapshot);
 }
 
 /// Insert a catalog item and its first version in a transaction.

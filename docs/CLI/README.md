@@ -19,6 +19,7 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | `health` | Checks an offline metadata root and measures capacity on the filesystem containing that root. |
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
 | `snapshot verify` | Checks an existing bundle. The original metadata folder is not required. |
+| `snapshot inventory` | Counts the retained catalog resources and recorded blob placements each primary needs. |
 | `snapshot restore` | Recovers a verified metadata bundle into a new offline development root. |
 | `migrate` | Upgrades older metadata after saving a verified recovery copy; see [migration instructions](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade). |
 | `jobs` | Enqueues/runs snapshot requests, reads their status/history/change pages, cancels queued requests, and recovers interrupted work; see [job commands](../../CONTRIBUTING.md#persisted-local-snapshot-jobs). |
@@ -150,6 +151,20 @@ cargo run -p jumpstart-server -- snapshot verify --snapshot-root /tmp/jumpstart-
 Verification reads `snapshot.json` and `metadata.sqlite` and prints the same report as `snapshot create`. It still succeeds after the original metadata folder is deleted. It does not modify the bundle. A missing bundle is not created. A damaged or extra file fails the command and is left as it was.
 
 Heading: `Verified local metadata snapshot (not a full backup):`
+
+## `snapshot inventory`
+
+```sh
+jumpstart-server snapshot inventory --snapshot-root /path/to/backup --json
+```
+
+The command verifies the bundle, then reads the schema-4 catalog at its
+captured change position. It counts retained items, versions and resources,
+including Recently Deleted items. For each primary it reports unique blobs,
+their total bytes, and how many lack a recorded verified placement on that
+primary. It also counts indexed Worlds recovery points. This report describes
+the catalog's evidence. Verification of actual object bytes and Worlds capture
+are separate stages of a full backup.
 
 ## `snapshot restore`
 
