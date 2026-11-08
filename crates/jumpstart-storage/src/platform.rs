@@ -37,16 +37,12 @@ mod changes;
 mod history;
 mod jobs;
 mod migration;
-#[cfg(target_os = "linux")]
-mod registration;
 mod schema3;
 mod schema4;
 mod schema5;
 mod snapshot;
 #[cfg(target_os = "linux")]
 mod worlds;
-#[cfg(target_os = "linux")]
-pub use registration::{RegisteredPrimary, RegisteredVolumeHealth, VolumeRegistrationPlan};
 #[cfg(target_os = "linux")]
 pub use worlds::{WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint};
 
@@ -58,6 +54,12 @@ pub(super) use jobs::{
 };
 pub(super) use migration::migrate;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};
+
+// Linux registration owns filesystem mutations and observations for the admin lease.
+#[cfg(target_os = "linux")]
+mod registration;
+#[cfg(target_os = "linux")]
+pub use registration::{RegisteredPrimary, RegisteredVolumeHealth, VolumeRegistrationPlan};
 
 const MIGRATION_NAME: &str = "initial_metadata";
 const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version INTEGER PRIMARY KEY CHECK (version > 0),\n    name TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL\n) STRICT";
