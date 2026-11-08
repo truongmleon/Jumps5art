@@ -1,0 +1,22 @@
+[Unit]
+Description=Jumpstart local administration daemon
+
+[Service]
+Type=simple
+User=jumpstart
+Group=jumpstart
+EnvironmentFile=/etc/jumpstart/server.env
+ExecStart=/opt/jumpstart/current/bin/jumpstart-server serve --metadata-root ${JUMPSTART_METADATA_ROOT}
+RuntimeDirectory=jumpstart
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

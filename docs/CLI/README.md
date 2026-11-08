@@ -15,6 +15,8 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | Command | What it does |
 |---|---|
 | `init` | Creates a new metadata folder that identifies one server. |
+| `serve` | Starts the Linux-only local administration daemon. |
+| `status` | Reads the running daemon's metadata status through its private socket. |
 | `inspect` | Reads an existing metadata folder and prints that identity. The folder stays unchanged. |
 | `health` | Checks an offline metadata root and measures capacity on the filesystem containing that root. |
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
@@ -29,6 +31,14 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 A successful command prints its report on stdout and exits successfully. A failure prints `error:` and the reason on stderr and exits with a failure status. Failures normally leave stdout empty. A snapshot job that records `Failed` prints that saved outcome, and `health` prints any available evidence before reporting an incomplete check. Add `--json` for JSON. `jobs changes` uses compact JSON to preserve its response byte bound, while other commands use pretty-printed JSON. Without `--json`, the first line is a heading and the fields follow, indented two spaces per level.
 
 `--help` and `--version` are handled before a command runs. `snapshot --help`, `storage --help`, and `jobs --help` list the nested commands.
+
+## `serve` and `status`
+
+On Linux, use the dedicated service user to run `serve --metadata-root PATH`. The systemd unit template in [packaging/linux](../../packaging/linux/jumpstart.service) expects that user, the installed binary, and a root-owned `/etc/jumpstart/server.env` containing `JUMPSTART_METADATA_ROOT`. It creates the private runtime directory for the default socket at `/run/jumpstart/admin.sock`.
+
+Run `status --json` as root or as the service user. For a scratch run, both commands accept `--socket PATH` pointing into an existing private directory owned by the service user. The server rejects root execution and checks the caller's OS credentials before decoding a request.
+
+The daemon takes exclusive metadata ownership for its lifetime. Offline commands require stopping it first. Status reports `metadata_verified` after successful startup verification, or `recovery_required` if the root needs attention. Missing roots stay absent. Stop with SIGINT or SIGTERM for orderly release of the lock and socket.
 
 ## `init`
 

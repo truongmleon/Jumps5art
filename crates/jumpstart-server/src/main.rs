@@ -37,15 +37,13 @@ use jumpstart_storage::{
     verify_snapshot,
 };
 
+mod admin;
 mod health;
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
 /// No network listener is configured or started by this development tool.
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Jumpstart local metadata development tools; no network listener"
-)]
+#[command(version, about = "Jumpstart local metadata and Linux administration")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -58,6 +56,22 @@ struct Cli {
 /// Root paths are owned `PathBuf` values and output selection uses a `bool`.
 #[derive(Subcommand)]
 enum Command {
+    /// Run the Linux daemon with its protected local admin socket.
+    Serve {
+        /// Existing metadata root to verify before allowing administration.
+        #[arg(long)]
+        metadata_root: PathBuf,
+        /// Unix socket in a pre-existing private runtime directory.
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+    },
+    /// Ask the running Linux daemon about its metadata state.
+    Status {
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Initialize a new scratch metadata root. Existing paths are never adopted.
     Init {
         #[arg(long)]
@@ -331,6 +345,15 @@ fn main() -> ExitCode {
 /// acknowledgment in `run_jobs`. Verification, inspection, and job reads need none.
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let (report, json, title) = match cli.command {
+        Command::Serve {
+            metadata_root,
+            socket,
+        } => return admin::serve(&metadata_root, &socket),
+        Command::Status { socket, json } => (
+            admin::status(&socket)?,
+            json,
+            "Live local administration status:",
+        ),
         Command::Init {
             metadata_root,
             development,

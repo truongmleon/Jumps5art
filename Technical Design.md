@@ -1308,6 +1308,8 @@ jumpstart-server recovery list|inspect|verify|export|plan|apply|reconcile
 
 This list defines the planned administrative surface. See [docs/CLI/README.md](docs/CLI/README.md) for the currently implemented development commands and [CONTRIBUTING.md](CONTRIBUTING.md) for their limitations. Initialization inventories non-empty locations and never adopts them implicitly. Registering or replacing a volume requires a plan bound to its stable identity and fingerprint. Before serving mutations, startup verifies the format/schema and registered roots, runs publication/job/restore reconciliation, then publishes capability and health state. A missing primary degrades only its items; a missing metadata database enters recovery mode without initializing a replacement.
 
+The local daemon implementation starts with a checked metadata lease and a private Linux Unix socket. It validates the caller's kernel credentials before reading a bounded versioned request, and exposes metadata startup status while recovery is required. The Linux fixture checks that offline writers are excluded, an invalid frame leaves the listener usable, and termination releases the socket and lock. Application listeners and mutation handlers follow their separate authorization and persistence contracts.
+
 ### 16.2 Upgrade and Rollback
 
 Each release contains a signed manifest with binary/tool hashes, protocol range, readable/writable storage-format range, schema migration IDs, and expected recovery-tool version. Verify the signature against the pinned release public key before staging an update. Keep provider/tool updates distinct from database upgrades and run their compatibility corpus before enabling them.
