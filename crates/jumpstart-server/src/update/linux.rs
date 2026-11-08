@@ -89,6 +89,53 @@ fn inspect_bundle(
     }))
 }
 
+/// Read a version from the live daemon's checked status response.
+fn storage_version(field: &Value) -> Result<u32, Box<dyn Error>> {
+    field
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "the daemon did not report a valid storage version".into())
+}
+
+/// Open an absolute directory while refusing symlinks in any path component.
+fn open_directory(path: &Path) -> Result<File, Box<dyn Error>> {
+    if !path.is_absolute() {
+        return Err("use an absolute release directory".into());
+    }
+    Ok(File::from(openat2(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )?))
+}
+
+/// Open a regular file beneath the directory without following links or mounts.
+fn open_regular(directory: &File, relative: &str) -> Result<File, Box<dyn Error>> {
+    let file = File::from(openat2(
+        directory,
+        relative,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+    )?);
+    if !file.metadata()?.is_file() {
+        return Err("expected a regular release file".into());
+    }
+    Ok(file)
+}
+
+/// Read exactly `N` bytes and refuse trailing data in keys and signatures.
+fn fixed_bytes<const N: usize>(mut file: File) -> Result<[u8; N], Box<dyn Error>> {
+    let mut value = [0; N];
+    file.read_exact(&mut value)?;
+    if file.read(&mut [0])? != 0 {
+        return Err("release key or signature has trailing bytes".into());
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -135,51 +182,4 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &binary).unwrap();
         assert!(inspect_bundle(fixture.path(), key.as_bytes(), 1, 4).is_err());
     }
-}
-
-/// Read a version from the live daemon's checked status response.
-fn storage_version(field: &Value) -> Result<u32, Box<dyn Error>> {
-    field
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| "the daemon did not report a valid storage version".into())
-}
-
-/// Open an absolute directory while refusing symlinks in any path component.
-fn open_directory(path: &Path) -> Result<File, Box<dyn Error>> {
-    if !path.is_absolute() {
-        return Err("use an absolute release directory".into());
-    }
-    Ok(File::from(openat2(
-        CWD,
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )?))
-}
-
-/// Open a regular file beneath the directory without following links or mounts.
-fn open_regular(directory: &File, relative: &str) -> Result<File, Box<dyn Error>> {
-    let file = File::from(openat2(
-        directory,
-        relative,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-    )?);
-    if !file.metadata()?.is_file() {
-        return Err("expected a regular release file".into());
-    }
-    Ok(file)
-}
-
-/// Read exactly `N` bytes and refuse trailing data in keys and signatures.
-fn fixed_bytes<const N: usize>(mut file: File) -> Result<[u8; N], Box<dyn Error>> {
-    let mut value = [0; N];
-    file.read_exact(&mut value)?;
-    if file.read(&mut [0])? != 0 {
-        return Err("release key or signature has trailing bytes".into());
-    }
-    Ok(value)
 }
