@@ -8,8 +8,7 @@ use std::{error::Error, path::Path};
 #[cfg(target_os = "linux")]
 mod linux;
 
-/// Default socket under the runtime directory managed by systemd.
-pub(super) const SOCKET_PATH: &str = "/run/jumpstart/admin.sock";
+pub(super) use jumpstart_server::SOCKET_PATH;
 
 /// Serve the checked root at the selected socket until the process is stopped.
 ///

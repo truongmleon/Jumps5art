@@ -4,6 +4,26 @@ Worlds runs one Fabric Minecraft: Java Edition server on the Linux computer. The
 
 [Getting started](../Getting%20Started/README.md) covers the rest of Jumpstart. [Mass](../Mass/README.md) backs up the Minecraft files together with your other libraries. Worlds itself creates the world backups you restore from.
 
+## Development CLI
+
+The Linux development binary currently reads the schema-4 catalog through the
+running Jumpstart daemon's protected socket. Run it as root or the daemon's
+service user. For a scratch daemon, pass `--socket PATH`.
+
+```sh
+cargo run -p jumpstart-server --bin worlds -- status --json
+cargo run -p jumpstart-server --bin worlds -- backup list --limit 50 --json
+```
+
+`status` reports `absent` when the catalog has no registered primary for managed
+storage. If a primary is registered and runtime evidence is unavailable, it
+prints the catalog evidence with a null lifecycle and exits with code 4.
+`backup list` reports indexed manifest identities and UTC Unix millisecond
+timestamps. It returns the newest captures first, with `truncated` set when
+more records exist. These records describe prior verification; checking the
+actual files and determining retention or protection need the filesystem
+catalog. The sections below describe the full planned Worlds surface.
+
 ## See what it is doing
 
 ```sh

@@ -232,3 +232,90 @@ fn live_health_distinguishes_a_replaced_root_from_the_verified_metadata() {
     assert_eq!(report["capacity"]["evidence"]["scope"], "capacity_only");
     assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
 }
+
+/// Invoke the separate Worlds binary against the test daemon's protected socket.
+fn worlds(socket: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_worlds"))
+        .arg("--socket")
+        .arg(socket)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// A fresh daemon reports an absent managed world and an empty recovery index.
+#[test]
+fn worlds_cli_reads_fresh_catalog_without_touching_world_files() {
+    if geteuid().is_root() {
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    jumpstart_storage::initialize(&root).unwrap();
+    let _daemon = start(&root, &socket);
+    let output = worlds(&socket, &["status", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["lifecycle"], "absent");
+    assert_eq!(report["players_can_connect"], false);
+    assert_eq!(report["evidence"]["registered_primaries"], "0");
+    let output = worlds(&socket, &["backup", "list", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let index: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(index["index"]["points"].as_array().unwrap().is_empty());
+    assert_eq!(index["index"]["truncated"], false);
+    assert!(!root.join("worlds").exists());
+}
+
+/// Stored points do not prove the Java lifecycle, and listing honors its bound.
+#[test]
+fn worlds_cli_distinguishes_indexed_points_from_unassessed_runtime() {
+    if geteuid().is_root() {
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    jumpstart_storage::initialize(&root).unwrap();
+    let database = rusqlite::Connection::open(root.join("database/jumpstart.sqlite")).unwrap();
+    database.execute_batch(
+        "INSERT INTO volumes VALUES (zeroblob(16),'primary',zeroblob(16),'fixture','unknown',NULL);
+         INSERT INTO worlds_backup_catalog VALUES (zeroblob(16),zeroblob(16),1,'b3',zeroblob(32),1000,1001);
+         INSERT INTO worlds_backup_catalog VALUES (randomblob(16),zeroblob(16),1,'b3',zeroblob(32),2000,2001);"
+    ).unwrap();
+    database.close().unwrap();
+    let _daemon = start(&root, &socket);
+
+    let output = worlds(&socket, &["status", "--json"]);
+    assert_eq!(output.status.code(), Some(4));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["lifecycle"].is_null());
+    assert!(report["players_can_connect"].is_null());
+    assert_eq!(report["reason"], "runtime_unassessed");
+    assert_eq!(report["evidence"]["indexed_recovery_points"], "2");
+
+    let output = worlds(&socket, &["backup", "list", "--limit", "1", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"], "worlds_recovery_index");
+    let points = report["index"]["points"].as_array().unwrap();
+    assert_eq!(points.len(), 1);
+    assert_eq!(points[0]["captured_at_ms"], 2000);
+    assert_eq!(points[0]["manifest_hash"], format!("b3:{}", "0".repeat(64)));
+    assert_eq!(report["index"]["truncated"], true);
+}

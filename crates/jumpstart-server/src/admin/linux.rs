@@ -9,51 +9,22 @@ use std::{
     fs,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
-use jumpstart_protocol::{FRAME_PREFIX_BYTES, MAX_FRAME_BYTES, decode_body, write_frame};
+use jumpstart_server::local_admin::{
+    ADMIN_VERSION, Command, DEADLINE, Reply, Request, call, read, socket_owner, write,
+};
 use jumpstart_storage::{
     AdminMetadata, StorageError, VolumeRole, inspect_capacity, inspect_volume_candidate,
 };
 use rustix::{net::sockopt::socket_peercred, process::geteuid};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     runtime::Builder,
     signal::unix::{SignalKind, signal},
     time::timeout,
 };
-
-const ADMIN_VERSION: u16 = 1;
-const DEADLINE: Duration = Duration::from_secs(15);
-
-/// An explicitly versioned request for the local daemon.
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    version: u16,
-    command: Command,
-}
-
-/// Commands allowed on this socket. Keeping the set closed rejects unknown actions.
-#[derive(Deserialize, Serialize)]
-#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
-enum Command {
-    Status,
-    Health,
-    VolumePreflight { path: PathBuf, role: VolumeRole },
-}
-
-/// A framed response containing either the requested evidence or a typed refusal.
-#[derive(Deserialize, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-enum Reply {
-    Ok { report: Value },
-    Error { message: String },
-}
 
 /// Owns the bound socket path. On shutdown it removes only its own filesystem entry.
 struct BoundSocket {
@@ -180,6 +151,21 @@ async fn reply(
             Command::Health => Reply::Ok {
                 report: live_health(root, metadata),
             },
+            Command::WorldsStatus => worlds_reply(metadata, |lease| {
+                let evidence = lease.worlds_catalog_status()?;
+                let absent = evidence.registered_primaries == jumpstart_domain::Counter::ZERO;
+                Ok(json!({
+                    "scope": "worlds_catalog",
+                    "lifecycle": absent.then_some("absent"),
+                    "players_can_connect": absent.then_some(false),
+                    "reason": if absent { "no_registered_primary" } else { "runtime_unassessed" },
+                    "evidence": evidence,
+                }))
+            }),
+            Command::WorldsBackupList { limit } => worlds_reply(metadata, |lease| {
+                let index = lease.worlds_recovery_index(limit)?;
+                Ok(json!({"scope": "worlds_recovery_index", "index": index}))
+            }),
             Command::VolumePreflight { path, role } => match metadata {
                 Ok(metadata) => {
                     match inspect_volume_candidate(&path, role, &metadata.report().root) {
@@ -204,6 +190,24 @@ async fn reply(
         }
     };
     write(stream, &reply).await
+}
+
+/// Query a Worlds component through the checked daemon lease or return a refusal.
+///
+/// The closure is called only when a verified metadata lease exists. The
+/// resulting reply preserves storage refusals without exposing a raw connection.
+fn worlds_reply(
+    metadata: &Result<AdminMetadata, StorageError>,
+    query: impl FnOnce(&AdminMetadata) -> jumpstart_storage::Result<Value>,
+) -> Reply {
+    let result = metadata
+        .as_ref()
+        .map_err(ToString::to_string)
+        .and_then(|lease| query(lease).map_err(|error| error.to_string()));
+    match result {
+        Ok(report) => Reply::Ok { report },
+        Err(message) => Reply::Error { message },
+    }
 }
 
 /// Collect independent live evidence from the selected root and retained lease.
@@ -285,96 +289,4 @@ pub(super) fn volume_preflight(
             role,
         },
     )
-}
-
-/// Verify the selected socket and submit a single local admin command.
-fn call(socket: &Path, command: Command) -> Result<Value, Box<dyn Error>> {
-    let owner = socket_owner(socket)?;
-    let entry = fs::symlink_metadata(socket)?;
-    if owner == 0 || !entry.file_type().is_socket() || entry.uid() != owner {
-        return Err("the administration path must be a socket owned by its service user".into());
-    }
-    Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(timeout_call(socket, owner, command))
-}
-
-/// Connect, verify the daemon UID, and exchange one request within the deadline.
-async fn timeout_call(
-    socket: &Path,
-    owner: u32,
-    command: Command,
-) -> Result<Value, Box<dyn Error>> {
-    timeout(DEADLINE, async {
-        let mut stream = UnixStream::connect(socket).await?;
-        if socket_peercred(&stream)?.uid.as_raw() != owner {
-            return Err("administration peer UID does not match the socket owner".into());
-        }
-        write(
-            &mut stream,
-            &Request {
-                version: ADMIN_VERSION,
-                command,
-            },
-        )
-        .await?;
-        match read(&mut stream).await? {
-            Reply::Ok { report } => Ok(report),
-            Reply::Error { message } => Err(message.into()),
-        }
-    })
-    .await?
-}
-
-/// Verify a private runtime directory and its ancestors, returning its owner UID.
-///
-/// A service-owned directory beneath a root-owned sticky directory such as
-/// `/tmp` is suitable for a scratch run. Aliases and ancestors writable by a
-/// third user are refused so the client cannot be redirected to another socket.
-fn socket_owner(socket: &Path) -> Result<u32, Box<dyn Error>> {
-    let parent = socket
-        .parent()
-        .filter(|_| socket.is_absolute())
-        .ok_or("the administration socket must be an absolute path in a private directory")?;
-    if socket.file_name().is_none() || fs::canonicalize(parent)? != parent {
-        return Err("the administration socket path must use its canonical directory".into());
-    }
-    let directory = fs::symlink_metadata(parent)?;
-    if !directory.is_dir() || directory.mode() & 0o077 != 0 {
-        return Err("the administration runtime directory must be private".into());
-    }
-    let owner = directory.uid();
-    for ancestor in parent.ancestors().skip(1) {
-        let entry = fs::symlink_metadata(ancestor)?;
-        let root_sticky = entry.uid() == 0 && entry.mode() & 0o1000 != 0;
-        if !entry.is_dir()
-            || (entry.uid() != 0 && entry.uid() != owner)
-            || (entry.mode() & 0o022 != 0 && !root_sticky)
-        {
-            return Err("an administration socket ancestor is writable by another user".into());
-        }
-    }
-    Ok(owner)
-}
-
-/// Read one async frame, checking its size before allocating the JSON body.
-async fn read<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T, Box<dyn Error>> {
-    let mut prefix = [0; FRAME_PREFIX_BYTES];
-    stream.read_exact(&mut prefix).await?;
-    let length = u32::from_be_bytes(prefix) as usize;
-    if length == 0 || length > MAX_FRAME_BYTES {
-        return Err("invalid local administration frame length".into());
-    }
-    let mut body = vec![0; length];
-    stream.read_exact(&mut body).await?;
-    Ok(decode_body(&body)?)
-}
-
-/// Encode one bounded frame with the shared codec, then write it to the socket.
-async fn write(stream: &mut UnixStream, payload: &impl Serialize) -> Result<(), Box<dyn Error>> {
-    let mut bytes = Vec::new();
-    write_frame(&mut bytes, payload)?;
-    stream.write_all(&bytes).await?;
-    Ok(())
 }

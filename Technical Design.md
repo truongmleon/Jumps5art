@@ -999,6 +999,8 @@ Restore plans default to the recorded configuration and the safety backup. Decli
 
 Mutating CLI requests carry an operation ID, print the durable operation ID immediately, and wait for its terminal outcome by default; `--detach` returns after acceptance. `--json` exposes the common job schema. Exit codes are 0 for confirmed completion or an idempotent no-op, 2 for invalid input, 3 for stale/conflicting preconditions, 4 for unavailable resources, and 5 for failed work. Detaching reports acceptance rather than completion. After an interrupted connection, `operations show` or retrying the same operation ID resolves the outcome.
 
+The read-only local implementation uses the same protected socket client as server administration. Status uses a checked metadata lease and reports Absent for a catalog without registered primaries. With registered storage and no runtime evidence, it reports an unassessed lifecycle and exit code 4. The backup list returns a bounded page from the SQLite index, labeled separately from filesystem verification and retention. Linux process fixtures check both catalog states, stable index ordering, and truncation.
+
 `create` fails without change if a managed server exists. `archive-existing` requires Stopped, creates and verifies a protected full recovery point, and retains the existing world/configuration as an independently recoverable archive before returning to Absent. `replace` requires Stopped and a verified protected pre-change recovery point before staging a new server. A failed archive or replacement keeps the old active pointer. Neither command implicitly accepts Minecraft's EULA.
 
 ### 13.2 Process Supervision and Concurrency
