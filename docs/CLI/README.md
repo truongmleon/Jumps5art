@@ -6,7 +6,7 @@
 cargo run -p jumpstart-server -- --help
 ```
 
-These are the commands the binary accepts. [CONTRIBUTING.md](../../CONTRIBUTING.md) describes the same preview in more detail, including how initialization and snapshots are published. The finished server's administrative commands are specified separately in [Technical Design.md](<../../Technical Design.md>) and are absent from `--help`.
+These are the commands the binary accepts. [CONTRIBUTING.md](../../CONTRIBUTING.md) describes the same preview in more detail, including how initialization and snapshots are published. The finished server's administrative commands are specified separately in [Technical Design.md](<../../Technical Design.md>) and lists the remaining command families.
 
 The commands run on Linux and macOS. On Windows they exit unsuccessfully without changing files. The `health` report identifies unavailable checks there.
 
@@ -25,7 +25,9 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | `jobs` | Enqueues/runs snapshot requests, reads their status/history/change pages, cancels queued requests, and recovers interrupted work; see [job commands](../../CONTRIBUTING.md#persisted-local-snapshot-jobs). |
 | `jobs run-next` | Runs one oldest queued snapshot; JSON returns a saved `job` or `null` for an empty queue. A saved failed outcome exits unsuccessfully. |
 | `storage inspect` | Reports how much space the filesystem has for an existing directory. |
-| `storage register PATH --plan --role primary\|backup` | Observes a proposed volume through the Linux daemon. |
+| `storage register PATH --plan --role primary\|backup` | Observes a proposed volume through the Linux daemon and can issue a primary registration plan. |
+| `storage apply PLAN_ID --acknowledge-unverified-encryption` | Registers the reviewed Linux primary or resumes its accepted plan. |
+| `maintenance enter\|leave` | Persists or clears the Linux daemon's local write fence. |
 | `update plan` | Verifies a signed Linux release directory and reports compatibility with the running daemon. |
 
 `init`, `migrate`, and `snapshot create` require `--development`. Job enqueue/run/run-next/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
@@ -51,7 +53,7 @@ cargo run -p jumpstart-server -- init --metadata-root /tmp/jumpstart-metadata-de
 | Flag | Required | Meaning |
 |---|---|---|
 | `--metadata-root` | yes | New directory. Its parent must already exist. |
-| `--development` | yes | Acknowledges that this is a development preview. Production volume checks, encryption, backup, and restore are still unimplemented. |
+| `--development` | yes | Acknowledges that this is a development preview. Production storage qualification, encryption checks, and full backup and restore remain open. |
 | `--json` | no | Print the report as JSON. |
 
 The new folder receives `format.json`, `metadata.lock`, and `database/jumpstart.sqlite`. The database records the server ID, the sync epoch, the format version, and the applied migrations. It starts with an empty application catalog and job queue. The identity values are generated once for this folder.
@@ -66,7 +68,7 @@ Heading: `Verified offline development metadata:`
 | `server_id` | UUID string for this server |
 | `sync_epoch` | UUID string recorded with the server ID |
 | `format_version` | Number, currently `1` |
-| `schema_version` | Number, currently `4` |
+| `schema_version` | Number, currently `5` |
 | `change_seq` | Stored decimal-string position; unavailable (`null`) in schema 1 |
 | `journal_mode` | SQLite journal mode of the stored database |
 | `integrity_check` | `"ok"` after the check succeeds |
@@ -111,7 +113,7 @@ cargo run -p jumpstart-server -- migrate --metadata-root /tmp/jumpstart-metadata
 | `--development` | yes | Acknowledges the schema upgrade and limited scope of the recovery copy. |
 | `--json` | no | Print the report as JSON. |
 
-The command upgrades a verified older root to schema 4 after saving a verified pre-upgrade snapshot. A current root reports both versions as 4 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 4. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
+The command upgrades a verified older root to schema 5 after saving a verified pre-upgrade snapshot. A current root reports both versions as 5 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 5. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
 
 ## `snapshot create`
 
@@ -182,13 +184,30 @@ All actions use `--metadata-root PATH` and accept `--json`. Enqueue, run, run-ne
 
 Saved run failures print a job record and return nonzero. See [the snapshot job walkthrough](../../CONTRIBUTING.md#persisted-local-snapshot-jobs) for examples and interrupted-work recovery.
 
-## Volume registration preflight
+## Volume registration
 
 Run `storage register /absolute/path --plan --role primary --json` with the
 Linux daemon running. The report describes the actual mount, directory identity,
 filesystem, read-only state, and any existing files or marker. Symlinks in
 the supplied path are refused. Encryption and registered-device topology remain
 unverified. This preflight creates no marker or approval record.
+
+For a dedicated, empty ext4 or XFS directory, an eligible preflight returns a `plan_id`:
+
+```sh
+jumpstart-server storage register /srv/jumpstart/library --plan --role primary --json
+jumpstart-server storage apply PLAN_ID --acknowledge-unverified-encryption --json
+```
+
+An unaccepted plan expires after ten minutes or when the daemon restarts. After the daemon records the intent, retry the same ID to finish an interrupted registration or retrieve its original receipt. Apply rechecks the mount and filesystem identity, writes the marker without replacing an existing entry, and returns the assigned volume and primary IDs. A missing `plan_id` means the report's `apply_blocker` explains why there is no writable plan.
+
+Use a directory managed exclusively by the service user. The systemd unit keeps paths read-only by default. An operator-managed drop-in must grant `ReadWritePaths=` for the existing metadata root and the specific approved primary directory. Backup roots and Btrfs are preflight-only. The encryption acknowledgment applies because preflight reports encryption as unknown.
+
+If the daemon reports uncheckpointed WAL after a crash, stop it and use the explicit local `jobs recover --development --metadata-root PATH` workflow before restarting. Retain the journal and marker files. If apply refuses an unexpected file or incomplete staging marker, inspect the volume before attempting recovery.
+
+## `maintenance enter|leave`
+
+Both commands accept `--socket PATH` and `--json`. The state persists across daemon restarts and appears in `status`. Entering maintenance fences registration. Leaving maintenance allows it again. These commands require schema 5. Application runtimes and release activation need their own quiescence checks before they can use this fence.
 
 ## `storage inspect`
 
