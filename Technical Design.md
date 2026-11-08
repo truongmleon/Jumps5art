@@ -289,6 +289,8 @@ Device removal commits revocation before replying, updates the in-memory authori
 
 Previously accepted server-resident jobs continue; jobs requiring the removed device enter **Waiting for Source**. Removal retains the revoked key/device row and does not erase local copies or local pending edits. All approved installations remain equal in this single-user system; no account/role hierarchy is introduced.
 
+The pairing policy tests use authenticated-peer fixtures and a monotonic clock. They check token consumption, exact transcript approval, the per-source and window failure limits, expiry, and a revocation check between submission and approval. An actual pairing grant also needs the restricted LAN listener, operator confirmation display, durable device writer, and signed receipt described above.
+
 ### 5.3 Framing, Compatibility, and Errors
 
 Every QUIC bidirectional stream starts with a 4-byte big-endian length followed by UTF-8 JSON. Control frames are at most 1 MiB and nesting depth 32. Reject duplicate JSON keys, invalid UTF-8, non-finite numbers, unknown required features, and oversized input before allocating its body. Bulk streams then carry exactly their declared raw byte count; they never place file bytes in JSON.

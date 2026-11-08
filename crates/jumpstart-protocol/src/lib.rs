@@ -19,6 +19,7 @@
 mod codec;
 mod finite;
 mod handshake;
+pub mod pairing;
 mod range;
 mod upload;
 
