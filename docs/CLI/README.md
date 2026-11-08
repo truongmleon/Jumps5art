@@ -8,7 +8,7 @@ cargo run -p jumpstart-server -- --help
 
 These are the commands the binary accepts. [CONTRIBUTING.md](../../CONTRIBUTING.md) describes the same preview in more detail, including how initialization and snapshots are published. The finished server's administrative commands are specified separately in [Technical Design.md](<../../Technical Design.md>) and are absent from `--help`.
 
-The commands run on Linux and macOS. On Windows they exit with an error that storage operations are supported only on Linux and macOS, and they do not create or change files.
+The commands run on Linux and macOS. On Windows they exit unsuccessfully without changing files. The `health` report identifies unavailable checks there.
 
 ## Available commands
 
@@ -16,6 +16,7 @@ The commands run on Linux and macOS. On Windows they exit with an error that sto
 |---|---|
 | `init` | Creates a new metadata folder that identifies one server. |
 | `inspect` | Reads an existing metadata folder and prints that identity. The folder stays unchanged. |
+| `health` | Checks an offline metadata root and measures capacity on the filesystem containing that root. |
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
 | `snapshot verify` | Checks an existing bundle. The original metadata folder is not required. |
 | `migrate` | Upgrades older metadata after saving a verified recovery copy; see [migration instructions](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade). |
@@ -25,9 +26,9 @@ The commands run on Linux and macOS. On Windows they exit with an error that sto
 
 `init`, `migrate`, and `snapshot create` require `--development`. Job enqueue/run/run-next/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
 
-A successful command prints its report on stdout and exits successfully. A failure prints `error:` and the reason on stderr, leaves stdout empty, and exits with a failure status. A snapshot job that records `Failed` prints that saved outcome before reporting failure. Add `--json` for JSON; `jobs changes` uses compact JSON to preserve its response byte bound, while other commands use pretty-printed JSON. Without `--json`, the first line is a heading and the fields follow, indented two spaces per level.
+A successful command prints its report on stdout and exits successfully. A failure prints `error:` and the reason on stderr and exits with a failure status. Failures normally leave stdout empty. A snapshot job that records `Failed` prints that saved outcome, and `health` prints any available evidence before reporting an incomplete check. Add `--json` for JSON. `jobs changes` uses compact JSON to preserve its response byte bound, while other commands use pretty-printed JSON. Without `--json`, the first line is a heading and the fields follow, indented two spaces per level.
 
-`--help` and `--version` are handled before a command runs. `snapshot --help` and `storage --help` list the nested commands.
+`--help` and `--version` are handled before a command runs. `snapshot --help`, `storage --help`, and `jobs --help` list the nested commands.
 
 ## `init`
 
@@ -41,7 +42,7 @@ cargo run -p jumpstart-server -- init --metadata-root /tmp/jumpstart-metadata-de
 | `--development` | yes | Acknowledges that this is a development preview. Production volume checks, encryption, backup, and restore are still unimplemented. |
 | `--json` | no | Print the report as JSON. |
 
-The new folder receives `format.json`, `metadata.lock`, and `database/jumpstart.sqlite`. The database records the server ID, the sync epoch, the format version, and the applied schema migration. Those identity values are generated once for this folder.
+The new folder receives `format.json`, `metadata.lock`, and `database/jumpstart.sqlite`. The database records the server ID, the sync epoch, the format version, and the applied migrations. It starts with an empty application catalog and job queue. The identity values are generated once for this folder.
 
 The path must be new. An existing directory, including an empty one, and an existing symlink are left unchanged and the command fails. Preparation happens in a private staging directory beside the destination. The folder is renamed into place only after the database and `format.json` agree. If preparation fails, that staging directory is kept and named in the error.
 
@@ -53,7 +54,7 @@ Heading: `Verified offline development metadata:`
 | `server_id` | UUID string for this server |
 | `sync_epoch` | UUID string recorded with the server ID |
 | `format_version` | Number, currently `1` |
-| `schema_version` | Number, currently `3` |
+| `schema_version` | Number, currently `4` |
 | `change_seq` | Stored decimal-string position; unavailable (`null`) in schema 1 |
 | `journal_mode` | SQLite journal mode of the stored database |
 | `integrity_check` | `"ok"` after the check succeeds |
@@ -73,6 +74,31 @@ This prints the same report as `init` for a folder that is already checkpointed 
 
 Heading: `Verified offline development metadata:`
 
+## `health`
+
+```sh
+cargo run -p jumpstart-server -- health --metadata-root /tmp/jumpstart-metadata-demo --json
+```
+
+The command requires `--metadata-root PATH` and accepts `--json`. Its scope is `offline_metadata`. The `metadata` component reports the same integrity and schema evidence as `inspect`, or explains why verification was refused. The `capacity` component independently reports observed bytes and default thresholds on the filesystem containing the supplied directory. It can report `low` or `at_or_below_reserve` even when the metadata verifies.
+
+If either check cannot complete, the command still prints its component report and exits unsuccessfully. A measured capacity warning alone exits successfully. The check leaves all files unchanged, including any pending migration or SQLite journal. Live daemon, registered volume, hardware, and application health require their own evidence.
+
+## `migrate`
+
+```sh
+cargo run -p jumpstart-server -- migrate --metadata-root /tmp/jumpstart-metadata-demo --snapshot-output /tmp/jumpstart-before-schema-4 --development --json
+```
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--metadata-root` | yes | Existing offline metadata folder. |
+| `--snapshot-output` | yes | New directory outside the metadata folder. Use the original path when resuming an interrupted migration. |
+| `--development` | yes | Acknowledges the schema upgrade and limited scope of the recovery copy. |
+| `--json` | no | Print the report as JSON. |
+
+The command upgrades a verified older root to schema 4 after saving a verified pre-upgrade snapshot. A current root reports both versions as 4 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 4. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
+
 ## `snapshot create`
 
 ```sh
@@ -90,7 +116,7 @@ The command copies `database/jumpstart.sqlite` with SQLite's backup API, stores 
 
 The published directory contains only `snapshot.json` and `metadata.sqlite`.
 
-`change_seq` is JSON `null`. Schema 1 has no change feed, so there is no watermark to record. The field is still present. A manifest that omits it, or that uses `0`, fails verification.
+`change_seq` is always present. Schema 1 records JSON `null` because it has no stored watermark. Schemas 2–4 record the stored value as a decimal string, including `"0"` for an initial position.
 
 Heading: `Verified local metadata snapshot (not a full backup):`
 
@@ -123,6 +149,24 @@ cargo run -p jumpstart-server -- snapshot verify --snapshot-root /tmp/jumpstart-
 Verification reads `snapshot.json` and `metadata.sqlite` and prints the same report as `snapshot create`. It still succeeds after the original metadata folder is deleted. It does not modify the bundle. A missing bundle is not created. A damaged or extra file fails the command and is left as it was.
 
 Heading: `Verified local metadata snapshot (not a full backup):`
+
+## `jobs`
+
+All actions use `--metadata-root PATH` and accept `--json`. Enqueue, run, run-next, cancel, and recover also require `--development`.
+
+| Action | Additional options | Result |
+|---|---|---|
+| `enqueue-snapshot` | `--output PATH` | Save a request for a new output directory and return its job ID. |
+| `run` | `--job-id ID` | Execute the queued job or return its recorded completion. |
+| `run-next` | | Execute the oldest queued job. An empty queue succeeds and returns `{"job":null}` in JSON. |
+| `list` | Optional `--state STATE`, `--limit N` (1–100, default 50) | Read the current records in acceptance order. |
+| `inspect` | `--job-id ID` | Read one current record and its saved outcome. |
+| `history` | `--job-id ID` | Read one job's historical revisions. |
+| `changes` | `--epoch UUID`, `--after POSITION`, optional `--limit N` (1–500, default 100) | Read a bounded page of saved job changes after a cursor. |
+| `cancel` | `--job-id ID`, `--expected-revision REVISION` | Cancel a job that is still queued and at the inspected revision. |
+| `recover` | | Record interrupted active jobs as failed and retain their artifacts. |
+
+Saved run failures print a job record and return nonzero. See [the snapshot job walkthrough](../../CONTRIBUTING.md#persisted-local-snapshot-jobs) for examples and interrupted-work recovery.
 
 ## `storage inspect`
 

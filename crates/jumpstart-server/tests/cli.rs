@@ -19,7 +19,6 @@
 
 use std::{fs, process::Command};
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use serde_json::Value;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
@@ -84,6 +83,69 @@ fn init_then_inspect_preserves_authority_and_reports_json() {
     assert!(initial["sync_epoch"].is_string());
     assert_eq!(initial["server_id"], inspected["server_id"]);
     assert_eq!(initial["sync_epoch"], inspected["sync_epoch"]);
+}
+
+/// Read verified identity and independent capacity, then report pending recovery
+/// without modifying the journal or database. Fixture and assertion errors panic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn health_preserves_capacity_evidence_when_metadata_needs_recovery() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("metadata");
+    let initial = initialize_source(&root);
+    let output = command()
+        .args(["health", "--json", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"], "offline_metadata");
+    assert_eq!(report["metadata"]["status"], "verified");
+    assert_eq!(report["metadata"]["evidence"], initial);
+    assert_eq!(report["capacity"]["evidence"]["scope"], "capacity_only");
+
+    let journal = root.join("migration.json");
+    fs::write(&journal, b"recorded migration").unwrap();
+    let database = root.join("database/jumpstart.sqlite");
+    let before = fs::read(&database).unwrap();
+    let output = command()
+        .args(["health", "--json", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("offline checks"));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["metadata"]["status"], "needs_recovery");
+    assert!(report["metadata"]["next_action"].is_string());
+    assert_eq!(report["capacity"]["evidence"]["scope"], "capacity_only");
+    assert_eq!(fs::read(&journal).unwrap(), b"recorded migration");
+    assert_eq!(fs::read(&database).unwrap(), before);
+}
+
+/// Report both unavailable observations without turning a missing path into a root.
+#[test]
+fn health_reports_unknown_capacity_without_creating_metadata() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("missing");
+    let output = command()
+        .args(["health", "--json", "--metadata-root"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let metadata_status = if cfg!(any(target_os = "linux", target_os = "macos")) {
+        "unavailable"
+    } else {
+        "unsupported"
+    };
+    assert_eq!(report["metadata"]["status"], metadata_status);
+    assert_eq!(report["capacity"]["status"], "unknown");
+    assert!(!root.exists());
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
 /// Verify the CLI refuses an existing directory and preserves its sentinel contents

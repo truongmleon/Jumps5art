@@ -15,6 +15,8 @@
 //! interrupted run as failed rather than assuming that an output file means success.
 //! `storage inspect <folder>` observes filesystem capacity without granting write
 //! approval or diagnosing disk health.
+//! `health --metadata-root <folder>` reports both offline database verification
+//! and filesystem capacity evidence, including what could not be checked.
 //! `jobs changes` returns bounded original projections after a saved epoch/position.
 //! `jobs run-next` executes one oldest queued snapshot without selecting an ID.
 //! The program accepts these arguments, delegates file/database work to the storage
@@ -34,6 +36,8 @@ use jumpstart_storage::{
     migrate, pull_job_changes, recover_jobs, run_next_snapshot_job, run_snapshot_job,
     verify_snapshot,
 };
+
+mod health;
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
 /// No network listener is configured or started by this development tool.
@@ -68,6 +72,15 @@ enum Command {
     Inspect {
         #[arg(long)]
         metadata_root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check an offline metadata root and report its filesystem capacity.
+    Health {
+        /// Existing root to diagnose without initializing or repairing it.
+        #[arg(long)]
+        metadata_root: PathBuf,
+        /// Print the component report as JSON, including failed checks.
         #[arg(long)]
         json: bool,
     },
@@ -340,6 +353,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             json,
             "Verified offline development metadata:",
         ),
+        Command::Health {
+            metadata_root,
+            json,
+        } => return health::run(&metadata_root, json),
         Command::Migrate {
             metadata_root,
             snapshot_output,
