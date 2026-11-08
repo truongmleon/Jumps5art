@@ -169,9 +169,11 @@ impl AdminMetadata {
         let mut rows = statement.query([])?;
         let mut counts = std::collections::BTreeMap::new();
         while let Some(row) = rows.next()? {
-            let count: u64 = row.get(1)?;
-            let count = Counter::from_u64(count)
-                .map_err(|_| StorageError::Integrity("invalid saved job count"))?;
+            let count: i64 = row.get(1)?;
+            let count = u64::try_from(count)
+                .ok()
+                .and_then(|count| Counter::from_u64(count).ok())
+                .ok_or(StorageError::Integrity("invalid saved job count"))?;
             counts.insert(row.get(0)?, count);
         }
         Ok(Some(counts))
