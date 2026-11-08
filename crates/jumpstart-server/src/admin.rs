@@ -39,6 +39,20 @@ pub(super) fn status(socket: &Path) -> Result<serde_json::Value, Box<dyn Error>>
     }
 }
 
+/// Ask the running daemon to report current host evidence at `socket`.
+///
+/// Returns the live component report or an error before printing on an
+/// unsupported platform, failed connection, or invalid reply.
+pub(super) fn health(socket: &Path) -> Result<serde_json::Value, Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    return linux::health(socket);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = socket;
+        Err("the administration daemon requires Linux".into())
+    }
+}
+
 /// Ask the running daemon to observe a directory for an intended volume role.
 ///
 /// `socket` identifies the local service, `path` is the directory, and `role`

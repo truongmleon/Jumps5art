@@ -84,6 +84,9 @@ struct VerifiedMetadata {
 #[cfg(target_os = "linux")]
 pub struct AdminMetadata {
     source: VerifiedMetadata,
+    directory: File,
+    database: File,
+    verified_at: std::time::Instant,
 }
 
 #[cfg(target_os = "linux")]
@@ -94,14 +97,84 @@ impl AdminMetadata {
     /// error. Missing roots, pending recovery, and active owners are refused.
     pub fn open(root: &Path) -> Result<Self> {
         let (root, lock) = lock_metadata(root, true)?;
-        Ok(Self {
+        let directory = open_directory(&root)?;
+        let database = open_regular(&root.join(DATABASE_DIRECTORY).join(DATABASE_FILE))?;
+        let lease = Self {
             source: verify_locked_metadata(root, lock)?,
-        })
+            directory,
+            database,
+            verified_at: std::time::Instant::now(),
+        };
+        lease.check_binding()?;
+        Ok(lease)
     }
 
     /// Return the verified startup report while the metadata lease is held.
     pub fn report(&self) -> &MetadataReport {
         &self.source.report
+    }
+
+    /// Recheck that the paths still name the leased directory, database, and lock.
+    ///
+    /// Returns `Ok(())` for the same entries. A missing or replaced path means
+    /// the startup verification cannot stand in for current metadata evidence.
+    pub fn check_binding(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = &self.source.report.root;
+        let pairs = [
+            (&self.directory, open_directory(root)?),
+            (
+                &self.database,
+                open_regular(&root.join(DATABASE_DIRECTORY).join(DATABASE_FILE))?,
+            ),
+            (&self.source._lock, open_regular(&root.join(LOCK_FILE))?),
+        ];
+        for (retained, current) in pairs {
+            let retained = retained
+                .metadata()
+                .map_err(|error| io("stat leased metadata", root, error))?;
+            let current = current
+                .metadata()
+                .map_err(|error| io("stat current metadata", root, error))?;
+            if (retained.dev(), retained.ino()) != (current.dev(), current.ino()) {
+                return Err(StorageError::NeedsRecovery(
+                    "metadata path no longer names the leased files",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the elapsed time since this process verified metadata at startup.
+    pub fn verification_age(&self) -> Duration {
+        self.verified_at.elapsed()
+    }
+
+    /// Count saved snapshot jobs by state while the current metadata binding holds.
+    ///
+    /// Returns `None` for supported roots older than the local job ledger. Counts
+    /// describe saved jobs and use exact counters for JSON serialization.
+    pub fn snapshot_job_counts(
+        &self,
+    ) -> Result<Option<std::collections::BTreeMap<String, Counter>>> {
+        self.check_binding()?;
+        if self.source.report.schema_version < 3 {
+            return Ok(None);
+        }
+        let mut statement = self
+            .source
+            .connection
+            .prepare("SELECT state, count(*) FROM jobs GROUP BY state")?;
+        let mut rows = statement.query([])?;
+        let mut counts = std::collections::BTreeMap::new();
+        while let Some(row) = rows.next()? {
+            let count: u64 = row.get(1)?;
+            let count = Counter::from_u64(count)
+                .map_err(|_| StorageError::Integrity("invalid saved job count"))?;
+            counts.insert(row.get(0)?, count);
+        }
+        Ok(Some(counts))
     }
 }
 

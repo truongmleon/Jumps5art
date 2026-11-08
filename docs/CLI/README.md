@@ -18,7 +18,7 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | `serve` | Starts the Linux-only local administration daemon. |
 | `status` | Reads the running daemon's metadata status through its private socket. |
 | `inspect` | Reads an existing metadata folder and prints that identity. The folder stays unchanged. |
-| `health` | Checks an offline metadata root and measures capacity on the filesystem containing that root. |
+| `health` | Queries the running Linux daemon, or checks an offline root with `--metadata-root PATH`. |
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
 | `snapshot verify` | Checks an existing bundle. The original metadata folder is not required. |
 | `migrate` | Upgrades older metadata after saving a verified recovery copy; see [migration instructions](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade). |
@@ -91,9 +91,11 @@ Heading: `Verified offline development metadata:`
 cargo run -p jumpstart-server -- health --metadata-root /tmp/jumpstart-metadata-demo --json
 ```
 
-The command requires `--metadata-root PATH` and accepts `--json`. Its scope is `offline_metadata`. The `metadata` component reports the same integrity and schema evidence as `inspect`, or explains why verification was refused. The `capacity` component independently reports observed bytes and default thresholds on the filesystem containing the supplied directory. It can report `low` or `at_or_below_reserve` even when the metadata verifies.
+With `--metadata-root PATH`, the scope is `offline_metadata`. The `metadata` component reports the same integrity and schema evidence as `inspect`, or explains why verification was refused. The `capacity` component independently reports observed bytes and default thresholds on the filesystem containing the supplied directory. It can report `low` or `at_or_below_reserve` even when the metadata verifies.
 
-If either check cannot complete, the command still prints its component report and exits unsuccessfully. A measured capacity warning alone exits successfully. The check leaves all files unchanged, including any pending migration or SQLite journal. Live daemon, registered volume, hardware, and application health require their own evidence.
+Without `--metadata-root`, `health --json` uses the protected local socket. The `live_local_admin` report measures space now and shows saved snapshot-job counts by state. It labels the database integrity report as startup evidence and rechecks that the leased root, database, and lock still match the current paths. Disk hardware and registered-volume status are shown as unknown until their probes are available. Use `--socket PATH` to query a scratch daemon.
+
+If metadata or capacity cannot be checked, the command prints its component report and exits unsuccessfully. A measured capacity warning alone exits successfully. Both modes are read-only.
 
 ## `migrate`
 

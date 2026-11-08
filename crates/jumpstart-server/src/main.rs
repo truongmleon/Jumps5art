@@ -89,11 +89,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Check an offline metadata root and report its filesystem capacity.
+    /// Report live local health, or check an offline root with --metadata-root.
     Health {
-        /// Existing root to diagnose without initializing or repairing it.
+        /// Existing root to diagnose offline instead of contacting the daemon.
+        #[arg(long, conflicts_with = "socket")]
+        metadata_root: Option<PathBuf>,
+        /// Override the local daemon socket for a live health query.
         #[arg(long)]
-        metadata_root: PathBuf,
+        socket: Option<PathBuf>,
         /// Print the component report as JSON, including failed checks.
         #[arg(long)]
         json: bool,
@@ -392,8 +395,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         ),
         Command::Health {
             metadata_root,
+            socket,
             json,
-        } => return health::run(&metadata_root, json),
+        } => match metadata_root {
+            Some(root) => return health::run(&root, json),
+            None => {
+                let socket = socket.unwrap_or_else(|| PathBuf::from(admin::SOCKET_PATH));
+                let report = admin::health(&socket)?;
+                print_report(&report, "Live local administration health:", json)?;
+                if report["metadata"]["status"] != "verified_at_startup"
+                    || report["capacity"]["status"] == "unknown"
+                {
+                    return Err("one or more live checks could not complete; see the report".into());
+                }
+                return Ok(());
+            }
+        },
         Command::Migrate {
             metadata_root,
             snapshot_output,

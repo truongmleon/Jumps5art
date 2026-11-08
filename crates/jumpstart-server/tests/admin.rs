@@ -185,3 +185,50 @@ fn volume_preflight_reports_mount_and_preserves_existing_files() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("without following links"));
 }
+
+/// Check that live health measures the leased root and refuses to reuse startup
+/// evidence after a replacement directory appears at the same path.
+#[test]
+fn live_health_distinguishes_a_replaced_root_from_the_verified_metadata() {
+    if geteuid().is_root() {
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    jumpstart_storage::initialize(&root).unwrap();
+    jumpstart_storage::enqueue_snapshot_job(&root, &parent.path().join("snapshot")).unwrap();
+    let _daemon = start(&root, &socket);
+
+    let output = command()
+        .args(["health", "--json", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"], "live_local_admin");
+    assert_eq!(report["metadata"]["status"], "verified_at_startup");
+    assert_eq!(report["capacity"]["evidence"]["scope"], "capacity_only");
+    assert_eq!(report["snapshot_jobs"]["by_state"]["queued"], "1");
+    assert_eq!(report["disk_hardware"]["status"], "unknown");
+
+    fs::rename(&root, parent.path().join("detached")).unwrap();
+    fs::create_dir(&root).unwrap();
+    let output = command()
+        .args(["health", "--json", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["metadata"]["status"], "unavailable");
+    assert_eq!(report["snapshot_jobs"]["status"], "unknown");
+    assert_eq!(report["capacity"]["evidence"]["scope"], "capacity_only");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+}
