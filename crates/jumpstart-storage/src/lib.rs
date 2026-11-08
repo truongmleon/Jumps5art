@@ -75,8 +75,8 @@ pub use capacity::{
 
 #[cfg(target_os = "linux")]
 pub use platform::{
-    AdminMetadata, RegisteredPrimary, VolumeRegistrationPlan, WorldsCatalogStatus,
-    WorldsRecoveryIndex, WorldsRecoveryPoint,
+    AdminMetadata, RegisteredPrimary, RegisteredVolumeHealth, VolumeRegistrationPlan,
+    WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint,
 };
 #[cfg(target_os = "linux")]
 pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};

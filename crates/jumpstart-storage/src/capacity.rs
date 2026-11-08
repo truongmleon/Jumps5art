@@ -283,8 +283,17 @@ fn inspect_supported(path: &Path) -> Result<CapacityReport> {
             reason: "directory identity changed during capacity inspection",
         });
     }
-    let stats = rustix::fs::fstatvfs(&directory)
-        .map_err(|error| capacity_io("measure filesystem capacity", &canonical, error.into()))?;
+    measure_open_directory(&directory, &canonical)
+}
+
+/// Measure space on a directory the caller has already identified.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn measure_open_directory(
+    directory: &impl std::os::fd::AsFd,
+    path: &Path,
+) -> Result<CapacityReport> {
+    let stats = rustix::fs::fstatvfs(directory)
+        .map_err(|error| capacity_io("measure filesystem capacity", path, error.into()))?;
     let (total_bytes, free_bytes, available_bytes) = capacity_from_blocks(
         stats.f_frsize,
         stats.f_blocks,
@@ -292,7 +301,7 @@ fn inspect_supported(path: &Path) -> Result<CapacityReport> {
         stats.f_bavail,
     )?;
     Ok(CapacityReport {
-        path: canonical,
+        path: path.to_owned(),
         scope: CapacityScope::CapacityOnly,
         total_bytes,
         free_bytes,

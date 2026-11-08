@@ -46,7 +46,7 @@ mod snapshot;
 #[cfg(target_os = "linux")]
 mod worlds;
 #[cfg(target_os = "linux")]
-pub use registration::{RegisteredPrimary, VolumeRegistrationPlan};
+pub use registration::{RegisteredPrimary, RegisteredVolumeHealth, VolumeRegistrationPlan};
 #[cfg(target_os = "linux")]
 pub use worlds::{WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint};
 
