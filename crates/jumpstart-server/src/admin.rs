@@ -69,3 +69,44 @@ pub(super) fn volume_preflight(
         Err("the administration daemon requires Linux".into())
     }
 }
+
+/// Request that the Linux daemon persist or clear the local mutation fence.
+pub(super) fn maintenance(
+    socket: &Path,
+    enabled: bool,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use jumpstart_server::local_admin::{Command, call};
+        call(socket, Command::Maintenance { enabled })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (socket, enabled);
+        Err("the administration daemon requires Linux".into())
+    }
+}
+
+/// Submit an operator-approved registration plan and return its saved identity.
+pub(super) fn apply_volume(
+    socket: &Path,
+    plan_id: uuid::Uuid,
+    acknowledge_unverified_encryption: bool,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use jumpstart_server::local_admin::{Command, call};
+        call(
+            socket,
+            Command::VolumeApply {
+                plan_id,
+                acknowledge_unverified_encryption,
+            },
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (socket, plan_id, acknowledge_unverified_encryption);
+        Err("the administration daemon requires Linux".into())
+    }
+}

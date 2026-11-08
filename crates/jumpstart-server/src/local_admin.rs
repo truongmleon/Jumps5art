@@ -23,6 +23,7 @@ use tokio::{
     runtime::Builder,
     time::timeout,
 };
+use uuid::Uuid;
 
 pub const ADMIN_VERSION: u16 = 1;
 pub const DEADLINE: Duration = Duration::from_secs(15);
@@ -42,8 +43,20 @@ pub enum Command {
     Status,
     Health,
     WorldsStatus,
-    WorldsBackupList { limit: u16 },
-    VolumePreflight { path: PathBuf, role: VolumeRole },
+    WorldsBackupList {
+        limit: u16,
+    },
+    VolumePreflight {
+        path: PathBuf,
+        role: VolumeRole,
+    },
+    VolumeApply {
+        plan_id: Uuid,
+        acknowledge_unverified_encryption: bool,
+    },
+    Maintenance {
+        enabled: bool,
+    },
 }
 
 /// A framed response containing either the requested evidence or a typed refusal.

@@ -13,6 +13,7 @@ clap.workspace = true
 jumpstart-domain.workspace = true
 jumpstart-storage.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 blake3.workspace = true

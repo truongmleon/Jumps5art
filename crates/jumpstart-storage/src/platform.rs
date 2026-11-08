@@ -37,11 +37,16 @@ mod changes;
 mod history;
 mod jobs;
 mod migration;
+#[cfg(target_os = "linux")]
+mod registration;
 mod schema3;
 mod schema4;
+mod schema5;
 mod snapshot;
 #[cfg(target_os = "linux")]
 mod worlds;
+#[cfg(target_os = "linux")]
+pub use registration::{RegisteredPrimary, VolumeRegistrationPlan};
 #[cfg(target_os = "linux")]
 pub use worlds::{WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint};
 
@@ -82,15 +87,15 @@ struct VerifiedMetadata {
 
 /// Retains exclusive ownership of the verified metadata root while the daemon runs.
 ///
-/// The daemon starts with a checked, read-only database. Keeping the lock with
-/// the connection prevents an offline migration or job runner from changing
-/// the same root while it is being served.
+/// The daemon starts with a checked reader and opens a writer only on demand.
+/// The same lock excludes offline migrations and job runners in both modes.
 #[cfg(target_os = "linux")]
 pub struct AdminMetadata {
     source: VerifiedMetadata,
     directory: File,
     database: File,
     verified_at: std::time::Instant,
+    writable: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -108,6 +113,7 @@ impl AdminMetadata {
             directory,
             database,
             verified_at: std::time::Instant::now(),
+            writable: false,
         };
         lease.check_binding()?;
         Ok(lease)
@@ -153,6 +159,93 @@ impl AdminMetadata {
     /// Return the elapsed time since this process verified metadata at startup.
     pub fn verification_age(&self) -> Duration {
         self.verified_at.elapsed()
+    }
+
+    /// Read the persisted fence, or return `None` for an older metadata schema.
+    pub fn maintenance(&self) -> Result<Option<bool>> {
+        self.check_binding()?;
+        if self.source.report.schema_version < 5 {
+            return Ok(None);
+        }
+        Ok(Some(self.source.connection.query_row(
+            "SELECT maintenance FROM local_admin_state WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?))
+    }
+
+    /// Persist the local mutation fence before reporting the requested state.
+    pub fn set_maintenance(&mut self, enabled: bool) -> Result<bool> {
+        let previous = self.maintenance()?.ok_or(StorageError::AdminUnavailable(
+            "migrate offline metadata before changing maintenance mode",
+        ))?;
+        if previous == enabled && !self.writable {
+            return Ok(enabled);
+        }
+        self.ensure_writer()?;
+        self.source.connection.execute(
+            "UPDATE local_admin_state SET maintenance=?1 WHERE singleton=1 AND maintenance!=?1",
+            [enabled],
+        )?;
+        self.checkpoint_admin()?;
+        Ok(enabled)
+    }
+
+    /// Switch to a checked SQLite writer while retaining the startup lease.
+    fn ensure_writer(&mut self) -> Result<()> {
+        self.check_binding()?;
+        if self.writable {
+            return Ok(());
+        }
+        let root = &self.source.report.root;
+        jobs::checked_sidecars(root, false)?;
+        let connection = Connection::open_with_flags(
+            root.join(DATABASE_DIRECTORY).join(DATABASE_FILE),
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        use rusqlite::config::DbConfig;
+        if !connection.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)? {
+            return Err(StorageError::AdminUnavailable(
+                "close-time checkpoints remain enabled",
+            ));
+        }
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+        connection.pragma_update(None, "wal_autocheckpoint", 0)?;
+        connection.pragma_update(None, "trusted_schema", false)?;
+        let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if mode != "wal" {
+            return Err(StorageError::AdminUnavailable(
+                "the administration writer requires WAL mode",
+            ));
+        }
+        verify_database(&connection, &self.source.marker)?;
+        self.check_binding()?;
+        self.source.connection = connection;
+        self.writable = true;
+        Ok(())
+    }
+
+    /// Flush committed changes and their directory before acknowledging a write.
+    fn checkpoint_admin(&self) -> Result<()> {
+        self.check_binding()?;
+        let busy: i64 =
+            self.source
+                .connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(StorageError::NeedsRecovery(
+                "administration checkpoint is busy",
+            ));
+        }
+        let root = &self.source.report.root;
+        self.database
+            .sync_all()
+            .map_err(|error| io("synchronize administration database", root, error))?;
+        sync_directory(&root.join(DATABASE_DIRECTORY))
     }
 
     /// Count saved snapshot jobs by state while the current metadata binding holds.
@@ -386,6 +479,7 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     apply_schema2(&mut connection)?;
     apply_schema3(&mut connection)?;
     schema4::apply(&mut connection)?;
+    schema5::apply(&mut connection)?;
     verify_database(&connection, marker)?;
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -693,6 +787,10 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
     if version >= 4 {
         expected_migrations.push((4, schema4::MIGRATION_NAME.to_owned(), schema4::checksum()));
     }
+    if version >= 5 {
+        expected_migrations.push((5, schema5::MIGRATION_NAME.to_owned(), schema5::checksum()));
+        schema5::verify_state(connection)?;
+    }
     if migrations != expected_migrations {
         return Err(StorageError::MigrationMismatch);
     }
@@ -739,6 +837,9 @@ fn verify_schema_objects(connection: &Connection, version: u32) -> Result<()> {
     }
     if version >= 4 {
         expected.extend(schema4::statements());
+    }
+    if version >= 5 {
+        expected.extend(schema5::statements());
     }
     expected.sort_unstable();
     let actual = connection

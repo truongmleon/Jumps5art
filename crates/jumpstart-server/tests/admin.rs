@@ -319,3 +319,79 @@ fn worlds_cli_distinguishes_indexed_points_from_unassessed_runtime() {
     assert_eq!(points[0]["manifest_hash"], format!("b3:{}", "0".repeat(64)));
     assert_eq!(report["index"]["truncated"], true);
 }
+
+/// Exercise the command, framed request, durable fence, and daemon restart.
+#[test]
+fn maintenance_survives_restart_and_refuses_storage_apply_until_left() {
+    if geteuid().is_root() {
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    jumpstart_storage::initialize(&root).unwrap();
+    let mut daemon = start(&root, &socket);
+
+    for mode in ["enter", "enter"] {
+        let output = command()
+            .args(["maintenance", mode, "--json", "--socket"])
+            .arg(&socket)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["maintenance"], true);
+    }
+    let pid = Pid::from_raw(i32::try_from(daemon.0.id()).unwrap()).unwrap();
+    kill_process(pid, Signal::TERM).unwrap();
+    assert!(daemon.0.wait().unwrap().success());
+    let _restarted = start(&root, &socket);
+    let report: Value = serde_json::from_slice(&status(&socket).stdout).unwrap();
+    assert_eq!(report["maintenance"], true);
+
+    let output = command()
+        .args([
+            "storage",
+            "apply",
+            "53e133a2-ae22-45a4-bafa-9cc4af6b6fa9",
+            "--acknowledge-unverified-encryption",
+            "--socket",
+        ])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("maintenance is enabled"));
+
+    let output = command()
+        .args(["maintenance", "leave", "--json", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&status(&socket).stdout).unwrap();
+    assert_eq!(report["maintenance"], false);
+
+    let output = command()
+        .args([
+            "storage",
+            "apply",
+            "53e133a2-ae22-45a4-bafa-9cc4af6b6fa9",
+            "--acknowledge-unverified-encryption",
+            "--socket",
+        ])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown or expired"));
+}
