@@ -224,26 +224,32 @@ async fn reply(
             Command::VolumeApply {
                 plan_id,
                 acknowledge_unverified_encryption,
-            } => admin_reply(metadata.as_mut(), |lease| {
-                if !acknowledge_unverified_encryption {
-                    return Err(StorageError::InvalidVolume(
-                        "apply requires --acknowledge-unverified-encryption",
-                    ));
-                }
-                plans.prune();
-                let plan = plans.0.get(&plan_id).map(|(_, plan)| plan);
-                let primary = lease.apply_primary(plan_id, plan)?;
-                plans.0.remove(&plan_id);
-                Ok(json!({
-                    "scope": "primary_registration",
-                    "plan_id": plan_id,
-                    "primary": primary,
-                }))
-            }),
-            Command::Maintenance { enabled } => admin_reply(metadata.as_mut(), |lease| {
-                let maintenance = lease.set_maintenance(enabled)?;
-                Ok(json!({"scope": "local_admin_maintenance", "maintenance": maintenance}))
-            }),
+            } => admin_reply(
+                metadata.as_mut().map_err(|error| &*error),
+                |lease: &mut AdminMetadata| {
+                    if !acknowledge_unverified_encryption {
+                        return Err(StorageError::InvalidVolume(
+                            "apply requires --acknowledge-unverified-encryption",
+                        ));
+                    }
+                    plans.prune();
+                    let plan = plans.0.get(&plan_id).map(|(_, plan)| plan);
+                    let primary = lease.apply_primary(plan_id, plan)?;
+                    plans.0.remove(&plan_id);
+                    Ok(json!({
+                        "scope": "primary_registration",
+                        "plan_id": plan_id,
+                        "primary": primary,
+                    }))
+                },
+            ),
+            Command::Maintenance { enabled } => admin_reply(
+                metadata.as_mut().map_err(|error| &*error),
+                |lease: &mut AdminMetadata| {
+                    let maintenance = lease.set_maintenance(enabled)?;
+                    Ok(json!({"scope": "local_admin_maintenance", "maintenance": maintenance}))
+                },
+            ),
         }
     };
     write(stream, &reply).await
