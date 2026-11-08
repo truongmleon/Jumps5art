@@ -20,6 +20,7 @@ mod codec;
 mod finite;
 mod handshake;
 mod range;
+pub mod release;
 mod upload;
 
 pub use codec::{

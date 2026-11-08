@@ -26,6 +26,7 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | `jobs run-next` | Runs one oldest queued snapshot; JSON returns a saved `job` or `null` for an empty queue. A saved failed outcome exits unsuccessfully. |
 | `storage inspect` | Reports how much space the filesystem has for an existing directory. |
 | `storage register PATH --plan --role primary\|backup` | Observes a proposed volume through the Linux daemon. |
+| `update plan` | Verifies a signed Linux release directory and reports compatibility with the running daemon. |
 
 `init`, `migrate`, and `snapshot create` require `--development`. Job enqueue/run/run-next/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
 
@@ -227,3 +228,16 @@ Heading: `Storage capacity observation (not disk health or write approval):`
 | `at_or_below_safety_reserve` | `true` when available bytes are less than or equal to the reserve. |
 
 Byte counts are decimal strings in both text and JSON output. The warning and reserve figures describe this observation. They do not set aside space, identify the disk, or report whether the disk is healthy or encrypted.
+
+## `update plan`
+
+```sh
+jumpstart-server update plan --release-root /absolute/candidate-release --json
+```
+
+The Linux command asks the local daemon for its verified format and schema
+versions. It reads the root-installed `/etc/jumpstart/release.pub` (32 raw
+Ed25519 public-key bytes), verifies `release.json` against its detached
+`release.sig` (64 raw bytes), and checks every listed artifact's size and
+BLAKE3 identity. It reports whether the release can read and write the
+current storage. The plan leaves installation and data paths untouched.
