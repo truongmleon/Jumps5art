@@ -37,6 +37,7 @@ mod changes;
 mod history;
 mod jobs;
 mod migration;
+mod recovery;
 mod schema3;
 mod schema4;
 mod snapshot;
@@ -48,6 +49,7 @@ pub(super) use jobs::{
     run_next_snapshot_job, run_snapshot_job,
 };
 pub(super) use migration::migrate;
+pub(super) use recovery::restore_metadata_snapshot;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};
 
 const MIGRATION_NAME: &str = "initial_metadata";
@@ -92,11 +94,26 @@ struct VerifiedMetadata {
 /// retained when present. If synchronizing the parent fails after publication,
 /// the destination remains in place even though this function returns an error.
 pub(super) fn initialize(root: &Path) -> Result<MetadataReport> {
+    let (root, mut report) = publish_metadata_root(root, "init", prepare_staging)?;
+    report.root = root;
+    Ok(report)
+}
+
+/// Prepare and publish one new metadata root without replacing an existing entry.
+///
+/// `root` selects the destination and `operation` labels private staging.
+/// `prepare` verifies and syncs the staged root. Returns the published path and
+/// its result after the parent directory sync, or preserves failed staging.
+fn publish_metadata_root<T>(
+    root: &Path,
+    operation: &str,
+    prepare: impl FnOnce(&Path) -> Result<T>,
+) -> Result<(PathBuf, T)> {
     let (parent, name) = destination(root)?;
     let final_root = parent.join(&name);
     reject_existing(&final_root)?;
     let parent_handle = open_directory(&parent)?;
-    let stage_name = format!(".jumpstart-init-{}", Uuid::new_v4());
+    let stage_name = format!(".jumpstart-{operation}-{}", Uuid::new_v4());
     let staging = parent.join(&stage_name);
     fs::DirBuilder::new()
         .mode(0o700)
@@ -105,7 +122,7 @@ pub(super) fn initialize(root: &Path) -> Result<MetadataReport> {
 
     // Do not remove failed or interrupted staging. Nothing in a user's existing
     // directory is ever adopted, overwritten, renamed, or deleted here.
-    let outcome = prepare_staging(&staging).and_then(|mut report| {
+    let outcome = prepare(&staging).and_then(|prepared| {
         rustix::fs::renameat_with(
             &parent_handle,
             OsStr::new(&stage_name),
@@ -129,8 +146,7 @@ pub(super) fn initialize(root: &Path) -> Result<MetadataReport> {
         parent_handle
             .sync_all()
             .map_err(|source| io("synchronize metadata parent", &parent, source))?;
-        report.root = final_root.clone();
-        Ok(report)
+        Ok((final_root, prepared))
     });
     outcome.map_err(|source| {
         if staging.exists() {
@@ -159,6 +175,23 @@ pub(super) fn initialize(root: &Path) -> Result<MetadataReport> {
 /// Propagates failures creating, locking, writing, synchronizing, or verifying the
 /// staged files. Partially prepared files remain available for diagnosis.
 fn prepare_staging(staging: &Path) -> Result<MetadataReport> {
+    let lock = prepare_root_layout(staging)?;
+    let marker = FormatMarker {
+        format_version: FORMAT_VERSION,
+        schema_version: SCHEMA_VERSION,
+        server_id: ServerId::new(),
+        sync_epoch: SyncEpoch::new(),
+    };
+    let database_path = staging.join(DATABASE_DIRECTORY).join(DATABASE_FILE);
+    create_database(&database_path, &marker)?;
+    finish_root_layout(staging, &marker, lock)
+}
+
+/// Create owner-only directories and retain the new root's exclusive lock.
+///
+/// `staging` is a newly prepared private directory. Returns the locked file
+/// handle for use through database preparation and marker publication.
+fn prepare_root_layout(staging: &Path) -> Result<File> {
     let lock_path = staging.join(LOCK_FILE);
     let lock = OpenOptions::new()
         .write(true)
@@ -180,14 +213,14 @@ fn prepare_staging(staging: &Path) -> Result<MetadataReport> {
             .map_err(|source| io("create metadata directory", &path, source))?;
         sync_directory(&path)?;
     }
-    let marker = FormatMarker {
-        format_version: FORMAT_VERSION,
-        schema_version: SCHEMA_VERSION,
-        server_id: ServerId::new(),
-        sync_epoch: SyncEpoch::new(),
-    };
-    let database_path = staging.join(DATABASE_DIRECTORY).join(DATABASE_FILE);
-    create_database(&database_path, &marker)?;
+    Ok(lock)
+}
+
+/// Write and synchronize the format marker, then inspect the staged root.
+///
+/// `marker` describes its already checked database. Releases `lock` just before
+/// exercising the same inspection path used after publication.
+fn finish_root_layout(staging: &Path, marker: &FormatMarker, lock: File) -> Result<MetadataReport> {
     let marker_path = staging.join(FORMAT_FILE);
     let mut marker_file = OpenOptions::new()
         .write(true)
@@ -195,7 +228,7 @@ fn prepare_staging(staging: &Path) -> Result<MetadataReport> {
         .mode(0o600)
         .open(&marker_path)
         .map_err(|source| io("create format marker", &marker_path, source))?;
-    serde_json::to_writer_pretty(&mut marker_file, &marker)?;
+    serde_json::to_writer_pretty(&mut marker_file, marker)?;
     marker_file
         .write_all(b"\n")
         .map_err(|source| io("write format marker", &marker_path, source))?;

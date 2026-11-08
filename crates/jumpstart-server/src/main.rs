@@ -5,7 +5,8 @@
 //! reports its verified ID and format. `snapshot create` copies that bookkeeping
 //! through SQLite into a separate verified bundle; `snapshot verify` checks the
 //! bundle without needing the original folder. These snapshots contain no library
-//! files, Worlds data, or secrets and cannot restore a server on their own.
+//! files, Worlds data, or secrets. `snapshot restore` recovers metadata into a
+//! new development root and assigns it a fresh authority and synchronization epoch.
 //! `migrate` upgrades an older bookkeeping schema after saving a verified copy.
 //! Its journal lets the same command finish an interrupted upgrade instead of
 //! replacing a server's identity or silently starting again with an empty database.
@@ -29,12 +30,12 @@
 use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use jumpstart_domain::{Counter, JobId, JobState, PositiveCounter, SyncEpoch};
+use jumpstart_domain::{BlobId, Counter, JobId, JobState, PositiveCounter, SyncEpoch};
 use jumpstart_storage::{
     SnapshotJob, SnapshotJobChangePage, cancel_job, create_snapshot, enqueue_snapshot_job,
     initialize, inspect, inspect_capacity, inspect_job, job_history, list_jobs, list_jobs_in_state,
-    migrate, pull_job_changes, recover_jobs, run_next_snapshot_job, run_snapshot_job,
-    verify_snapshot,
+    migrate, pull_job_changes, recover_jobs, restore_metadata_snapshot, run_next_snapshot_job,
+    run_snapshot_job, verify_snapshot,
 };
 
 mod health;
@@ -100,7 +101,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Create or verify metadata snapshots without media or Worlds data.
+    /// Create, verify, or restore metadata snapshots without media or Worlds data.
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
@@ -117,8 +118,7 @@ enum Command {
     },
 }
 
-/// Snapshot operations: `Create` owns source/output paths and an acknowledgment;
-/// `Verify` owns a bundle path. Both carry a `bool` selecting JSON output.
+/// Commands for a standalone metadata snapshot and its isolated recovery path.
 #[derive(Subcommand)]
 enum SnapshotCommand {
     /// Create a local metadata snapshot; this is not a full server backup.
@@ -139,6 +139,23 @@ enum SnapshotCommand {
     Verify {
         #[arg(long)]
         snapshot_root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recover a verified metadata snapshot into a new development root.
+    Restore {
+        /// Existing standalone bundle produced by snapshot create or a snapshot job.
+        #[arg(long)]
+        snapshot_root: PathBuf,
+        /// New directory outside the source and any existing installation.
+        #[arg(long)]
+        output: PathBuf,
+        /// Database digest reported by snapshot verify.
+        #[arg(long)]
+        expected_hash: BlobId,
+        /// Acknowledge metadata-only recovery and fresh server identity.
+        #[arg(long)]
+        development: bool,
         #[arg(long)]
         json: bool,
     },
@@ -396,6 +413,26 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 json,
                 "Verified local metadata snapshot (not a full backup):",
             ),
+            SnapshotCommand::Restore {
+                snapshot_root,
+                output,
+                expected_hash,
+                development,
+                json,
+            } => {
+                if !development {
+                    return Err("metadata recovery is a development preview; use --development to acknowledge a new authority and metadata-only recovery".into());
+                }
+                (
+                    serde_json::to_value(restore_metadata_snapshot(
+                        &snapshot_root,
+                        &output,
+                        expected_hash,
+                    )?)?,
+                    json,
+                    "Restored metadata with a new authority:",
+                )
+            }
         },
         Command::Storage { command } => match command {
             StorageCommand::Inspect { path, json } => (

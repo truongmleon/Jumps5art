@@ -85,6 +85,68 @@ fn init_then_inspect_preserves_authority_and_reports_json() {
     assert_eq!(initial["sync_epoch"], inspected["sync_epoch"]);
 }
 
+/// Require explicit scope acknowledgement, then recover using only the backup.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn snapshot_restore_recovers_after_source_loss() {
+    let parent = TempDir::new().unwrap();
+    let root = parent.path().join("source");
+    let snapshot = parent.path().join("backup");
+    let restored = parent.path().join("restored");
+    let original = initialize_source(&root);
+    let created = command()
+        .args(["snapshot", "create", "--metadata-root"])
+        .arg(&root)
+        .arg("--output")
+        .arg(&snapshot)
+        .args(["--development", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let backup: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let digest = backup["database_hash"].as_str().unwrap();
+    fs::remove_dir_all(&root).unwrap();
+
+    let mut restore = command();
+    restore
+        .args(["snapshot", "restore", "--snapshot-root"])
+        .arg(&snapshot)
+        .arg("--output")
+        .arg(&restored)
+        .args(["--expected-hash", digest, "--json"]);
+    let refused = restore.output().unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--development"));
+    assert!(!restored.exists());
+
+    let output = restore.arg("--development").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recovered: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(recovered["source"], backup);
+    assert_ne!(recovered["metadata"]["server_id"], original["server_id"]);
+    assert_ne!(recovered["metadata"]["sync_epoch"], original["sync_epoch"]);
+    assert_eq!(recovered["archived_snapshot_jobs"], "0");
+    let inspection = command()
+        .args(["inspect", "--metadata-root"])
+        .arg(&restored)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(inspection.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&inspection.stdout).unwrap(),
+        recovered["metadata"]
+    );
+}
+
 /// Read verified identity and independent capacity, then report pending recovery
 /// without modifying the journal or database. Fixture and assertion errors panic.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

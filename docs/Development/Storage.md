@@ -14,6 +14,7 @@ The snapshot contains `metadata.sqlite` and `snapshot.json`. The database holds 
 |---|---|---|
 | `SnapshotReport` | The answer returned after creating or verifying a snapshot: its current path, source identity, versions, database size, fingerprint, and scope. | The CLI and future callers need one consistent description of the result. A bare success flag would hide which server and exact artifact were checked. |
 | `SnapshotScope` | A machine-readable label for what the artifact includes. It uses `BootstrapMetadata` for schemas 1/2 and `Metadata` for schemas 3/4. | A successful metadata copy must identify its actual contents. Otherwise callers might describe it as a complete server backup and assume missing media were protected. |
+| `MetadataRestoreReport` | Groups the verified input snapshot, the recovered root's new identity, and the count of old snapshot jobs kept in the input. | The original and recovered roots have different authorities. Returning both makes it clear which digest was used, which root is ready to inspect, and why the old jobs cannot replay there. |
 
 The report uses existing foundation types for individual fields:
 

@@ -466,7 +466,7 @@ fn verify_delete_header(path: &Path) -> Result<()> {
 /// `path: &Path` names the database. Returns `Result<(Counter, BlobId)>` with
 /// its measured length and tagged BLAKE3 digest. Read failures or a length beyond
 /// the signed-64-bit domain range fail rather than truncating the recorded size.
-fn hash_database(path: &Path) -> Result<(Counter, BlobId)> {
+pub(super) fn hash_database(path: &Path) -> Result<(Counter, BlobId)> {
     let mut file = open_regular(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut length = 0_u64;
