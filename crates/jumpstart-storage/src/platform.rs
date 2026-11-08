@@ -405,10 +405,14 @@ fn prepare_staging(staging: &Path) -> Result<MetadataReport> {
         .map_err(|source| io("synchronize format marker", &marker_path, source))?;
     sync_directory(&staging.join(DATABASE_DIRECTORY))?;
     sync_directory(staging)?;
-    // Drop the exclusive lock before exercising exactly the same verification
-    // path as subsequent offline inspection.
-    drop(lock);
-    inspect(staging)
+    // Verify under the existing exclusive lock and release it explicitly.
+    // A concurrent fork can briefly retain a close-on-exec descriptor.
+    let root = fs::canonicalize(staging)
+        .map_err(|source| io("resolve staged metadata root", staging, source))?;
+    let verified = verify_locked_metadata(root, lock)?;
+    FileExt::unlock(&verified._lock)
+        .map_err(|source| io("release staged maintenance lock", &lock_path, source))?;
+    Ok(verified.report)
 }
 
 /// Create the initial SQLite database, commit its schema and identity, and checkpoint it.
