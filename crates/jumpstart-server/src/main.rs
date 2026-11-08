@@ -30,7 +30,6 @@ use std::{error::Error, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
 use jumpstart_domain::{Counter, JobId, JobState, PositiveCounter, SyncEpoch};
-use jumpstart_server::print_report;
 use jumpstart_storage::{
     SnapshotJob, SnapshotJobChangePage, cancel_job, create_snapshot, enqueue_snapshot_job,
     initialize, inspect, inspect_capacity, inspect_job, job_history, list_jobs, list_jobs_in_state,
@@ -41,6 +40,8 @@ use jumpstart_storage::{
 mod admin;
 mod health;
 mod update;
+
+use jumpstart_server::print_report;
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
 /// No network listener is configured or started by this development tool.
