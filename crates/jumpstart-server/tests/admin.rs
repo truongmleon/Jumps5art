@@ -131,3 +131,57 @@ fn recovery_mode_never_creates_the_missing_root() {
     assert_eq!(report["state"], "recovery_required");
     assert!(!missing.exists());
 }
+
+/// Collect the identity of the opened candidate and flag data without adopting it.
+#[test]
+fn volume_preflight_reports_mount_and_preserves_existing_files() {
+    if geteuid().is_root() {
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    let candidate = parent.path().join("candidate");
+    fs::create_dir(&candidate).unwrap();
+    jumpstart_storage::initialize(&root).unwrap();
+    let _daemon = start(&root, &socket);
+    let sentinel = candidate.join("existing.txt");
+    fs::write(&sentinel, b"do not adopt").unwrap();
+    let output = command()
+        .args(["storage", "register"])
+        .arg(&candidate)
+        .args(["--plan", "--role", "primary", "--json", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"], "registration_preflight");
+    assert!(report["candidate"]["mount_id"].is_string());
+    assert_eq!(report["candidate"]["empty"], false);
+    assert!(
+        !report["candidate"]["blocking_reasons"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fs::read(&sentinel).unwrap(), b"do not adopt");
+    assert_eq!(fs::read_dir(&candidate).unwrap().count(), 1);
+
+    let link = parent.path().join("linked-candidate");
+    std::os::unix::fs::symlink(&candidate, &link).unwrap();
+    let output = command()
+        .args(["storage", "register"])
+        .arg(&link)
+        .args(["--plan", "--role", "backup", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("without following links"));
+}

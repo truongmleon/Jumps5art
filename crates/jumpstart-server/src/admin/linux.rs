@@ -13,7 +13,7 @@ use std::{
 };
 
 use jumpstart_protocol::{FRAME_PREFIX_BYTES, MAX_FRAME_BYTES, decode_body, write_frame};
-use jumpstart_storage::{AdminMetadata, StorageError};
+use jumpstart_storage::{AdminMetadata, StorageError, VolumeRole, inspect_volume_candidate};
 use rustix::{net::sockopt::socket_peercred, process::geteuid};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -41,6 +41,7 @@ struct Request {
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Status,
+    VolumePreflight { path: PathBuf, role: VolumeRole },
 }
 
 /// A framed response containing either the requested evidence or a typed refusal.
@@ -163,6 +164,27 @@ async fn reply(
                     }),
                 },
             },
+            Command::VolumePreflight { path, role } => match metadata {
+                Ok(metadata) => {
+                    match inspect_volume_candidate(&path, role, &metadata.report().root) {
+                        Ok(candidate) => Reply::Ok {
+                            report: json!({
+                                "scope": "registration_preflight",
+                                "candidate": candidate,
+                                "encryption": "unknown",
+                                "registered_topology": "not_checked",
+                            }),
+                        },
+                        Err(error) => Reply::Error {
+                            message: error.to_string(),
+                        },
+                    }
+                }
+                Err(_) => Reply::Error {
+                    message: "verify the daemon's metadata before planning volume registration"
+                        .into(),
+                },
+            },
         }
     };
     write(stream, &reply).await
@@ -173,6 +195,34 @@ async fn reply(
 /// `socket` is an absolute path in the daemon's private directory. Returns the
 /// status report or a connection, authentication, timeout, or remote error.
 pub(super) fn status(socket: &Path) -> Result<Value, Box<dyn Error>> {
+    call(socket, Command::Status)
+}
+
+/// Exchange a typed, read-only registration preflight request.
+///
+/// `path` is the proposed root and `role` is its requested CLI role. Returns the
+/// evidence collected in the daemon's Linux mount namespace.
+pub(super) fn volume_preflight(
+    socket: &Path,
+    path: &Path,
+    role: &str,
+) -> Result<Value, Box<dyn Error>> {
+    let role = match role {
+        "primary" => VolumeRole::Primary,
+        "backup" => VolumeRole::Backup,
+        _ => return Err("volume role must be primary or backup".into()),
+    };
+    call(
+        socket,
+        Command::VolumePreflight {
+            path: path.to_owned(),
+            role,
+        },
+    )
+}
+
+/// Verify the selected socket and submit a single local admin command.
+fn call(socket: &Path, command: Command) -> Result<Value, Box<dyn Error>> {
     let owner = socket_owner(socket)?;
     let entry = fs::symlink_metadata(socket)?;
     if owner == 0 || !entry.file_type().is_socket() || entry.uid() != owner {
@@ -181,11 +231,15 @@ pub(super) fn status(socket: &Path) -> Result<Value, Box<dyn Error>> {
     Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(timeout_call(socket, owner))
+        .block_on(timeout_call(socket, owner, command))
 }
 
 /// Connect, verify the daemon UID, and exchange one request within the deadline.
-async fn timeout_call(socket: &Path, owner: u32) -> Result<Value, Box<dyn Error>> {
+async fn timeout_call(
+    socket: &Path,
+    owner: u32,
+    command: Command,
+) -> Result<Value, Box<dyn Error>> {
     timeout(DEADLINE, async {
         let mut stream = UnixStream::connect(socket).await?;
         if socket_peercred(&stream)?.uid.as_raw() != owner {
@@ -195,7 +249,7 @@ async fn timeout_call(socket: &Path, owner: u32) -> Result<Value, Box<dyn Error>
             &mut stream,
             &Request {
                 version: ADMIN_VERSION,
-                command: Command::Status,
+                command,
             },
         )
         .await?;

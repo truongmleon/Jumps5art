@@ -158,6 +158,8 @@ backup-root/
 
 Version 1 qualifies local ext4, XFS, and Btrfs mounts through the durability release gates. Network filesystems and filesystems that cannot provide the required synchronization and no-replace promotion semantics are not writable canonical roots; ordinary export destinations have separate, disclosed capabilities.
 
+Registration preflight observes the Linux mount and root inode through an opened directory without following path symlinks. It identifies occupied roots and existing markers for operator review and leaves them intact. Linux fixtures check that an occupied directory is preserved and a symlink is refused. Applying a registration still requires checking role topology, encryption, and the exact approved identity before publishing a marker and recording the volume.
+
 ### 4.3 Identities and Canonical Formats
 
 | Identity | Representation and invariant |

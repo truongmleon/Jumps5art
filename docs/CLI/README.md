@@ -25,6 +25,7 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | `jobs` | Enqueues/runs snapshot requests, reads their status/history/change pages, cancels queued requests, and recovers interrupted work; see [job commands](../../CONTRIBUTING.md#persisted-local-snapshot-jobs). |
 | `jobs run-next` | Runs one oldest queued snapshot; JSON returns a saved `job` or `null` for an empty queue. A saved failed outcome exits unsuccessfully. |
 | `storage inspect` | Reports how much space the filesystem has for an existing directory. |
+| `storage register PATH --plan --role primary\|backup` | Observes a proposed volume through the Linux daemon. |
 
 `init`, `migrate`, and `snapshot create` require `--development`. Job enqueue/run/run-next/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
 
@@ -177,6 +178,14 @@ All actions use `--metadata-root PATH` and accept `--json`. Enqueue, run, run-ne
 | `recover` | | Record interrupted active jobs as failed and retain their artifacts. |
 
 Saved run failures print a job record and return nonzero. See [the snapshot job walkthrough](../../CONTRIBUTING.md#persisted-local-snapshot-jobs) for examples and interrupted-work recovery.
+
+## Volume registration preflight
+
+Run `storage register /absolute/path --plan --role primary --json` with the
+Linux daemon running. The report describes the actual mount, directory identity,
+filesystem, read-only state, and any existing files or marker. Symlinks in
+the supplied path are refused. Encryption and registered-device topology remain
+unverified. This preflight creates no marker or approval record.
 
 ## `storage inspect`
 
