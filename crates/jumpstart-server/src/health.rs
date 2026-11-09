@@ -81,7 +81,7 @@ fn metadata_component(result: jumpstart_storage::Result<MetadataReport>) -> Valu
 /// `result` comes from filesystem inspection. Returns a JSON component with
 /// observed bytes and thresholds, or an unknown result when it cannot measure
 /// them. Status describes capacity evidence only.
-fn capacity_component(result: jumpstart_storage::Result<CapacityReport>) -> Value {
+pub(super) fn capacity_component(result: jumpstart_storage::Result<CapacityReport>) -> Value {
     match result {
         Ok(observed) => {
             let (status, next_action) = if observed.assessment.at_or_below_safety_reserve {

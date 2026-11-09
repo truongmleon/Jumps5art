@@ -19,8 +19,11 @@
 mod codec;
 mod finite;
 mod handshake;
+pub mod pairing;
 mod range;
+pub mod release;
 mod upload;
+pub mod worlds_control;
 
 pub use codec::{
     CodecError, FRAME_PREFIX_BYTES, MAX_FRAME_BYTES, MAX_JSON_DEPTH, decode_body, encode_body,

@@ -1,6 +1,7 @@
 [package]
 name = "jumpstart-server"
 description = "Local metadata development commands for Jumpstart"
+default-run = "jumpstart-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +13,33 @@ clap.workspace = true
 jumpstart-domain.workspace = true
 jumpstart-storage.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+blake3.workspace = true
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
+jumpstart-protocol.workspace = true
+serde.workspace = true
+tokio = { version = "1.53", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+zeroize = "1.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+bip39 = "2.2"
+fuser = "=0.18.0"
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+iroh-base = "1.0"
+n0-watcher = "1"
+noq-udp = "1.4"
+socket2 = { version = "0.6", features = ["all"] }
+rustix = { workspace = true, features = ["net", "process"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ed25519-dalek = "2.2"
+rusqlite.workspace = true
 
 [lints]
 workspace = true

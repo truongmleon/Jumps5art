@@ -68,13 +68,28 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod capacity;
+pub mod mass;
 
 pub use capacity::{
     CapacityAssessment, CapacityReport, CapacityScope, assess_capacity, inspect_capacity,
 };
 
+#[cfg(target_os = "linux")]
+pub use platform::{
+    AdminMetadata, DevicePage, DeviceRecord, DeviceRegistration, RegisteredHardwareTargets,
+    RegisteredVolume, RegisteredVolumeHealth, VolumeRegistrationPlan, WorldsCatalogStatus,
+    WorldsRecoveryIndex, WorldsRecoveryPoint, device_fingerprint,
+};
+#[cfg(target_os = "linux")]
+pub use volume::topology::HardwareDevice;
+#[cfg(target_os = "linux")]
+pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};
+
+#[cfg(target_os = "linux")]
+mod volume;
+
 pub const FORMAT_VERSION: u32 = 1;
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 8;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
 pub const FORMAT_FILE: &str = "format.json";
 pub const LOCK_FILE: &str = "metadata.lock";
@@ -92,6 +107,8 @@ pub const SNAPSHOT_DATABASE_FILE: &str = "metadata.sqlite";
 pub const MAX_JOB_CHANGE_PAGE_BYTES: usize = 1_048_576;
 /// Maximum number of whole saved-job changes requested in one bounded page.
 pub const MAX_JOB_CHANGE_PAGE_RECORDS: u16 = 500;
+/// Largest bounded page of recorded Worlds recovery points.
+pub const MAX_WORLDS_INDEX_ROWS: u16 = 100;
 
 /// The answer to "which server bookkeeping root did this operation check?"
 ///
@@ -387,6 +404,24 @@ pub enum StorageError {
     /// Filesystem measurements cannot produce a valid bounded capacity report.
     #[error("storage capacity observation is invalid: {0}")]
     InvalidCapacity(&'static str),
+    /// The kernel could not establish the requested volume candidate's identity.
+    #[error("invalid volume candidate: {0}")]
+    InvalidVolume(&'static str),
+    /// The kernel cannot establish which independent disks a volume relies on.
+    #[error("volume topology is unknown: {0}")]
+    VolumeTopologyUnknown(&'static str),
+    /// The local admin request requires a verified and writable metadata lease.
+    #[error("local administration unavailable: {0}")]
+    AdminUnavailable(&'static str),
+    /// A request violates Mass namespace, publication, or read rules.
+    #[error("Mass operation refused: {0}")]
+    Mass(&'static str),
+    /// A device identity or authority command violates the persisted contract.
+    #[error("invalid device: {0}")]
+    InvalidDevice(&'static str),
+    /// A Worlds index read needs catalog storage and a bounded request.
+    #[error("Worlds catalog unavailable: {0}")]
+    WorldsCatalogUnavailable(&'static str),
     /// A local change-page request has an invalid budget or future position.
     #[error("invalid snapshot-job change cursor: {0}")]
     InvalidJobChangeCursor(&'static str),
