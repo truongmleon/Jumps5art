@@ -573,3 +573,72 @@ fn mass_browser_rejects_missing_capability_and_rebound_host() {
     assert!(authorized.starts_with("HTTP/1.1 200"));
     assert!(authorized.contains("\"items\":[]"));
 }
+
+/// Exercise kernel directory enumeration and read-only policy when FUSE3 is available.
+#[test]
+fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
+    use jumpstart_domain::ItemId;
+    use rusqlite::{Connection, params};
+    use uuid::Uuid;
+
+    if geteuid().is_root()
+        || !Path::new("/dev/fuse").exists()
+        || !Command::new("fusermount3")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("Linux FUSE3 device or unprivileged mount helper is unavailable");
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    let mountpoint = parent.path().join("drive");
+    fs::create_dir(&mountpoint).unwrap();
+    jumpstart_storage::initialize(&root).unwrap();
+    let db = Connection::open(root.join("database/jumpstart.sqlite")).unwrap();
+    let primary = Uuid::new_v4();
+    db.execute(
+        "INSERT INTO volumes VALUES (?1,'primary',?2,'fixture','unknown',NULL)",
+        params![
+            Uuid::new_v4().as_bytes().as_slice(),
+            primary.as_bytes().as_slice()
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO items VALUES (?1,?2,'mass','folder',?3,NULL,'Project briefs','live',NULL,NULL,1)",
+        params![ItemId::new().as_uuid().as_bytes().as_slice(), Uuid::new_v4().as_bytes().as_slice(), primary.as_bytes().as_slice()],
+    ).unwrap();
+    drop(db);
+    let _daemon = start(&root, &socket);
+    let mut helper = TestDaemon(
+        Command::new(env!("CARGO_BIN_EXE_mass"))
+            .arg("mount")
+            .arg(&mountpoint)
+            .arg("--socket")
+            .arg(&socket)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    use std::io::{BufRead, BufReader};
+    let mut line = String::new();
+    BufReader::new(helper.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(line.starts_with("Mounted Mass read-only at"));
+    assert!(mountpoint.join("Project briefs").is_dir());
+    assert_eq!(fs::read_dir(&mountpoint).unwrap().count(), 1);
+    let error = fs::create_dir(mountpoint.join("unexpected")).unwrap_err();
+    assert_eq!(
+        error.raw_os_error(),
+        Some(rustix::io::Errno::ROFS.raw_os_error())
+    );
+    let pid = Pid::from_raw(i32::try_from(helper.0.id()).unwrap()).unwrap();
+    kill_process(pid, Signal::TERM).unwrap();
+    assert!(helper.0.wait().unwrap().success());
+    assert_eq!(fs::read_dir(&mountpoint).unwrap().count(), 0);
+}

@@ -44,6 +44,15 @@ impl MassClient {
         self.get(MassCommand::Search { query, after })
     }
 
+    /// Resolve one canonical name beneath a known parent for a filesystem lookup.
+    pub fn lookup(
+        &self,
+        parent: Option<ItemId>,
+        name: String,
+    ) -> Result<Option<MassItem>, Box<dyn Error>> {
+        self.get(MassCommand::Lookup { parent, name })
+    }
+
     /// Return current catalog metadata for one stable entry ID.
     pub fn item(&self, id: ItemId) -> Result<MassItem, Box<dyn Error>> {
         self.get(MassCommand::Item { id })

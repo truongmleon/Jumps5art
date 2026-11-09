@@ -97,6 +97,10 @@ pub enum MassCommand {
         query: String,
         after: Option<ItemId>,
     },
+    Lookup {
+        parent: Option<ItemId>,
+        name: String,
+    },
     Item {
         id: ItemId,
     },
