@@ -32,6 +32,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::hardware::{Monitor, POLL_INTERVAL};
+use super::pairing::PairingAdmin;
 
 const PLAN_LIFETIME: Duration = Duration::from_secs(600);
 const MAX_PLANS: usize = 16;
@@ -125,12 +126,14 @@ async fn accept(
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     let mut plans = VolumePlans::default();
     let mut hardware = Monitor::new();
+    let (mut pairing, mut pairing_events) = PairingAdmin::new();
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     loop {
         tokio::select! {
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
             _ = poll.tick() => hardware.refresh(&metadata),
+            Some(event) = pairing_events.recv() => pairing.receive(&metadata, event).await,
             accepted = listener.accept() => {
                 let (mut stream, _) = accepted?;
                 let Ok(peer) = socket_peercred(&stream) else {
@@ -142,7 +145,7 @@ async fn accept(
                 tokio::select! {
                     _ = terminate.recv() => return Ok(()),
                     _ = interrupt.recv() => return Ok(()),
-                    _ = timeout(DEADLINE, reply(&mut stream, root, &mut metadata, &mut plans, &mut hardware)) => {}
+                    _ = timeout(DEADLINE, reply(&mut stream, root, &mut metadata, &mut plans, &mut hardware, &mut pairing)) => {}
                 }
             }
         }
@@ -160,6 +163,7 @@ async fn reply(
     metadata: &mut Result<AdminMetadata, StorageError>,
     plans: &mut VolumePlans,
     hardware: &mut Monitor,
+    pairing: &mut PairingAdmin,
 ) -> Result<(), Box<dyn Error>> {
     let request: Request = read(stream).await?;
     let reply = if request.version != ADMIN_VERSION {
@@ -258,6 +262,29 @@ async fn reply(
                     })
                 },
             ),
+            Command::PairCreate { interface, address } => match metadata.as_ref() {
+                Ok(lease) => pairing_reply(pairing.create(lease, interface, address).await),
+                Err(error) => Reply::Error {
+                    message: error.to_string(),
+                },
+            },
+            Command::PairPending => Reply::Ok {
+                report: pairing.pending(),
+            },
+            Command::PairDecide {
+                request_id,
+                transcript,
+                approve,
+            } => match metadata.as_mut() {
+                Ok(lease) => pairing_reply(
+                    pairing
+                        .decide(lease, request_id, &transcript, approve)
+                        .await,
+                ),
+                Err(error) => Reply::Error {
+                    message: error.to_string(),
+                },
+            },
             Command::DevicesList { after, limit } => admin_reply(metadata.as_ref(), |lease| {
                 let page = lease.list_devices(after, limit)?;
                 Ok(json!({"scope": "device_authority", "page": page}))
@@ -284,6 +311,16 @@ async fn reply(
         hardware.refresh(metadata);
     }
     write(stream, &reply).await
+}
+
+/// Convert a pairing response into a local reply without exposing a network error body.
+fn pairing_reply(result: Result<Value, Box<dyn Error>>) -> Reply {
+    match result {
+        Ok(report) => Reply::Ok { report },
+        Err(error) => Reply::Error {
+            message: error.to_string(),
+        },
+    }
 }
 
 /// Run a command through the checked daemon lease or return its refusal.

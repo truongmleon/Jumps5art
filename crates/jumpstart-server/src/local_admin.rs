@@ -7,6 +7,7 @@
 use std::{
     error::Error,
     fs,
+    net::SocketAddrV4,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     time::Duration,
@@ -19,7 +20,7 @@ use rustix::net::sockopt::socket_peercred;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::UnixStream,
     runtime::Builder,
     time::timeout,
@@ -54,6 +55,16 @@ pub enum Command {
     VolumeApply {
         plan_id: Uuid,
         acknowledge_unverified_encryption: bool,
+    },
+    PairCreate {
+        interface: String,
+        address: SocketAddrV4,
+    },
+    PairPending,
+    PairDecide {
+        request_id: Uuid,
+        transcript: String,
+        approve: bool,
     },
     DevicesList {
         after: Option<DeviceId>,
@@ -161,7 +172,7 @@ pub async fn read<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T, Box
 
 /// Encode one bounded frame with the shared codec, then write it to the socket.
 pub async fn write(
-    stream: &mut UnixStream,
+    stream: &mut (impl AsyncWrite + Unpin),
     payload: &impl Serialize,
 ) -> Result<(), Box<dyn Error>> {
     let mut bytes = Vec::new();

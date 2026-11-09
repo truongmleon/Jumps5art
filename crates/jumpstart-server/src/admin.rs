@@ -9,6 +9,8 @@ use std::{error::Error, path::Path};
 mod hardware;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod pairing;
 
 pub(super) use jumpstart_server::SOCKET_PATH;
 
@@ -144,6 +146,61 @@ pub(super) fn revoke_device(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (socket, device_id);
+        Err("the administration daemon requires Linux".into())
+    }
+}
+
+/// A parsed local pairing action passed to the protected socket client.
+pub(super) enum PairAction {
+    Create {
+        interface: String,
+        address: std::net::SocketAddrV4,
+    },
+    Pending,
+    Decide {
+        request_id: uuid::Uuid,
+        transcript: String,
+        approve: bool,
+    },
+}
+
+/// Send one pairing action to the Linux daemon.
+pub(super) fn pair(socket: &Path, action: PairAction) -> Result<serde_json::Value, Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use jumpstart_server::local_admin::{Command, call};
+        let command = match action {
+            PairAction::Create { interface, address } => Command::PairCreate { interface, address },
+            PairAction::Pending => Command::PairPending,
+            PairAction::Decide {
+                request_id,
+                transcript,
+                approve,
+            } => Command::PairDecide {
+                request_id,
+                transcript,
+                approve,
+            },
+        };
+        call(socket, command)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Destructure the parsed action so all portable CLI fields are type-checked.
+        match action {
+            PairAction::Create { interface, address } => {
+                let _ = (interface, address);
+            }
+            PairAction::Pending => {}
+            PairAction::Decide {
+                request_id,
+                transcript,
+                approve,
+            } => {
+                let _ = (request_id, transcript, approve);
+            }
+        }
+        let _ = socket;
         Err("the administration daemon requires Linux".into())
     }
 }

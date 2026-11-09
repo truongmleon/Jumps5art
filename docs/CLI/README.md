@@ -28,6 +28,8 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | `storage register PATH --plan --role primary\|backup` | Observes a proposed volume through the Linux daemon and can issue a primary or backup registration plan. |
 | `storage apply PLAN_ID --acknowledge-unverified-encryption` | Registers the reviewed Linux volume or resumes its accepted plan. |
 | `maintenance enter\|leave` | Persists or clears the Linux daemon's local write fence. |
+| `pair create --interface IFACE --listen IPV4:PORT` | Opens a temporary invitation on a selected physical Linux LAN interface. |
+| `pair pending\|approve\|reject` | Displays and decides the exact connection-bound pairing request. |
 | `devices list` | Reads a page of active and revoked device installations from the Linux daemon. |
 | `devices revoke DEVICE_ID` | Persists revocation of the selected installation. |
 | `update plan` | Verifies a signed Linux release directory and reports compatibility with the running daemon. |
@@ -254,6 +256,18 @@ Heading: `Storage capacity observation (not disk health or write approval):`
 | `at_or_below_safety_reserve` | `true` when available bytes are less than or equal to the reserve. |
 
 Byte counts are decimal strings in both text and JSON output. The warning and reserve figures describe this observation. They do not set aside space, identify the disk, or report whether the disk is healthy or encrypted.
+
+## `pair create|pending|approve|reject`
+
+The Linux service needs `iproute2` and the root-managed systemd encrypted credential `jumpstart-iroh.key`, whose decoded content is the stable 32-byte Ed25519 seed. Configure `LoadCredentialEncrypted=jumpstart-iroh.key:/etc/jumpstart/credentials/jumpstart-iroh.key` and allow `AF_UNIX AF_INET AF_NETLINK` in the service's address-family drop-in. Choose a physical Ethernet or wireless interface and its actual IPv4 address. The host firewall must permit the selected UDP port on that link. The invitation closes after five minutes or daemon restart.
+
+```sh
+jumpstart-server pair create --interface eno1 --listen 192.168.1.20:37519 --json
+jumpstart-server pair pending --json
+jumpstart-server pair approve REQUEST_ID --confirm-transcript DIGEST --json
+```
+
+The invitation includes a private one-time token and the pinned server key. Transfer it only to the installation you intend to pair. Compare the six words and key fingerprint shown on the client and by `pair pending` before copying the displayed transcript digest into the approval. Use `pair reject` with the same request ID and digest to reject it. Receipt retrieval is available to the authenticated active key on an open pairing listener. An app connection and a client UI are separate pieces of the integration.
 
 ## `devices list|revoke`
 

@@ -135,6 +135,11 @@ enum Command {
         #[command(subcommand)]
         command: StorageCommand,
     },
+    /// Open or review a temporary LAN pairing session.
+    Pair {
+        #[command(subcommand)]
+        command: PairCommand,
+    },
     /// List and revoke approved device installations on the local server.
     Devices {
         #[command(subcommand)]
@@ -355,6 +360,45 @@ enum StorageCommand {
     },
 }
 
+/// Actions for the separate LAN invitation and its explicit local decision.
+#[derive(Subcommand)]
+enum PairCommand {
+    /// Open one short-lived invitation on a selected physical LAN interface.
+    Create {
+        #[arg(long)]
+        interface: String,
+        #[arg(long)]
+        listen: std::net::SocketAddrV4,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Display the exact request and six words to compare with the client.
+    Pending {
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve the exact request and transcript after comparing its six words.
+    Approve(PairDecisionArgs),
+    /// Reject the exact pending request and consume its invitation.
+    Reject(PairDecisionArgs),
+}
+
+/// Selects the pending request the operator has actually reviewed.
+#[derive(clap::Args)]
+struct PairDecisionArgs {
+    request_id: uuid::Uuid,
+    #[arg(long)]
+    confirm_transcript: String,
+    #[arg(long, default_value = admin::SOCKET_PATH)]
+    socket: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
 /// Operator actions on the daemon's persisted device authority.
 #[derive(Subcommand)]
 enum DeviceCommand {
@@ -573,6 +617,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 "Registered storage volume:",
             ),
         },
+        Command::Pair { command } => {
+            let (action, socket, json) = match command {
+                PairCommand::Create {
+                    interface,
+                    listen,
+                    socket,
+                    json,
+                } => (
+                    admin::PairAction::Create {
+                        interface,
+                        address: listen,
+                    },
+                    socket,
+                    json,
+                ),
+                PairCommand::Pending { socket, json } => (admin::PairAction::Pending, socket, json),
+                PairCommand::Approve(args) => pair_decision(args, true),
+                PairCommand::Reject(args) => pair_decision(args, false),
+            };
+            (admin::pair(&socket, action)?, json, "Local device pairing:")
+        }
         Command::Devices { command } => match command {
             DeviceCommand::List {
                 after,
@@ -619,6 +684,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         },
     };
     print_report(&report, title, json)
+}
+
+/// Convert the reviewed CLI request into a typed approval or refusal message.
+fn pair_decision(args: PairDecisionArgs, approve: bool) -> (admin::PairAction, PathBuf, bool) {
+    let action = admin::PairAction::Decide {
+        request_id: args.request_id,
+        transcript: args.confirm_transcript,
+        approve,
+    };
+    (action, args.socket, args.json)
 }
 
 /// Execute one persisted snapshot-job request and print its saved result.
