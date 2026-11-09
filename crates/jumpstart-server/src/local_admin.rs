@@ -13,9 +13,12 @@ use std::{
     time::Duration,
 };
 
-use jumpstart_domain::DeviceId;
+use jumpstart_domain::{DeviceId, ItemId, VersionId};
 use jumpstart_protocol::{FRAME_PREFIX_BYTES, MAX_FRAME_BYTES, decode_body, write_frame};
-use jumpstart_storage::VolumeRole;
+use jumpstart_storage::{
+    VolumeRole,
+    mass::{MASS_CHUNK, MassDestination, MassImport},
+};
 use rustix::net::sockopt::socket_peercred;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -44,6 +47,9 @@ pub struct Request {
 pub enum Command {
     Status,
     Health,
+    Mass {
+        request: MassCommand,
+    },
     WorldsStatus,
     WorldsBackupList {
         limit: u16,
@@ -78,6 +84,35 @@ pub enum Command {
     },
 }
 
+/// Bounded local Mass requests shared by the file browser and virtual drive.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MassCommand {
+    Primaries,
+    List {
+        parent: Option<ItemId>,
+        after: Option<ItemId>,
+    },
+    Search {
+        query: String,
+        after: Option<ItemId>,
+    },
+    Item {
+        id: ItemId,
+    },
+    CreateFolder {
+        destination: MassDestination,
+    },
+    Import {
+        import: MassImport,
+    },
+    Read {
+        id: ItemId,
+        version: VersionId,
+        chunk: u32,
+    },
+}
+
 /// A framed response containing either the requested evidence or a typed refusal.
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -88,6 +123,15 @@ pub enum Reply {
 
 /// Verify the selected socket and submit a single local admin command.
 pub fn call(socket: &Path, command: Command) -> Result<Value, Box<dyn Error>> {
+    Ok(call_data(socket, command, None)?.0)
+}
+
+/// Send bounded upload bytes or receive a checked Mass chunk after the frame.
+pub(crate) fn call_data(
+    socket: &Path,
+    command: Command,
+    upload: Option<&[u8]>,
+) -> Result<(Value, Vec<u8>), Box<dyn Error>> {
     let owner = socket_owner(socket)?;
     let entry = fs::symlink_metadata(socket)?;
     if owner == 0 || !entry.file_type().is_socket() || entry.uid() != owner {
@@ -96,15 +140,22 @@ pub fn call(socket: &Path, command: Command) -> Result<Value, Box<dyn Error>> {
     Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(timeout_call(socket, owner, command))
+        .block_on(timeout_call(socket, owner, command, upload))
 }
 
-/// Connect, verify the daemon UID, and exchange one request within the deadline.
+/// Connect, verify the daemon UID, and exchange a frame and optional exact data.
 async fn timeout_call(
     socket: &Path,
     owner: u32,
     command: Command,
-) -> Result<Value, Box<dyn Error>> {
+    upload: Option<&[u8]>,
+) -> Result<(Value, Vec<u8>), Box<dyn Error>> {
+    let read_chunk = matches!(
+        command,
+        Command::Mass {
+            request: MassCommand::Read { .. }
+        }
+    );
     timeout(DEADLINE, async {
         let mut stream = UnixStream::connect(socket).await?;
         if socket_peercred(&stream)?.uid.as_raw() != owner {
@@ -118,8 +169,23 @@ async fn timeout_call(
             },
         )
         .await?;
+        if let Some(bytes) = upload {
+            stream.write_all(bytes).await?;
+        }
         match read(&mut stream).await? {
-            Reply::Ok { report } => Ok(report),
+            Reply::Ok { report } => {
+                let mut bytes = Vec::new();
+                if read_chunk {
+                    let length = report["length"]
+                        .as_u64()
+                        .and_then(|length| usize::try_from(length).ok())
+                        .filter(|length| (1..=MASS_CHUNK).contains(length))
+                        .ok_or("the daemon returned an invalid Mass chunk length")?;
+                    bytes.resize(length, 0);
+                    stream.read_exact(&mut bytes).await?;
+                }
+                Ok((report, bytes))
+            }
             Reply::Error { message } => Err(message.into()),
         }
     })

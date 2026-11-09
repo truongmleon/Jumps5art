@@ -10,6 +10,8 @@ mod hardware;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+mod mass;
+#[cfg(target_os = "linux")]
 mod pairing;
 
 pub(super) use jumpstart_server::SOCKET_PATH;

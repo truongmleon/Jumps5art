@@ -7,6 +7,8 @@ use std::{error::Error, io::Write};
 
 #[cfg(target_os = "linux")]
 pub mod local_admin;
+#[cfg(target_os = "linux")]
+pub mod mass_client;
 
 /// Default administrative socket in the private systemd runtime directory.
 pub const SOCKET_PATH: &str = "/run/jumpstart/admin.sock";

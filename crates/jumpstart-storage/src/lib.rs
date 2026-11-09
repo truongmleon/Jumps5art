@@ -68,6 +68,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod capacity;
+pub mod mass;
 
 pub use capacity::{
     CapacityAssessment, CapacityReport, CapacityScope, assess_capacity, inspect_capacity,
@@ -88,7 +89,7 @@ pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};
 mod volume;
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
 pub const FORMAT_FILE: &str = "format.json";
 pub const LOCK_FILE: &str = "metadata.lock";
@@ -397,6 +398,9 @@ pub enum StorageError {
     /// The local admin request requires a verified and writable metadata lease.
     #[error("local administration unavailable: {0}")]
     AdminUnavailable(&'static str),
+    /// A request violates Mass namespace, publication, or read rules.
+    #[error("Mass operation refused: {0}")]
+    Mass(&'static str),
     /// A device identity or authority command violates the persisted contract.
     #[error("invalid device: {0}")]
     InvalidDevice(&'static str),
