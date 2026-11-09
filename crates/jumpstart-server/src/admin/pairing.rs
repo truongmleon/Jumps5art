@@ -133,13 +133,7 @@ impl PairingAdmin {
         }
         let link = LanLink::inspect(interface, address).await?;
         let key = read_credential()?;
-        let endpoint = iroh::endpoint::Builder::empty()
-            .clear_ip_transports()
-            .add_custom_transport(Arc::new(LanTransport(link.clone())))
-            .secret_key(key.clone())
-            .alpns(vec![ALPN.to_vec()])
-            .bind()
-            .await?;
+        let endpoint = bind_listener(&link, key.clone()).await?;
         let (window, invitation) = PairingWindow::open(
             Instant::now(),
             lease.report().server_id,
@@ -385,6 +379,20 @@ impl PairingAdmin {
     }
 }
 
+/// Bind one pairing ALPN with TLS crypto and no relay or discovery services.
+async fn bind_listener(
+    link: &LanLink,
+    key: SecretKey,
+) -> Result<Endpoint, iroh::endpoint::BindError> {
+    Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .clear_ip_transports()
+        .add_custom_transport(Arc::new(LanTransport(link.clone())))
+        .secret_key(key)
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await
+}
+
 /// Listen on this window's only endpoint until it is canceled or expires.
 async fn network(
     endpoint: Endpoint,
@@ -561,16 +569,9 @@ mod tests {
         let mut metadata = Ok(AdminMetadata::open(&root).unwrap());
         let link = LanLink::loopback_fixture();
         let server_key = SecretKey::from_bytes(&[31; 32]);
-        let server_endpoint = iroh::endpoint::Builder::empty()
-            .clear_ip_transports()
-            .add_custom_transport(Arc::new(LanTransport(link.clone())))
-            .secret_key(server_key.clone())
-            .alpns(vec![ALPN.to_vec()])
-            .bind()
-            .await
-            .unwrap();
+        let server_endpoint = bind_listener(&link, server_key.clone()).await.unwrap();
         let client_key = SecretKey::from_bytes(&[33; 32]);
-        let client = iroh::endpoint::Builder::empty()
+        let client = Endpoint::builder(iroh::endpoint::presets::Minimal)
             .clear_ip_transports()
             .bind_addr("127.0.0.2:0")
             .unwrap()
