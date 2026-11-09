@@ -237,7 +237,7 @@ impl CustomTransport for LanTransport {
         };
         Ok(Box::new(LanEndpoint {
             endpoint,
-            local,
+            local: local.clone(),
             advertised: Watchable::new(vec![local]),
         }))
     }
@@ -290,7 +290,7 @@ impl CustomEndpoint for LanEndpoint {
                 metas[0] = RecvMeta::default();
                 metas[0].len = len;
                 metas[0].stride = len;
-                info[0] = RecvInfo::new(encode(remote), Some(self.local));
+                info[0] = RecvInfo::new(encode(remote), Some(self.local.clone()));
                 return Poll::Ready(Ok(1));
             }
         }
