@@ -6,17 +6,21 @@
 cargo run -p jumpstart-server -- --help
 ```
 
-These are the commands the binary accepts. [CONTRIBUTING.md](../../CONTRIBUTING.md) describes the same preview in more detail, including how initialization and snapshots are published. The finished server's administrative commands are specified separately in [Technical Design.md](<../../Technical Design.md>) and are absent from `--help`.
+These are the commands the binary accepts. [CONTRIBUTING.md](../../CONTRIBUTING.md) describes the same preview in more detail, including how initialization and snapshots are published. The finished server's administrative commands are specified separately in [Technical Design.md](<../../Technical Design.md>) and lists the remaining command families.
 
 The commands run on Linux and macOS. On Windows they exit unsuccessfully without changing files. The `health` report identifies unavailable checks there.
+
+The [Mass preview guide](MASS.md) covers the separate file-browser helper.
 
 ## Available commands
 
 | Command | What it does |
 |---|---|
 | `init` | Creates a new metadata folder that identifies one server. |
+| `serve` | Starts the Linux-only local administration daemon. |
+| `status` | Reads the running daemon's metadata status through its private socket. |
 | `inspect` | Reads an existing metadata folder and prints that identity. The folder stays unchanged. |
-| `health` | Checks an offline metadata root and measures capacity on the filesystem containing that root. |
+| `health` | Queries the running Linux daemon, or checks an offline root with `--metadata-root PATH`. |
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
 | `snapshot verify` | Checks an existing bundle. The original metadata folder is not required. |
 | `snapshot inventory` | Counts the retained catalog resources and recorded blob placements each primary needs. |
@@ -25,12 +29,28 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | `jobs` | Enqueues/runs snapshot requests, reads their status/history/change pages, cancels queued requests, and recovers interrupted work; see [job commands](../../CONTRIBUTING.md#persisted-local-snapshot-jobs). |
 | `jobs run-next` | Runs one oldest queued snapshot; JSON returns a saved `job` or `null` for an empty queue. A saved failed outcome exits unsuccessfully. |
 | `storage inspect` | Reports how much space the filesystem has for an existing directory. |
+| `storage register PATH --plan --role primary\|backup` | Observes a proposed volume through the Linux daemon and can issue a primary or backup registration plan. |
+| `storage apply PLAN_ID --acknowledge-unverified-encryption` | Registers the reviewed Linux volume or resumes its accepted plan. |
+| `maintenance enter\|leave` | Persists or clears the Linux daemon's local write fence. |
+| `pair create --interface IFACE --listen IPV4:PORT` | Opens a temporary invitation on a selected physical Linux LAN interface. |
+| `pair pending\|approve\|reject` | Displays and decides the exact connection-bound pairing request. |
+| `devices list` | Reads a page of active and revoked device installations from the Linux daemon. |
+| `devices revoke DEVICE_ID` | Persists revocation of the selected installation. |
+| `update plan` | Verifies a signed Linux release directory and reports compatibility with the running daemon. |
 
 `init`, `migrate`, `snapshot create`, and `snapshot restore` require `--development`. Job enqueue/run/run-next/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
 
 A successful command prints its report on stdout and exits successfully. A failure prints `error:` and the reason on stderr and exits with a failure status. Failures normally leave stdout empty. A snapshot job that records `Failed` prints that saved outcome, and `health` prints any available evidence before reporting an incomplete check. Add `--json` for JSON. `jobs changes` uses compact JSON to preserve its response byte bound, while other commands use pretty-printed JSON. Without `--json`, the first line is a heading and the fields follow, indented two spaces per level.
 
 `--help` and `--version` are handled before a command runs. `snapshot --help`, `storage --help`, and `jobs --help` list the nested commands.
+
+## `serve` and `status`
+
+On Linux, use the dedicated service user to run `serve --metadata-root PATH`. The systemd unit template in [packaging/linux](../../packaging/linux/jumpstart.service) expects that user, the installed binary, and a root-owned `/etc/jumpstart/server.env` containing `JUMPSTART_METADATA_ROOT`. It creates the private runtime directory for the default socket at `/run/jumpstart/admin.sock`.
+
+Run `status --json` as root or as the service user. For a scratch run, both commands accept `--socket PATH` pointing into an existing private directory owned by the service user. The server rejects root execution and checks the caller's OS credentials before decoding a request.
+
+The daemon takes exclusive metadata ownership for its lifetime. Offline commands require stopping it first. Status reports `metadata_verified` after successful startup verification, or `recovery_required` if the root needs attention. Missing roots stay absent. Stop with SIGINT or SIGTERM for orderly release of the lock and socket.
 
 ## `init`
 
@@ -41,7 +61,7 @@ cargo run -p jumpstart-server -- init --metadata-root /tmp/jumpstart-metadata-de
 | Flag | Required | Meaning |
 |---|---|---|
 | `--metadata-root` | yes | New directory. Its parent must already exist. |
-| `--development` | yes | Acknowledges that this is a development preview. Production volume checks, encryption, backup, and restore are still unimplemented. |
+| `--development` | yes | Acknowledges that this is a development preview. Production storage qualification, encryption checks, and full backup and restore remain open. |
 | `--json` | no | Print the report as JSON. |
 
 The new folder receives `format.json`, `metadata.lock`, and `database/jumpstart.sqlite`. The database records the server ID, the sync epoch, the format version, and the applied migrations. It starts with an empty application catalog and job queue. The identity values are generated once for this folder.
@@ -56,7 +76,7 @@ Heading: `Verified offline development metadata:`
 | `server_id` | UUID string for this server |
 | `sync_epoch` | UUID string recorded with the server ID |
 | `format_version` | Number, currently `1` |
-| `schema_version` | Number, currently `4` |
+| `schema_version` | Number, currently `8` |
 | `change_seq` | Stored decimal-string position; unavailable (`null`) in schema 1 |
 | `journal_mode` | SQLite journal mode of the stored database |
 | `integrity_check` | `"ok"` after the check succeeds |
@@ -82,9 +102,11 @@ Heading: `Verified offline development metadata:`
 cargo run -p jumpstart-server -- health --metadata-root /tmp/jumpstart-metadata-demo --json
 ```
 
-The command requires `--metadata-root PATH` and accepts `--json`. Its scope is `offline_metadata`. The `metadata` component reports the same integrity and schema evidence as `inspect`, or explains why verification was refused. The `capacity` component independently reports observed bytes and default thresholds on the filesystem containing the supplied directory. It can report `low` or `at_or_below_reserve` even when the metadata verifies.
+With `--metadata-root PATH`, the scope is `offline_metadata`. The `metadata` component reports the same integrity and schema evidence as `inspect`, or explains why verification was refused. The `capacity` component independently reports observed bytes and default thresholds on the filesystem containing the supplied directory. It can report `low` or `at_or_below_reserve` even when the metadata verifies.
 
-If either check cannot complete, the command still prints its component report and exits unsuccessfully. A measured capacity warning alone exits successfully. The check leaves all files unchanged, including any pending migration or SQLite journal. Live daemon, registered volume, hardware, and application health require their own evidence.
+Without `--metadata-root`, `health --json` uses the protected local socket. The `live_local_admin` report measures space now and shows saved snapshot-job counts by state. It labels the database integrity report as startup evidence and rechecks that the leased root, database, and lock still match the current paths. On schema 5 it also reports live identity and capacity evidence for up to eight registered volumes, ordered by their recorded paths. The report counts pending registrations, catalog rows with no mount binding, and registered volumes beyond the sample. Capacity is reported only after the filesystem, directory, and marker agree. A missing or substituted disk is unavailable. The Linux daemon polls SMART/NVMe at startup and daily, and refreshes after a registration when no poll is active. A report contains the last observation and its age. The monitor requires a system-installed `smartctl` and permission to read the resolved device nodes. Unsupported, inaccessible, and unobserved devices report unknown. The daemon reports the drive's SMART assessment and available counters and temperature. Use `--socket PATH` to query a scratch daemon.
+
+If metadata or capacity cannot be checked, the command prints its component report and exits unsuccessfully. A measured capacity warning alone exits successfully. Both modes are read-only.
 
 ## `migrate`
 
@@ -99,7 +121,7 @@ cargo run -p jumpstart-server -- migrate --metadata-root /tmp/jumpstart-metadata
 | `--development` | yes | Acknowledges the schema upgrade and limited scope of the recovery copy. |
 | `--json` | no | Print the report as JSON. |
 
-The command upgrades a verified older root to schema 4 after saving a verified pre-upgrade snapshot. A current root reports both versions as 4 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 4. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
+The command upgrades a verified older root to schema 8 after saving a verified pre-upgrade snapshot. A current root reports both versions as 8 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 8. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
 
 ## `snapshot create`
 
@@ -206,6 +228,36 @@ All actions use `--metadata-root PATH` and accept `--json`. Enqueue, run, run-ne
 
 Saved run failures print a job record and return nonzero. See [the snapshot job walkthrough](../../CONTRIBUTING.md#persisted-local-snapshot-jobs) for examples and interrupted-work recovery.
 
+## Volume registration
+
+Run `storage register /absolute/path --plan --role primary --json` with the
+Linux daemon running. The report describes the actual mount, directory identity,
+filesystem, read-only state, and any existing files or marker. Symlinks in
+the supplied path are refused. Encryption and registered-device topology remain
+unverified. This preflight creates no marker or approval record.
+
+For a dedicated, empty ext4 or XFS directory, an eligible preflight returns a `plan_id`:
+
+```sh
+jumpstart-server storage register /srv/jumpstart/library --plan --role primary --json
+jumpstart-server storage apply PLAN_ID --acknowledge-unverified-encryption --json
+
+jumpstart-server storage register /srv/jumpstart/backup --plan --role backup --json
+jumpstart-server storage apply BACKUP_PLAN_ID --acknowledge-unverified-encryption --json
+```
+
+An unaccepted plan expires after ten minutes or when the daemon restarts. After the daemon records the intent, retry the same ID to finish an interrupted registration or retrieve its original receipt. Apply rechecks the mount and filesystem identity, writes the marker without replacing an existing entry, and returns the assigned volume ID and, for a primary, its primary ID. A missing `plan_id` means the report's `apply_blocker` explains why there is no writable plan.
+
+Use a directory managed exclusively by the service user. The systemd unit keeps paths read-only by default. An operator-managed drop-in must grant `ReadWritePaths=` for the existing metadata root and the specific approved volume directory. The encryption acknowledgment applies because preflight reports encryption as unknown.
+
+The schema 6 backup preview requires an ext4 filesystem with its internal journal. The metadata filesystem and all opposite-role registrations must expose their backing disks. The daemon follows device-mapper and partition links and refuses shared or unknown backing topology. Keep protected volumes mounted during plan and apply. Btrfs and XFS backup qualification remain open. A backup registration assigns the destination identity before any separate backup generation is created.
+
+If the daemon reports uncheckpointed WAL after a crash, stop it and use the explicit local `jobs recover --development --metadata-root PATH` workflow before restarting. Retain the journal and marker files. If apply refuses an unexpected file or incomplete staging marker, inspect the volume before attempting recovery.
+
+## `maintenance enter|leave`
+
+Both commands accept `--socket PATH` and `--json`. The state persists across daemon restarts and appears in `status`. Entering maintenance fences registration. Leaving maintenance allows it again. These commands require schema 5. Application runtimes and release activation need their own quiescence checks before they can use this fence.
+
 ## `storage inspect`
 
 ```sh
@@ -244,3 +296,32 @@ Heading: `Storage capacity observation (not disk health or write approval):`
 | `at_or_below_safety_reserve` | `true` when available bytes are less than or equal to the reserve. |
 
 Byte counts are decimal strings in both text and JSON output. The warning and reserve figures describe this observation. They do not set aside space, identify the disk, or report whether the disk is healthy or encrypted.
+
+## `pair create|pending|approve|reject`
+
+The Linux service needs `iproute2` and the root-managed systemd encrypted credential `jumpstart-iroh.key`, whose decoded content is the stable 32-byte Ed25519 seed. Configure `LoadCredentialEncrypted=jumpstart-iroh.key:/etc/jumpstart/credentials/jumpstart-iroh.key` and allow `AF_UNIX AF_INET AF_NETLINK` in the service's address-family drop-in. Choose a physical Ethernet or wireless interface and its actual IPv4 address. The host firewall must permit the selected UDP port on that link. The invitation closes after five minutes or daemon restart.
+
+```sh
+jumpstart-server pair create --interface eno1 --listen 192.168.1.20:37519 --json
+jumpstart-server pair pending --json
+jumpstart-server pair approve REQUEST_ID --confirm-transcript DIGEST --json
+```
+
+The invitation includes a private one-time token and the pinned server key. Transfer it only to the installation you intend to pair. Compare the six words and key fingerprint shown on the client and by `pair pending` before copying the displayed transcript digest into the approval. Use `pair reject` with the same request ID and digest to reject it. Receipt retrieval is available to the authenticated active key on an open pairing listener. An app connection and a client UI are separate pieces of the integration.
+
+## `devices list|revoke`
+
+These commands require schema 7 and the protected Linux socket. `devices list --limit 50 --json` includes active and revoked installations with names, platform, app and key fingerprint. When the page has more entries, pass its `next_after` value as `--after DEVICE_ID`. An installation's ID is stable even when another installation has the same name. `devices revoke DEVICE_ID` persists revocation before returning, including during maintenance. A repeat returns the same revoked record. The registry preserves the key to prevent reapproval. Live session cancellation depends on the application transport.
+
+## `update plan`
+
+```sh
+jumpstart-server update plan --release-root /absolute/candidate-release --json
+```
+
+The Linux command asks the local daemon for its verified format and schema
+versions. It reads the root-installed `/etc/jumpstart/release.pub` (32 raw
+Ed25519 public-key bytes), verifies `release.json` against its detached
+`release.sig` (64 raw bytes), and checks every listed artifact's size and
+BLAKE3 identity. It reports whether the release can read and write the
+current storage. The plan leaves installation and data paths untouched.

@@ -41,7 +41,15 @@ mod migration;
 mod recovery;
 mod schema3;
 mod schema4;
+mod schema5;
+mod schema6;
+mod schema7;
+mod schema8;
 mod snapshot;
+#[cfg(target_os = "linux")]
+mod worlds;
+#[cfg(target_os = "linux")]
+pub use worlds::{WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint};
 
 pub(super) use backup_inventory::inventory_snapshot;
 pub(super) use changes::pull_job_changes;
@@ -53,6 +61,23 @@ pub(super) use jobs::{
 pub(super) use migration::migrate;
 pub(super) use recovery::restore_metadata_snapshot;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};
+
+// The Linux daemon is the device authority writer.
+#[cfg(target_os = "linux")]
+mod devices;
+#[cfg(target_os = "linux")]
+pub use devices::{DevicePage, DeviceRecord, DeviceRegistration, device_fingerprint};
+
+// Mass uses the same checked writer lease and registered roots as local administration.
+#[cfg(target_os = "linux")]
+mod mass;
+// Linux registration owns filesystem mutations and observations for the admin lease.
+#[cfg(target_os = "linux")]
+mod registration;
+#[cfg(target_os = "linux")]
+pub use registration::{
+    RegisteredHardwareTargets, RegisteredVolume, RegisteredVolumeHealth, VolumeRegistrationPlan,
+};
 
 const MIGRATION_NAME: &str = "initial_metadata";
 const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version INTEGER PRIMARY KEY CHECK (version > 0),\n    name TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL\n) STRICT";
@@ -78,6 +103,198 @@ struct VerifiedMetadata {
     connection: Connection,
     /// Owned lock handle retained until capture or inspection finishes.
     _lock: File,
+}
+
+/// Retains exclusive ownership of the verified metadata root while the daemon runs.
+///
+/// The daemon starts with a checked reader and opens a writer only on demand.
+/// The same lock excludes offline migrations and job runners in both modes.
+#[cfg(target_os = "linux")]
+pub struct AdminMetadata {
+    source: VerifiedMetadata,
+    directory: File,
+    database: File,
+    verified_at: std::time::Instant,
+    writable: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl AdminMetadata {
+    /// Open an existing root and retain its exclusive maintenance lock.
+    ///
+    /// `root` selects the directory. Returns the verified lease or a storage
+    /// error. Missing roots, pending recovery, and active owners are refused.
+    pub fn open(root: &Path) -> Result<Self> {
+        let (root, lock) = lock_metadata(root, true)?;
+        let directory = open_directory(&root)?;
+        let database = open_regular(&root.join(DATABASE_DIRECTORY).join(DATABASE_FILE))?;
+        let lease = Self {
+            source: verify_locked_metadata(root, lock)?,
+            directory,
+            database,
+            verified_at: std::time::Instant::now(),
+            writable: false,
+        };
+        lease.check_binding()?;
+        Ok(lease)
+    }
+
+    /// Return the verified startup report while the metadata lease is held.
+    pub fn report(&self) -> &MetadataReport {
+        &self.source.report
+    }
+
+    /// Recheck that the paths still name the leased directory, database, and lock.
+    ///
+    /// Returns `Ok(())` for the same entries. A missing or replaced path means
+    /// the startup verification cannot stand in for current metadata evidence.
+    pub fn check_binding(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = &self.source.report.root;
+        let pairs = [
+            (&self.directory, open_directory(root)?),
+            (
+                &self.database,
+                open_regular(&root.join(DATABASE_DIRECTORY).join(DATABASE_FILE))?,
+            ),
+            (&self.source._lock, open_regular(&root.join(LOCK_FILE))?),
+        ];
+        for (retained, current) in pairs {
+            let retained = retained
+                .metadata()
+                .map_err(|error| io("stat leased metadata", root, error))?;
+            let current = current
+                .metadata()
+                .map_err(|error| io("stat current metadata", root, error))?;
+            if (retained.dev(), retained.ino()) != (current.dev(), current.ino()) {
+                return Err(StorageError::NeedsRecovery(
+                    "metadata path no longer names the leased files",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the elapsed time since this process verified metadata at startup.
+    pub fn verification_age(&self) -> Duration {
+        self.verified_at.elapsed()
+    }
+
+    /// Read the persisted fence, or return `None` for an older metadata schema.
+    pub fn maintenance(&self) -> Result<Option<bool>> {
+        self.check_binding()?;
+        if self.source.report.schema_version < 5 {
+            return Ok(None);
+        }
+        Ok(Some(self.source.connection.query_row(
+            "SELECT maintenance FROM local_admin_state WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?))
+    }
+
+    /// Persist the local mutation fence before reporting the requested state.
+    pub fn set_maintenance(&mut self, enabled: bool) -> Result<bool> {
+        let previous = self.maintenance()?.ok_or(StorageError::AdminUnavailable(
+            "migrate offline metadata before changing maintenance mode",
+        ))?;
+        if previous == enabled && !self.writable {
+            return Ok(enabled);
+        }
+        self.ensure_writer()?;
+        self.source.connection.execute(
+            "UPDATE local_admin_state SET maintenance=?1 WHERE singleton=1 AND maintenance!=?1",
+            [enabled],
+        )?;
+        self.checkpoint_admin()?;
+        Ok(enabled)
+    }
+
+    /// Switch to a checked SQLite writer while retaining the startup lease.
+    fn ensure_writer(&mut self) -> Result<()> {
+        self.check_binding()?;
+        if self.writable {
+            return Ok(());
+        }
+        let root = &self.source.report.root;
+        jobs::checked_sidecars(root, false)?;
+        let connection = Connection::open_with_flags(
+            root.join(DATABASE_DIRECTORY).join(DATABASE_FILE),
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        use rusqlite::config::DbConfig;
+        if !connection.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)? {
+            return Err(StorageError::AdminUnavailable(
+                "close-time checkpoints remain enabled",
+            ));
+        }
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+        connection.pragma_update(None, "wal_autocheckpoint", 0)?;
+        connection.pragma_update(None, "trusted_schema", false)?;
+        let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if mode != "wal" {
+            return Err(StorageError::AdminUnavailable(
+                "the administration writer requires WAL mode",
+            ));
+        }
+        verify_database(&connection, &self.source.marker)?;
+        self.check_binding()?;
+        self.source.connection = connection;
+        self.writable = true;
+        Ok(())
+    }
+
+    /// Flush committed changes and their directory before acknowledging a write.
+    fn checkpoint_admin(&self) -> Result<()> {
+        self.check_binding()?;
+        let busy: i64 =
+            self.source
+                .connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(StorageError::NeedsRecovery(
+                "administration checkpoint is busy",
+            ));
+        }
+        let root = &self.source.report.root;
+        self.database
+            .sync_all()
+            .map_err(|error| io("synchronize administration database", root, error))?;
+        sync_directory(&root.join(DATABASE_DIRECTORY))
+    }
+
+    /// Count saved snapshot jobs by state while the current metadata binding holds.
+    ///
+    /// Returns `None` for supported roots older than the local job ledger. Counts
+    /// describe saved jobs and use exact counters for JSON serialization.
+    pub fn snapshot_job_counts(
+        &self,
+    ) -> Result<Option<std::collections::BTreeMap<String, Counter>>> {
+        self.check_binding()?;
+        if self.source.report.schema_version < 3 {
+            return Ok(None);
+        }
+        let mut statement = self
+            .source
+            .connection
+            .prepare("SELECT state, count(*) FROM jobs GROUP BY state")?;
+        let mut rows = statement.query([])?;
+        let mut counts = std::collections::BTreeMap::new();
+        while let Some(row) = rows.next()? {
+            let count: i64 = row.get(1)?;
+            let count = u64::try_from(count)
+                .ok()
+                .and_then(|count| Counter::from_u64(count).ok())
+                .ok_or(StorageError::Integrity("invalid saved job count"))?;
+            counts.insert(row.get(0)?, count);
+        }
+        Ok(Some(counts))
+    }
 }
 
 /// Create and verify a sibling staging root, then publish it without replacement.
@@ -239,10 +456,19 @@ fn finish_root_layout(staging: &Path, marker: &FormatMarker, lock: File) -> Resu
         .map_err(|source| io("synchronize format marker", &marker_path, source))?;
     sync_directory(&staging.join(DATABASE_DIRECTORY))?;
     sync_directory(staging)?;
-    // Drop the exclusive lock before exercising exactly the same verification
-    // path as subsequent offline inspection.
-    drop(lock);
-    inspect(staging)
+    // Verify under the existing exclusive lock and release it explicitly.
+    // A concurrent fork can briefly retain a close-on-exec descriptor.
+    let root = fs::canonicalize(staging)
+        .map_err(|source| io("resolve staged metadata root", staging, source))?;
+    let verified = verify_locked_metadata(root, lock)?;
+    FileExt::unlock(&verified._lock).map_err(|source| {
+        io(
+            "release staged maintenance lock",
+            &staging.join(LOCK_FILE),
+            source,
+        )
+    })?;
+    Ok(verified.report)
 }
 
 /// Create the initial SQLite database, commit its schema and identity, and checkpoint it.
@@ -313,6 +539,10 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     apply_schema2(&mut connection)?;
     apply_schema3(&mut connection)?;
     schema4::apply(&mut connection)?;
+    schema5::apply(&mut connection)?;
+    schema6::apply(&mut connection)?;
+    schema7::apply(&mut connection)?;
+    schema8::apply(&mut connection)?;
     verify_database(&connection, marker)?;
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -620,6 +850,23 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
     if version >= 4 {
         expected_migrations.push((4, schema4::MIGRATION_NAME.to_owned(), schema4::checksum()));
     }
+    if version >= 5 {
+        expected_migrations.push((5, schema5::MIGRATION_NAME.to_owned(), schema5::checksum()));
+        if version == 5 {
+            schema5::verify_state(connection)?;
+        }
+    }
+    if version >= 6 {
+        expected_migrations.push((6, schema6::MIGRATION_NAME.to_owned(), schema6::checksum()));
+        schema6::verify_state(connection)?;
+    }
+    if version >= 7 {
+        expected_migrations.push((7, schema7::MIGRATION_NAME.to_owned(), schema7::checksum()));
+        schema7::verify_state(connection)?;
+    }
+    if version >= 8 {
+        expected_migrations.push((8, schema8::MIGRATION_NAME.to_owned(), schema8::checksum()));
+    }
     if migrations != expected_migrations {
         return Err(StorageError::MigrationMismatch);
     }
@@ -666,6 +913,17 @@ fn verify_schema_objects(connection: &Connection, version: u32) -> Result<()> {
     }
     if version >= 4 {
         expected.extend(schema4::statements());
+    }
+    match version {
+        5 => expected.extend(schema5::statements()),
+        6.. => expected.extend(schema6::statements()),
+        _ => {}
+    }
+    if version >= 7 {
+        expected.extend(schema7::statements());
+    }
+    if version >= 8 {
+        expected.extend(schema8::statements());
     }
     expected.sort_unstable();
     let actual = connection

@@ -23,7 +23,7 @@ use std::sync::{Arc, Barrier};
 use fs2::FileExt;
 use jumpstart_storage::{
     APPLICATION_ID, DATABASE_DIRECTORY, DATABASE_FILE, FORMAT_FILE, LOCK_FILE, MetadataReport,
-    StorageError, initialize, inspect,
+    SCHEMA_VERSION, StorageError, initialize, inspect,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -177,7 +177,7 @@ fn initialized_metadata_reopens_with_same_identity_and_verified_schema() {
     let reopened = inspect(&root).expect("offline reopen");
     assert_eq!(initial, reopened);
     assert_eq!(reopened.format_version, 1);
-    assert_eq!(reopened.schema_version, 4);
+    assert_eq!(reopened.schema_version, SCHEMA_VERSION);
     assert_eq!(reopened.change_seq.map(|value| value.value()), Some(0));
     assert_eq!(reopened.journal_mode, "wal");
     assert_eq!(reopened.integrity_check, "ok");
@@ -605,6 +605,7 @@ fn current_schema_requires_exact_ledger_and_catalog_definitions() {
         "CREATE INDEX unexpected_job_index ON jobs(updated_at_ms)",
         "DELETE FROM schema_migrations WHERE version=3",
         "DELETE FROM schema_migrations WHERE version=4",
+        "DELETE FROM schema_migrations WHERE version=8",
         "DROP INDEX mass_live_sibling_names",
         "ALTER TABLE media_marker ADD COLUMN surprise TEXT",
     ] {

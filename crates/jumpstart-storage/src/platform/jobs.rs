@@ -490,7 +490,7 @@ fn recovery_reader(root: PathBuf, lock: File) -> Result<VerifiedMetadata> {
 /// `root` selects metadata; `allow_wal` is true only for explicit recovery.
 /// Returns `Result<bool>` indicating a nonempty WAL. Symlinks, special files,
 /// nonempty rollback journals, and unintended live WAL are refused unchanged.
-fn checked_sidecars(root: &Path, allow_wal: bool) -> Result<bool> {
+pub(super) fn checked_sidecars(root: &Path, allow_wal: bool) -> Result<bool> {
     let mut live = false;
     for suffix in ["-wal", "-shm", "-journal"] {
         let path = root

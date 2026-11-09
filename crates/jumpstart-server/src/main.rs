@@ -38,15 +38,16 @@ use jumpstart_storage::{
     run_next_snapshot_job, run_snapshot_job, verify_snapshot,
 };
 
+mod admin;
 mod health;
+mod update;
+
+use jumpstart_server::print_report;
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
 /// No network listener is configured or started by this development tool.
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Jumpstart local metadata development tools; no network listener"
-)]
+#[command(version, about = "Jumpstart local metadata and Linux administration")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -59,6 +60,25 @@ struct Cli {
 /// Root paths are owned `PathBuf` values and output selection uses a `bool`.
 #[derive(Subcommand)]
 enum Command {
+    /// Run the Linux daemon with its protected local admin socket.
+    Serve {
+        /// Existing metadata root to verify before allowing administration.
+        #[arg(long)]
+        metadata_root: PathBuf,
+        /// Unix socket in a pre-existing private runtime directory.
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        /// Opt in to paired, read-only Mass on one concrete application UDP address.
+        #[arg(long)]
+        mass_listen: Option<std::net::SocketAddr>,
+    },
+    /// Ask the running Linux daemon about its metadata state.
+    Status {
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Initialize a new scratch metadata root. Existing paths are never adopted.
     Init {
         #[arg(long)]
@@ -76,11 +96,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Check an offline metadata root and report its filesystem capacity.
+    /// Report live local health, or check an offline root with --metadata-root.
     Health {
-        /// Existing root to diagnose without initializing or repairing it.
+        /// Existing root to diagnose offline instead of contacting the daemon.
+        #[arg(long, conflicts_with = "socket")]
+        metadata_root: Option<PathBuf>,
+        /// Override the local daemon socket for a live health query.
         #[arg(long)]
-        metadata_root: PathBuf,
+        socket: Option<PathBuf>,
         /// Print the component report as JSON, including failed checks.
         #[arg(long)]
         json: bool,
@@ -111,10 +134,30 @@ enum Command {
         #[command(subcommand)]
         command: JobCommand,
     },
-    /// Observe existing-directory storage capacity without approving writes.
+    /// Observe storage or register an approved volume through the daemon.
     Storage {
         #[command(subcommand)]
         command: StorageCommand,
+    },
+    /// Open or review a temporary LAN pairing session.
+    Pair {
+        #[command(subcommand)]
+        command: PairCommand,
+    },
+    /// List and revoke approved device installations on the local server.
+    Devices {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
+    /// Persist or clear the daemon's local mutation fence.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
+    /// Verify a signed server release before applying an update.
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommand,
     },
 }
 
@@ -302,7 +345,7 @@ fn parse_job_state(value: &str) -> Result<JobState, String> {
     }
 }
 
-/// Read-only filesystem observations, separate from verifying a metadata root.
+/// Observe capacity and plan or apply Linux volume registrations.
 ///
 /// `Inspect` owns an existing directory's positional `PathBuf` and a `bool`
 /// selecting JSON output. Its capacity observation checks neither disk health
@@ -314,6 +357,128 @@ enum StorageCommand {
         /// Existing directory to observe; missing paths, files, and final symlinks fail.
         path: PathBuf,
         /// Print the capacity-only report as JSON, with byte counts as decimal strings.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a registration candidate through the running Linux daemon.
+    Register {
+        /// Existing absolute directory to observe.
+        path: PathBuf,
+        #[arg(long, value_parser = ["primary", "backup"])]
+        role: String,
+        /// Request preflight evidence and a plan ID if the candidate is eligible.
+        #[arg(long)]
+        plan: bool,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply or retry a previously approved Linux volume registration.
+    Apply {
+        /// Plan ID returned by storage register --plan.
+        plan_id: uuid::Uuid,
+        /// Confirm that the daemon could not verify this filesystem's encryption.
+        #[arg(long, required = true)]
+        acknowledge_unverified_encryption: bool,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Actions for the separate LAN invitation and its explicit local decision.
+#[derive(Subcommand)]
+enum PairCommand {
+    /// Open one short-lived invitation on a selected physical LAN interface.
+    Create {
+        #[arg(long)]
+        interface: String,
+        #[arg(long)]
+        listen: std::net::SocketAddrV4,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Display the exact request and six words to compare with the client.
+    Pending {
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve the exact request and transcript after comparing its six words.
+    Approve(PairDecisionArgs),
+    /// Reject the exact pending request and consume its invitation.
+    Reject(PairDecisionArgs),
+}
+
+/// Selects the pending request the operator has actually reviewed.
+#[derive(clap::Args)]
+struct PairDecisionArgs {
+    request_id: uuid::Uuid,
+    #[arg(long)]
+    confirm_transcript: String,
+    #[arg(long, default_value = admin::SOCKET_PATH)]
+    socket: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+/// Operator actions on the daemon's persisted device authority.
+#[derive(Subcommand)]
+enum DeviceCommand {
+    /// List active and revoked installations in ID order.
+    List {
+        #[arg(long)]
+        after: Option<jumpstart_domain::DeviceId>,
+        #[arg(long, default_value_t = 50)]
+        limit: u16,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove authorization for an exact device ID.
+    Revoke {
+        device_id: jumpstart_domain::DeviceId,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Commands that toggle the local daemon's durable maintenance state.
+#[derive(Subcommand)]
+enum MaintenanceCommand {
+    /// Prevent new local daemon mutations.
+    Enter {
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-enable otherwise permitted local daemon mutations.
+    Leave {
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Read-only operations for a signed release and its compatibility evidence.
+#[derive(Subcommand)]
+enum UpdateCommand {
+    /// Verify a signed release directory against the running daemon's storage.
+    Plan {
+        #[arg(long)]
+        release_root: PathBuf,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -356,6 +521,16 @@ fn main() -> ExitCode {
 /// acknowledgment in `run_jobs`. Verification, inspection, and job reads need none.
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let (report, json, title) = match cli.command {
+        Command::Serve {
+            metadata_root,
+            socket,
+            mass_listen,
+        } => return admin::serve(&metadata_root, &socket, mass_listen),
+        Command::Status { socket, json } => (
+            admin::status(&socket)?,
+            json,
+            "Live local administration status:",
+        ),
         Command::Init {
             metadata_root,
             development,
@@ -380,8 +555,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         ),
         Command::Health {
             metadata_root,
+            socket,
             json,
-        } => return health::run(&metadata_root, json),
+        } => match metadata_root {
+            Some(root) => return health::run(&root, json),
+            None => {
+                let socket = socket.unwrap_or_else(|| PathBuf::from(admin::SOCKET_PATH));
+                let report = admin::health(&socket)?;
+                print_report(&report, "Live local administration health:", json)?;
+                if report["metadata"]["status"] != "verified_at_startup"
+                    || report["capacity"]["status"] == "unknown"
+                {
+                    return Err("one or more live checks could not complete; see the report".into());
+                }
+                return Ok(());
+            }
+        },
         Command::Migrate {
             metadata_root,
             snapshot_output,
@@ -456,10 +645,112 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 json,
                 "Storage capacity observation (not disk health or write approval):",
             ),
+            StorageCommand::Register {
+                path,
+                role,
+                plan,
+                socket,
+                json,
+            } => {
+                if !plan {
+                    return Err(
+                        "use --plan to review the candidate before running storage apply".into(),
+                    );
+                }
+                (
+                    admin::volume_preflight(&socket, &path, &role)?,
+                    json,
+                    "Read-only volume registration preflight:",
+                )
+            }
+            StorageCommand::Apply {
+                plan_id,
+                acknowledge_unverified_encryption,
+                socket,
+                json,
+            } => (
+                admin::apply_volume(&socket, plan_id, acknowledge_unverified_encryption)?,
+                json,
+                "Registered storage volume:",
+            ),
         },
+        Command::Pair { command } => {
+            let (action, socket, json) = match command {
+                PairCommand::Create {
+                    interface,
+                    listen,
+                    socket,
+                    json,
+                } => (
+                    admin::PairAction::Create {
+                        interface,
+                        address: listen,
+                    },
+                    socket,
+                    json,
+                ),
+                PairCommand::Pending { socket, json } => (admin::PairAction::Pending, socket, json),
+                PairCommand::Approve(args) => pair_decision(args, true),
+                PairCommand::Reject(args) => pair_decision(args, false),
+            };
+            (admin::pair(&socket, action)?, json, "Local device pairing:")
+        }
+        Command::Devices { command } => match command {
+            DeviceCommand::List {
+                after,
+                limit,
+                socket,
+                json,
+            } => (
+                admin::list_devices(&socket, after, limit)?,
+                json,
+                "Device installations:",
+            ),
+            DeviceCommand::Revoke {
+                device_id,
+                socket,
+                json,
+            } => (
+                admin::revoke_device(&socket, device_id)?,
+                json,
+                "Persisted device revocation:",
+            ),
+        },
+        Command::Maintenance { command } => {
+            let (enabled, socket, json) = match command {
+                MaintenanceCommand::Enter { socket, json } => (true, socket, json),
+                MaintenanceCommand::Leave { socket, json } => (false, socket, json),
+            };
+            (
+                admin::maintenance(&socket, enabled)?,
+                json,
+                "Local daemon maintenance state:",
+            )
+        }
         Command::Jobs { command } => return run_jobs(command),
+        Command::Update { command } => match command {
+            UpdateCommand::Plan {
+                release_root,
+                socket,
+                json,
+            } => (
+                update::plan(&release_root, &socket)?,
+                json,
+                "Verified signed update preflight:",
+            ),
+        },
     };
     print_report(&report, title, json)
+}
+
+/// Convert the reviewed CLI request into a typed approval or refusal message.
+fn pair_decision(args: PairDecisionArgs, approve: bool) -> (admin::PairAction, PathBuf, bool) {
+    let action = admin::PairAction::Decide {
+        request_id: args.request_id,
+        transcript: args.confirm_transcript,
+        approve,
+    };
+    (action, args.socket, args.json)
 }
 
 /// Execute one persisted snapshot-job request and print its saved result.
@@ -693,72 +984,5 @@ fn print_job_changes(page: &SnapshotJobChangePage, json: bool) -> Result<(), Box
         }
     }
     output.flush()?;
-    Ok(())
-}
-
-/// Write a metadata, migration, snapshot, or persisted-job report and flush output.
-///
-/// # Arguments
-///
-/// * `report` — borrowed `&serde_json::Value` containing the serialized report.
-/// * `title` — `&str` heading describing the verified report's scope in text mode.
-/// * `json` — `bool` selecting pretty JSON when true, or labeled text when false.
-///
-/// # Returns
-///
-/// `Result<(), Box<dyn Error>>`, with `Ok(())` after a successful flush.
-///
-/// # Errors
-///
-/// Propagates serialization and stdout write/flush errors. Output may already
-/// contain part of the report when an I/O error occurs.
-fn print_report(report: &serde_json::Value, title: &str, json: bool) -> Result<(), Box<dyn Error>> {
-    let mut output = std::io::stdout().lock();
-    if json {
-        writeln!(output, "{}", serde_json::to_string_pretty(report)?)?;
-    } else {
-        writeln!(output, "{title}")?;
-        if let serde_json::Value::Object(fields) = report {
-            print_fields(&mut output, fields, 2)?;
-        }
-    }
-    output.flush()?;
-    Ok(())
-}
-
-/// Print nested report objects as indented labels for people reading the terminal.
-///
-/// For example, capacity thresholds appear under `assessment` on separate lines
-/// instead of being squeezed into a JSON object inside the text report.
-///
-/// # Arguments
-///
-/// * `output` — mutable borrowed writer receiving the report's text fields.
-/// * `fields` — borrowed JSON object produced from a typed local storage report.
-/// * `indent` — `usize` number of leading spaces for fields at this object level.
-///
-/// # Returns
-///
-/// `std::io::Result<()>` after writing this object and its nested objects.
-///
-/// # Errors
-///
-/// Propagates write failures; output may already contain part of the report.
-fn print_fields(
-    output: &mut impl Write,
-    fields: &serde_json::Map<String, serde_json::Value>,
-    indent: usize,
-) -> std::io::Result<()> {
-    for (name, value) in fields {
-        write!(output, "{blank:indent$}{name}:", blank = "")?;
-        match value {
-            serde_json::Value::Object(nested) => {
-                writeln!(output)?;
-                print_fields(output, nested, indent + 2)?;
-            }
-            serde_json::Value::String(text) => writeln!(output, " {text}")?,
-            other => writeln!(output, " {other}")?,
-        }
-    }
     Ok(())
 }
