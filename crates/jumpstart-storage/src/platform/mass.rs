@@ -40,6 +40,14 @@ struct Operation {
     completed: bool,
 }
 
+/// The verified placement and hash that authorize one immutable range read.
+struct ChunkRecord {
+    primary: [u8; 16],
+    length: i64,
+    blob: [u8; 32],
+    digest: [u8; 32],
+}
+
 /// Recovery manifest for one file. Fields are emitted in canonical key order.
 #[derive(Serialize)]
 struct Manifest<'a> {
@@ -232,7 +240,7 @@ impl AdminMetadata {
     /// Read one verified chunk from a specific live file version and its home primary.
     pub fn mass_read(&self, item: ItemId, version: VersionId, index: u32) -> Result<Vec<u8>> {
         self.require_mass()?;
-        let record: Option<([u8; 16], i64, [u8; 32], [u8; 32])> = self
+        let record = self
             .source
             .connection
             .query_row(
@@ -249,18 +257,25 @@ impl AdminMetadata {
                     version.as_uuid().as_bytes().as_slice(),
                     index
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok(ChunkRecord {
+                        primary: row.get(0)?,
+                        length: row.get(1)?,
+                        blob: row.get(2)?,
+                        digest: row.get(3)?,
+                    })
+                },
             )
             .optional()?;
-        let (primary, length, blob, expected) =
-            record.ok_or(StorageError::Mass("the file chunk is unavailable"))?;
-        let (directory, _) = self.registered_primary_root(Uuid::from_bytes(primary), false)?;
+        let record = record.ok_or(StorageError::Mass("the file chunk is unavailable"))?;
+        let (directory, _) =
+            self.registered_primary_root(Uuid::from_bytes(record.primary), false)?;
         content::read_chunk(
             &directory,
-            BlobId::from_bytes(blob),
-            counter(length)?.value(),
+            BlobId::from_bytes(record.blob),
+            counter(record.length)?.value(),
             index,
-            BlobId::from_bytes(expected),
+            BlobId::from_bytes(record.digest),
         )
     }
 
