@@ -13,7 +13,8 @@ use jumpstart_domain::{ClientInstanceId, Owner, ServerId};
 use thiserror::Error;
 use uuid::Uuid;
 
-const LIFETIME: Duration = Duration::from_secs(5 * 60);
+/// Maximum time for the LAN listener and its operator approval.
+pub const PAIRING_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 const SOURCE_FAILURE_LIMIT: usize = 5;
 const WINDOW_FAILURE_LIMIT: usize = 20;
@@ -78,6 +79,8 @@ pub enum PairingError {
 pub struct PairingWindow {
     opened: Instant,
     pairing_id: Uuid,
+    server_id: ServerId,
+    server_key: [u8; 32],
     token_digest: Option<blake3::Hash>,
     pending: Option<PendingPairing>,
     failures: Vec<(IpAddr, Instant)>,
@@ -102,6 +105,8 @@ impl PairingWindow {
             Self {
                 opened: now,
                 pairing_id,
+                server_id,
+                server_key,
                 token_digest: Some(blake3::hash(&token)),
                 pending: None,
                 failures: Vec::new(),
@@ -149,7 +154,7 @@ impl PairingWindow {
         }
 
         let request_id = Uuid::new_v4();
-        let transcript = transcript(self.pairing_id, request_id, &observation);
+        let transcript = transcript(self, expected, request_id, &observation);
         self.token_digest = None;
         self.pending = Some(PendingPairing {
             request_id,
@@ -192,10 +197,17 @@ impl PairingWindow {
         Ok(())
     }
 
+    /// Return whether this invitation still has time and failure budget.
+    pub fn is_open(&self, now: Instant) -> bool {
+        self.check_open(now).is_ok()
+    }
+
     /// Reject expired windows, backwards fixture clocks, and exhausted budgets.
     fn check_open(&self, now: Instant) -> Result<(), PairingError> {
         match now.checked_duration_since(self.opened) {
-            Some(age) if age < LIFETIME && self.failures.len() < WINDOW_FAILURE_LIMIT => Ok(()),
+            Some(age) if age < PAIRING_LIFETIME && self.failures.len() < WINDOW_FAILURE_LIMIT => {
+                Ok(())
+            }
             _ => Err(PairingError::Closed),
         }
     }
@@ -205,10 +217,18 @@ impl PairingWindow {
 ///
 /// Returns a digest for local comparison. Variable-length fields are prefixed
 /// with their byte lengths, so shifting bytes between fields changes the digest.
-fn transcript(window: Uuid, request: Uuid, observation: &PairingObservation) -> blake3::Hash {
+fn transcript(
+    window: &PairingWindow,
+    token_digest: blake3::Hash,
+    request: Uuid,
+    observation: &PairingObservation,
+) -> blake3::Hash {
     let mut hash = blake3::Hasher::new();
     hash.update(b"jumpstart pairing approval v1\0");
-    hash.update(window.as_bytes());
+    hash.update(window.pairing_id.as_bytes());
+    hash.update(window.server_id.as_uuid().as_bytes());
+    hash.update(&window.server_key);
+    hash.update(token_digest.as_bytes());
     hash.update(request.as_bytes());
     hash.update(&observation.public_key);
     hash.update(&observation.client_nonce);
