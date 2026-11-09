@@ -745,6 +745,8 @@ The Linux local Mass service uses the protected daemon socket, the shared catalo
 
 The local regression checks require a changed chunk to fail before bytes are returned, a conflicting immutable object to remain intact, a file version to become visible with its matching placement, and an unregistered primary to refuse a socket upload. The publication fixture uses scratch storage for fault injection. Physical-volume and distributed-client release gates remain in §§4, 6, and 17.
 
+The local file-browser preview serves a loopback session capability and uses the protected socket for listing, search, folder creation, imports, and verified downloads. Its workspace uses the Drive-style interaction model from §3.3, with breadcrumbs, explicit primary selection, and list and grid layouts. Browser verification covers folder navigation, creation, filename search, details, layout switching, and the mount entry point using a fixture. The HTTP process fixture checks host and capability refusals against the real daemon. The packaged clients and authenticated remote transports keep their existing release gates.
+
 ### 10.1 Download State and Provider Contracts
 
 `RemoteSource` exposes `probe -> identity/capabilities/input_needed`, `fetch(range_or_piece)`, `verify`, and `refresh_identity`. `remote_download` stores a redacted source locator, secret-store references, selected files/destination, source identity, checked byte ranges/pieces, retry budget, worker version, and commit receipt.
