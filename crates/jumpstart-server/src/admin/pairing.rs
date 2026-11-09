@@ -528,7 +528,7 @@ fn sign_grant(
     let payload = serde_json::to_string(&body)?;
     let mut signed = b"jumpstart pairing receipt v1\0".to_vec();
     signed.extend_from_slice(payload.as_bytes());
-    Ok(json!({"payload": payload, "signature": key.sign(&signed).to_string()}))
+    Ok(json!({"payload": payload, "signature": key.sign(&signed)}))
 }
 
 /// Format the safe local grant summary without exposing the network receipt.
@@ -654,7 +654,7 @@ mod tests {
             assert_eq!(result["status"], "approved");
             let receipt = &result["receipt"];
             let signature: iroh::Signature =
-                receipt["signature"].as_str().unwrap().parse().unwrap();
+                serde_json::from_value(receipt["signature"].clone()).unwrap();
             let mut bytes = b"jumpstart pairing receipt v1\0".to_vec();
             bytes.extend_from_slice(receipt["payload"].as_str().unwrap().as_bytes());
             server_key.public().verify(&bytes, &signature).unwrap();
