@@ -23,6 +23,7 @@ The [Mass preview guide](MASS.md) covers the separate file-browser helper.
 | `health` | Queries the running Linux daemon, or checks an offline root with `--metadata-root PATH`. |
 | `snapshot create` | Copies that folder's bookkeeping database into a new checked bundle. |
 | `snapshot verify` | Checks an existing bundle. The original metadata folder is not required. |
+| `snapshot restore` | Recovers a verified metadata bundle into a new offline development root. |
 | `migrate` | Upgrades older metadata after saving a verified recovery copy; see [migration instructions](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade). |
 | `jobs` | Enqueues/runs snapshot requests, reads their status/history/change pages, cancels queued requests, and recovers interrupted work; see [job commands](../../CONTRIBUTING.md#persisted-local-snapshot-jobs). |
 | `jobs run-next` | Runs one oldest queued snapshot; JSON returns a saved `job` or `null` for an empty queue. A saved failed outcome exits unsuccessfully. |
@@ -36,7 +37,7 @@ The [Mass preview guide](MASS.md) covers the separate file-browser helper.
 | `devices revoke DEVICE_ID` | Persists revocation of the selected installation. |
 | `update plan` | Verifies a signed Linux release directory and reports compatibility with the running daemon. |
 
-`init`, `migrate`, and `snapshot create` require `--development`. Job enqueue/run/run-next/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
+`init`, `migrate`, `snapshot create`, and `snapshot restore` require `--development`. Job enqueue/run/run-next/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
 
 A successful command prints its report on stdout and exits successfully. A failure prints `error:` and the reason on stderr and exits with a failure status. Failures normally leave stdout empty. A snapshot job that records `Failed` prints that saved outcome, and `health` prints any available evidence before reporting an incomplete check. Add `--json` for JSON. `jobs changes` uses compact JSON to preserve its response byte bound, while other commands use pretty-printed JSON. Without `--json`, the first line is a heading and the fields follow, indented two spaces per level.
 
@@ -155,7 +156,7 @@ Heading: `Verified local metadata snapshot (not a full backup):`
 | `database_bytes` | Decimal string, the exact length of `metadata.sqlite` |
 | `database_hash` | `b3:` followed by 64 lowercase hex digits |
 
-`bootstrap_metadata` covers initial server bookkeeping in schemas 1/2. Schemas 3/4 use `metadata` and include saved snapshot jobs and their changes. Schema 4 also includes the shared catalog and the Worlds recovery index. The bundle excludes media bytes, Worlds world files and recovery bundles, secrets, and logs. There is no command here that turns the bundle back into a metadata folder or a running server. Keeping the bundle on the same disk as the source does not protect either copy if that disk fails.
+`bootstrap_metadata` covers initial server bookkeeping in schemas 1/2. Schemas 3/4 use `metadata` and include saved snapshot jobs and their changes. Schema 4 also includes the shared catalog and the Worlds recovery index. The bundle excludes media bytes, Worlds world files and recovery bundles, secrets, and logs. Keeping the bundle on the same disk as the source does not protect either copy if that disk fails.
 
 ## `snapshot verify`
 
@@ -171,6 +172,28 @@ cargo run -p jumpstart-server -- snapshot verify --snapshot-root /tmp/jumpstart-
 Verification reads `snapshot.json` and `metadata.sqlite` and prints the same report as `snapshot create`. It still succeeds after the original metadata folder is deleted. It does not modify the bundle. A missing bundle is not created. A damaged or extra file fails the command and is left as it was.
 
 Heading: `Verified local metadata snapshot (not a full backup):`
+
+## `snapshot restore`
+
+Run `snapshot verify --snapshot-root PATH --json` first and copy the reported
+`database_hash`. Then run the restore on Linux or macOS.
+
+```sh
+jumpstart-server snapshot restore --snapshot-root /path/to/backup \
+  --output /path/to/new-metadata-root --expected-hash 'b3:...' --development --json
+```
+
+Choose a new output directory whose parent exists, outside any existing
+metadata root and the source backup. The command checks the supplied digest,
+rechecks the staged database, and publishes the new root without replacing any
+entry. It works after the original source is gone. If preparation fails,
+any private staging is retained and named in the error.
+
+The report includes the source snapshot and the newly verified metadata root.
+The new server ID and sync epoch identify an independent authority.
+`archived_snapshot_jobs` counts jobs retained only in the original backup.
+The recovered job queue starts empty at the captured position. A snapshot
+that records registered storage requires a complete recovery generation.
 
 ## `jobs`
 

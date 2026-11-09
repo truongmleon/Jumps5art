@@ -164,7 +164,7 @@ pub enum SnapshotScope {
 ///
 /// Size and fingerprint checks detect changed artifact bytes against the manifest;
 /// they do not authenticate an untrusted supplier. Constructing a report does not
-/// run verification. No restore or activation operation is provided.
+/// run verification or activate the snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SnapshotReport {
     /// Absolute path of the verified snapshot directory.
@@ -190,6 +190,18 @@ pub struct SnapshotReport {
     pub database_bytes: Counter,
     /// BLAKE3 fingerprint of the verified standalone SQLite artifact.
     pub database_hash: BlobId,
+}
+
+/// Describes a metadata-only restore to a new independent development root.
+///
+/// `source` names the retained original snapshot. `metadata` has the newly
+/// assigned authority and epoch. `archived_snapshot_jobs` counts old local jobs
+/// that remain inspectable in the source database and cannot run on the new root.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MetadataRestoreReport {
+    pub source: SnapshotReport,
+    pub metadata: MetadataReport,
+    pub archived_snapshot_jobs: Counter,
 }
 
 /// Describes an explicit metadata upgrade and where its prior state was preserved.
@@ -363,6 +375,9 @@ pub enum StorageError {
     /// Snapshot creation could not finish within its bounded copy workflow.
     #[error("metadata snapshot could not be completed: {0}")]
     SnapshotUnavailable(&'static str),
+    /// A verified metadata bundle cannot be restored under the requested scope.
+    #[error("metadata recovery refused: {0}")]
+    InvalidMetadataRestore(&'static str),
     /// The retained journal or its recovery snapshot disagrees with this upgrade.
     #[error("invalid metadata migration: {0}")]
     InvalidMigration(&'static str),
@@ -510,6 +525,21 @@ pub fn create_snapshot(root: &Path, output: &Path) -> Result<SnapshotReport> {
 /// contents, unsafe paths, and unsupported platforms. It does not repair failures.
 pub fn verify_snapshot(root: &Path) -> Result<SnapshotReport> {
     platform::verify_snapshot(root)
+}
+
+/// Restore a verified metadata snapshot into a new offline development root.
+///
+/// `snapshot_root` selects the retained backup and `expected_hash` is its
+/// inspected database digest. `output` must be absent and outside any source
+/// snapshot or metadata root. The restore creates a new authority and epoch,
+/// and keeps the old job history in the untouched source backup. Snapshots
+/// with registered storage require a complete recovery generation.
+pub fn restore_metadata_snapshot(
+    snapshot_root: &Path,
+    output: &Path,
+    expected_hash: BlobId,
+) -> Result<MetadataRestoreReport> {
+    platform::restore_metadata_snapshot(snapshot_root, output, expected_hash)
 }
 
 /// Upgrade offline metadata after saving a verified copy of its previous database.
@@ -666,8 +696,9 @@ mod platform;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
     use super::{
-        Counter, JobId, JobState, MetadataReport, MigrationReport, Path, PositiveCounter, Result,
-        SnapshotJob, SnapshotJobChangePage, SnapshotReport, StorageError, SyncEpoch,
+        BlobId, Counter, JobId, JobState, MetadataReport, MetadataRestoreReport, MigrationReport,
+        Path, PositiveCounter, Result, SnapshotJob, SnapshotJobChangePage, SnapshotReport,
+        StorageError, SyncEpoch,
     };
 
     /// Refuse queue writes without touching `root` or `output` (`&Path`).
@@ -802,6 +833,15 @@ mod platform {
     ///
     /// `Result<SnapshotReport>`, always `Err(StorageError::UnsupportedPlatform)`.
     pub fn verify_snapshot(_root: &Path) -> Result<SnapshotReport> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Report that local metadata restoration needs a supported filesystem platform.
+    pub fn restore_metadata_snapshot(
+        _snapshot_root: &Path,
+        _output: &Path,
+        _expected_hash: BlobId,
+    ) -> Result<MetadataRestoreReport> {
         Err(StorageError::UnsupportedPlatform)
     }
 }
