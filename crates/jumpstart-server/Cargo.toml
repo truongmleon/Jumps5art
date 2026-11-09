@@ -15,20 +15,24 @@ jumpstart-storage.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+blake3.workspace = true
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
+jumpstart-protocol.workspace = true
+serde.workspace = true
+tokio = { version = "1.53", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+zeroize = "1.9"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 bip39 = "2.2"
 fuser = "=0.18.0"
-blake3.workspace = true
 iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 iroh-base = "1.0"
 n0-watcher = "1"
 noq-udp = "1.4"
 socket2 = { version = "0.6", features = ["all"] }
-jumpstart-protocol.workspace = true
 rustix = { workspace = true, features = ["net", "process"] }
-serde.workspace = true
-tokio = { version = "1.53", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 
 [dev-dependencies]
 tempfile.workspace = true

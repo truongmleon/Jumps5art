@@ -30,3 +30,10 @@ The mount is private to its owner and read-only. It lists the same Mass folders 
 The desktop release still needs the writable shadow-file journal, indexer and preview gates, paired remote access, macOS File Provider, and Windows WinFsp.
 
 This slice uses the local catalog and socket. Paired remote file access, provider downloads, shared application views, and native desktop packaging have separate delivery gates.
+
+
+## Paired Mass endpoint
+
+On Linux, start the daemon with `serve --mass-listen SERVER_IP:PORT` in addition to its existing metadata and socket arguments. Pick a concrete address and a UDP port separate from the temporary pairing port. The regular listener and pairing use the same root-managed `jumpstart-iroh.key` systemd credential. In the service's address-family drop-in allow `AF_UNIX AF_NETLINK` and the IP families used by the listener and pairing. Configure the host firewall to allow the selected ports only from the intended network.
+
+The paired endpoint offers read-only Mass catalog and verified file ranges for the exact approved installation. The Finder helper dials a configured address and pins the server's public key and authority ID. The Linux browser and FUSE mount continue to use the local socket.

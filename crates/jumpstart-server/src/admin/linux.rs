@@ -8,6 +8,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fs,
+    net::SocketAddr,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -32,7 +33,10 @@ use tokio::{
 use uuid::Uuid;
 
 use super::hardware::{Monitor, POLL_INTERVAL};
-use super::pairing::PairingAdmin;
+use super::{
+    mass_network,
+    pairing::{PairingAdmin, read_credential},
+};
 
 const PLAN_LIFETIME: Duration = Duration::from_secs(600);
 const MAX_PLANS: usize = 16;
@@ -85,7 +89,11 @@ impl Drop for BoundSocket {
 /// The daemon refuses to run as root. A busy metadata root is already owned by
 /// another operation. Other startup storage errors can be reported through the
 /// local socket as recovery evidence without initializing any new metadata.
-pub(super) fn serve(root: &Path, socket: &Path) -> Result<(), Box<dyn Error>> {
+pub(super) fn serve(
+    root: &Path,
+    socket: &Path,
+    mass_listen: Option<SocketAddr>,
+) -> Result<(), Box<dyn Error>> {
     let uid = geteuid();
     if uid.is_root() {
         return Err("run the daemon as its dedicated service user".into());
@@ -100,7 +108,7 @@ pub(super) fn serve(root: &Path, socket: &Path) -> Result<(), Box<dyn Error>> {
     Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(accept(socket, uid.as_raw(), root, metadata))
+        .block_on(accept(socket, uid.as_raw(), root, metadata, mass_listen))
 }
 
 /// Bind and handle one request at a time, with a deadline on each connection.
@@ -113,6 +121,7 @@ async fn accept(
     uid: u32,
     root: &Path,
     mut metadata: Result<AdminMetadata, StorageError>,
+    mass_listen: Option<SocketAddr>,
 ) -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -124,6 +133,17 @@ async fn accept(
         inode: entry.ino(),
     };
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+    let mut mass_events = match mass_listen {
+        Some(address) => {
+            metadata
+                .as_ref()
+                .map_err(ToString::to_string)?
+                .mass_primaries()?;
+            mass_network::listen(address, read_credential()?).await?
+        }
+        None => mass_network::disabled(),
+    };
+    let mut sessions = mass_network::Sessions::default();
     let mut plans = VolumePlans::default();
     let mut hardware = Monitor::new();
     let (mut pairing, mut pairing_events) = PairingAdmin::new();
@@ -134,6 +154,7 @@ async fn accept(
             _ = interrupt.recv() => return Ok(()),
             _ = poll.tick() => hardware.refresh(&metadata),
             Some(event) = pairing_events.recv() => pairing.receive(&metadata, event).await,
+            Some(event) = mass_events.recv() => sessions.receive(&metadata, event),
             accepted = listener.accept() => {
                 let (mut stream, _) = accepted?;
                 let Ok(peer) = socket_peercred(&stream) else {
@@ -145,7 +166,7 @@ async fn accept(
                 tokio::select! {
                     _ = terminate.recv() => return Ok(()),
                     _ = interrupt.recv() => return Ok(()),
-                    _ = timeout(DEADLINE, reply(&mut stream, root, &mut metadata, &mut plans, &mut hardware, &mut pairing)) => {}
+                    _ = timeout(DEADLINE, reply(&mut stream, root, &mut metadata, &mut plans, &mut hardware, &mut pairing, &mut sessions)) => {}
                 }
             }
         }
@@ -164,6 +185,7 @@ async fn reply(
     plans: &mut VolumePlans,
     hardware: &mut Monitor,
     pairing: &mut PairingAdmin,
+    sessions: &mut mass_network::Sessions,
 ) -> Result<(), Box<dyn Error>> {
     let request: Request = read(stream).await?;
     let reply = if request.version != ADMIN_VERSION {
@@ -296,6 +318,7 @@ async fn reply(
                 metadata.as_mut().map_err(|error| &*error),
                 |lease: &mut AdminMetadata| {
                     let device = lease.revoke_device(device_id)?;
+                    sessions.revoke(device_id);
                     Ok(json!({"scope": "device_revocation", "device": device}))
                 },
             ),

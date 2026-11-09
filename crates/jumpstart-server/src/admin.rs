@@ -12,6 +12,8 @@ mod linux;
 #[cfg(target_os = "linux")]
 mod mass;
 #[cfg(target_os = "linux")]
+mod mass_network;
+#[cfg(target_os = "linux")]
 mod pairing;
 
 pub(super) use jumpstart_server::SOCKET_PATH;
@@ -20,12 +22,16 @@ pub(super) use jumpstart_server::SOCKET_PATH;
 ///
 /// `root` selects existing metadata and `socket` selects a private runtime path.
 /// Returns an error for unsupported platforms, setup failures, or listener errors.
-pub(super) fn serve(root: &Path, socket: &Path) -> Result<(), Box<dyn Error>> {
+pub(super) fn serve(
+    root: &Path,
+    socket: &Path,
+    mass_listen: Option<std::net::SocketAddr>,
+) -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
-    return linux::serve(root, socket);
+    return linux::serve(root, socket, mass_listen);
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (root, socket);
+        let _ = (root, socket, mass_listen);
         Err("the administration daemon requires Linux".into())
     }
 }

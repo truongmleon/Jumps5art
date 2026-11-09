@@ -161,6 +161,26 @@ impl AdminMetadata {
         )?)
     }
 
+    /// Resolve a paired Mass instance using the transport's authenticated key.
+    pub fn active_mass_device(
+        &self,
+        key: &[u8; 32],
+        instance: ClientInstanceId,
+    ) -> Result<Option<DeviceId>> {
+        self.require_device_catalog()?;
+        let id = self.source.connection.query_row(
+            "SELECT d.device_id FROM devices d JOIN client_instances c ON c.device_id=d.device_id
+             WHERE d.public_key=?1 AND c.instance_id=?2 AND d.app='mass' AND d.revoked_at_ms IS NULL",
+            params![key.as_slice(), instance.as_uuid().as_bytes().as_slice()],
+            |row| row.get::<_, [u8; 16]>(0),
+        ).optional()?;
+        id.map(|id| {
+            DeviceId::from_uuid(Uuid::from_bytes(id))
+                .map_err(|_| StorageError::Integrity("invalid Mass device ID"))
+        })
+        .transpose()
+    }
+
     /// Return an active pairing receipt only for a transport-authenticated key.
     pub fn device_receipt(&self, key: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         self.require_device_catalog()?;
