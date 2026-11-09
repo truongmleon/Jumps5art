@@ -605,7 +605,7 @@ fn current_schema_requires_exact_ledger_and_catalog_definitions() {
         "CREATE INDEX unexpected_job_index ON jobs(updated_at_ms)",
         "DELETE FROM schema_migrations WHERE version=3",
         "DELETE FROM schema_migrations WHERE version=4",
-        "DELETE FROM schema_migrations WHERE version=5",
+        "DELETE FROM schema_migrations WHERE version=6",
         "DROP INDEX mass_live_sibling_names",
         "ALTER TABLE media_marker ADD COLUMN surprise TEXT",
     ] {

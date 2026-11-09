@@ -9,7 +9,7 @@ use crate::{Result, StorageError};
 
 pub(super) const MIGRATION_NAME: &str = "local_admin_registration";
 
-const MAINTENANCE: &str = "CREATE TABLE local_admin_state (
+pub(super) const MAINTENANCE: &str = "CREATE TABLE local_admin_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     maintenance INTEGER NOT NULL CHECK (maintenance IN (0, 1))
 ) STRICT";

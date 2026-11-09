@@ -40,6 +40,7 @@ mod migration;
 mod schema3;
 mod schema4;
 mod schema5;
+mod schema6;
 mod snapshot;
 #[cfg(target_os = "linux")]
 mod worlds;
@@ -59,7 +60,7 @@ pub(super) use snapshot::{create_snapshot, verify_snapshot};
 #[cfg(target_os = "linux")]
 mod registration;
 #[cfg(target_os = "linux")]
-pub use registration::{RegisteredPrimary, RegisteredVolumeHealth, VolumeRegistrationPlan};
+pub use registration::{RegisteredVolume, RegisteredVolumeHealth, VolumeRegistrationPlan};
 
 const MIGRATION_NAME: &str = "initial_metadata";
 const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version INTEGER PRIMARY KEY CHECK (version > 0),\n    name TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL\n) STRICT";
@@ -491,6 +492,7 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     apply_schema3(&mut connection)?;
     schema4::apply(&mut connection)?;
     schema5::apply(&mut connection)?;
+    schema6::apply(&mut connection)?;
     verify_database(&connection, marker)?;
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -800,7 +802,13 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
     }
     if version >= 5 {
         expected_migrations.push((5, schema5::MIGRATION_NAME.to_owned(), schema5::checksum()));
-        schema5::verify_state(connection)?;
+        if version == 5 {
+            schema5::verify_state(connection)?;
+        }
+    }
+    if version >= 6 {
+        expected_migrations.push((6, schema6::MIGRATION_NAME.to_owned(), schema6::checksum()));
+        schema6::verify_state(connection)?;
     }
     if migrations != expected_migrations {
         return Err(StorageError::MigrationMismatch);
@@ -849,8 +857,10 @@ fn verify_schema_objects(connection: &Connection, version: u32) -> Result<()> {
     if version >= 4 {
         expected.extend(schema4::statements());
     }
-    if version >= 5 {
-        expected.extend(schema5::statements());
+    match version {
+        5 => expected.extend(schema5::statements()),
+        6.. => expected.extend(schema6::statements()),
+        _ => {}
     }
     expected.sort_unstable();
     let actual = connection
