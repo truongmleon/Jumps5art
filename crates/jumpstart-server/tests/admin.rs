@@ -574,20 +574,34 @@ fn mass_browser_rejects_missing_capability_and_rebound_host() {
     assert!(authorized.contains("\"items\":[]"));
 }
 
-/// Exercise kernel directory enumeration and read-only policy when FUSE3 is available.
+/// Exercise the kernel mount and, when supplied, the full registered-primary import.
 #[test]
 fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
     use jumpstart_domain::ItemId;
+    use jumpstart_server::{
+        local_admin::{Command as AdminCommand, call},
+        mass_client::MassClient,
+    };
+    use jumpstart_storage::{
+        VolumeRole,
+        mass::{MASS_CHUNK, MassDestination},
+    };
     use rusqlite::{Connection, params};
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     use uuid::Uuid;
 
-    if geteuid().is_root()
-        || !Path::new("/dev/fuse").exists()
-        || !Command::new("fusermount3")
+    let real_primary = std::env::var_os("JUMPSTART_MASS_TEST_PRIMARY");
+    let fuse_available = !geteuid().is_root()
+        && Path::new("/dev/fuse").exists()
+        && Command::new("fusermount3")
             .arg("--version")
             .output()
-            .is_ok_and(|output| output.status.success())
-    {
+            .is_ok_and(|output| output.status.success());
+    if !fuse_available {
+        assert!(
+            real_primary.is_none(),
+            "the full Mass integration test requires Linux FUSE3"
+        );
         eprintln!("Linux FUSE3 device or unprivileged mount helper is unavailable");
         return;
     }
@@ -598,22 +612,70 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
     let mountpoint = parent.path().join("drive");
     fs::create_dir(&mountpoint).unwrap();
     jumpstart_storage::initialize(&root).unwrap();
-    let db = Connection::open(root.join("database/jumpstart.sqlite")).unwrap();
-    let primary = Uuid::new_v4();
-    db.execute(
-        "INSERT INTO volumes VALUES (?1,'primary',?2,'fixture','unknown',NULL)",
-        params![
-            Uuid::new_v4().as_bytes().as_slice(),
-            primary.as_bytes().as_slice()
-        ],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO items VALUES (?1,?2,'mass','folder',?3,NULL,'Project briefs','live',NULL,NULL,1)",
-        params![ItemId::new().as_uuid().as_bytes().as_slice(), Uuid::new_v4().as_bytes().as_slice(), primary.as_bytes().as_slice()],
-    ).unwrap();
-    drop(db);
+    if real_primary.is_none() {
+        let db = Connection::open(root.join("database/jumpstart.sqlite")).unwrap();
+        let primary = Uuid::new_v4();
+        db.execute(
+            "INSERT INTO volumes VALUES (?1,'primary',?2,'fixture','unknown',NULL)",
+            params![
+                Uuid::new_v4().as_bytes().as_slice(),
+                primary.as_bytes().as_slice()
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO items VALUES (?1,?2,'mass','folder',?3,NULL,'Project briefs','live',NULL,NULL,1)",
+            params![ItemId::new().as_uuid().as_bytes().as_slice(), Uuid::new_v4().as_bytes().as_slice(), primary.as_bytes().as_slice()],
+        ).unwrap();
+    }
     let _daemon = start(&root, &socket);
+    let bytes = real_primary.map(|path| {
+        let plan = call(
+            &socket,
+            AdminCommand::VolumePreflight {
+                path: path.into(),
+                role: VolumeRole::Primary,
+            },
+        )
+        .unwrap();
+        let plan_id = serde_json::from_value(plan["plan_id"].clone()).unwrap_or_else(|_| {
+            panic!("the scratch primary was refused: {}", plan["apply_blocker"])
+        });
+        let volume = call(
+            &socket,
+            AdminCommand::VolumeApply {
+                plan_id,
+                acknowledge_unverified_encryption: true,
+            },
+        )
+        .unwrap();
+        let primary_id = serde_json::from_value(volume["primary"]["primary_id"].clone()).unwrap();
+        let client = MassClient::new(socket.clone());
+        let folder = client
+            .create_folder(MassDestination {
+                request_id: Uuid::new_v4(),
+                primary_id,
+                parent: None,
+                name: "Project briefs".into(),
+            })
+            .unwrap();
+        let request_id = Uuid::new_v4();
+        let destination = || MassDestination {
+            request_id,
+            primary_id,
+            parent: Some(folder.id),
+            name: "Sample.bin".into(),
+        };
+        let mut bytes = vec![b'A'; MASS_CHUNK];
+        bytes.extend_from_slice(b"verified-tail");
+        let imported = client.import(destination(), &bytes).unwrap();
+        assert_eq!(
+            client.import(destination(), &bytes).unwrap().id,
+            imported.id
+        );
+        assert_eq!(client.list(Some(folder.id), None).unwrap().items.len(), 1);
+        bytes
+    });
     let mut helper = TestDaemon(
         Command::new(env!("CARGO_BIN_EXE_mass"))
             .arg("mount")
@@ -624,7 +686,6 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
             .spawn()
             .unwrap(),
     );
-    use std::io::{BufRead, BufReader};
     let mut line = String::new();
     BufReader::new(helper.0.stdout.take().unwrap())
         .read_line(&mut line)
@@ -632,6 +693,18 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
     assert!(line.starts_with("Mounted Mass read-only at"));
     assert!(mountpoint.join("Project briefs").is_dir());
     assert_eq!(fs::read_dir(&mountpoint).unwrap().count(), 1);
+    if let Some(bytes) = bytes {
+        let mut mounted = fs::File::open(mountpoint.join("Project briefs/Sample.bin")).unwrap();
+        mounted
+            .seek(SeekFrom::Start((MASS_CHUNK - 3) as u64))
+            .unwrap();
+        let mut tail = Vec::new();
+        mounted.read_to_end(&mut tail).unwrap();
+        assert_eq!(tail, bytes[MASS_CHUNK - 3..]);
+        eprintln!(
+            "verified registered-primary import, replay, and mounted read through the Linux kernel"
+        );
+    }
     let error = fs::create_dir(mountpoint.join("unexpected")).unwrap_err();
     assert_eq!(
         error.raw_os_error(),
