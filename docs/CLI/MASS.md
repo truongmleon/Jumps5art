@@ -73,7 +73,7 @@ Use `--unsigned` for a compile and bundle check without signing materials. Finde
 2. Paste that invitation into Mass Finder and enter the **regular Mass address**, which uses the port passed to `serve --mass-listen`.
 3. Compare the six words with `jumpstart-server pair pending --json`. Use the exact approval command shown after reviewing the matching request.
 4. In Mass Finder, choose **Open in Finder**. The registered domain is called **Mass**.
-5. Right-click a file and choose **Download from Mass** before opening it. Ordinary placeholder fetches only use an explicitly downloaded and verified local file. The helper stages one file at a time and supports up to 32 MiB per file.
+5. Right-click a file and choose **Download from Mass** before opening it. Ordinary placeholder fetches only use an explicitly downloaded and verified local file. Each action accepts one file of up to 32 MiB.
 
 Use **Refresh Finder** to refresh the root catalog. **Remove and forget Mac** removes the native domain and its local credential. Revoke that installation on the server with `jumpstart-server devices revoke DEVICE_ID` to cancel its active Mass sessions and prevent reconnects.
 

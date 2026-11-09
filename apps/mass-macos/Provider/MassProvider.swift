@@ -207,14 +207,15 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
         return FinderItem(entry: entry, display: display)
     }
 
-    /// Verify an explicit download and retain a single ready cache record.
+    /// Verify an explicit download and record it separately for this Finder item.
     private func prepareDownload(_ id: NSFileProviderItemIdentifier, progress: Progress) throws {
         let item = try entry(id, progress: progress)
         guard let version = item.file?.version_id else {
             throw MassFailure(message: "Select a file. This preview downloads one file at a time.")
         }
         try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
-        let previous = try? loadReady()
+        let recordURL = try readyRecord(for: id)
+        let previous = try? loadReady(at: recordURL)
         let local = UUID()
         let bytes = storage.appendingPathComponent(local.uuidString)
         var published = false
@@ -227,7 +228,7 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
             throw MassFailure(message: "The verified file version changed during download.")
         }
         let record = Ready(entry: verified, local: local)
-        try JSONEncoder().encode(record).write(to: storage.appendingPathComponent("ready.json"), options: .atomic)
+        try JSONEncoder().encode(record).write(to: recordURL, options: .atomic)
         published = true
         if let previous {
             try? FileManager.default.removeItem(at: storage.appendingPathComponent(previous.local.uuidString))
@@ -239,7 +240,8 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
         for id: NSFileProviderItemIdentifier,
         version: NSFileProviderItemVersion?
     ) throws -> (URL, FinderItem) {
-        guard let ready = try? loadReady(), ready.entry.id == id.rawValue,
+        let recordURL = try readyRecord(for: id)
+        guard let ready = try? loadReady(at: recordURL), ready.entry.id == id.rawValue,
               let file = ready.entry.file,
               version == nil || version?.contentVersion == Data(file.version_id.utf8) else {
             throw NSError(
@@ -259,12 +261,22 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
         let item = try finderItem(ready.entry)
         let output = try manager.temporaryDirectoryURL().appendingPathComponent(UUID().uuidString)
         try FileManager.default.copyItem(at: original, to: output)
+        // Finder takes ownership of the handoff copy. Keep the staged copy if
+        // removing its index fails, so a later request can retry the handoff.
+        if (try? FileManager.default.removeItem(at: recordURL)) != nil {
+            try? FileManager.default.removeItem(at: original)
+        }
         return (output, item)
     }
 
-    /// Load the ready record without treating any server text as a local path.
-    private func loadReady() throws -> Ready {
-        try JSONDecoder().decode(Ready.self, from: Data(contentsOf: storage.appendingPathComponent("ready.json")))
+    /// Derive the ready record path from a validated catalog identifier.
+    private func readyRecord(for id: NSFileProviderItemIdentifier) throws -> URL {
+        storage.appendingPathComponent("ready-" + (try checkedID(id)) + ".json")
+    }
+
+    /// Load the item and private local file identifier from its ready record.
+    private func loadReady(at url: URL) throws -> Ready {
+        try JSONDecoder().decode(Ready.self, from: Data(contentsOf: url))
     }
 
     /// Translate transport and cancellation failures to Finder's protocol.
@@ -282,7 +294,7 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
     private static func domainIdentifier(for profile: MassProfile) -> String { "mass-" + profile.server_id }
 }
 
-/// The single explicitly approved file waiting for Finder to materialize it.
+/// An explicitly downloaded file waiting for Finder to materialize it.
 private struct Ready: Codable {
     let entry: MassEntry
     let local: UUID
