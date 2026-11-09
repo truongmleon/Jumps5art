@@ -273,7 +273,7 @@ impl AdminMetadata {
                 "metadata predates the volume journal",
             ));
         }
-        const TARGET_LIMIT: usize = 32;
+        const TARGET_LIMIT: i64 = 32;
         let connection = &self.source.connection;
         let total: i64 = connection.query_row(
             "SELECT count(*) FROM volume_registrations WHERE registered_volume_id IS NOT NULL",
