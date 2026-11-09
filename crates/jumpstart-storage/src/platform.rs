@@ -60,7 +60,9 @@ pub(super) use snapshot::{create_snapshot, verify_snapshot};
 #[cfg(target_os = "linux")]
 mod registration;
 #[cfg(target_os = "linux")]
-pub use registration::{RegisteredVolume, RegisteredVolumeHealth, VolumeRegistrationPlan};
+pub use registration::{
+    RegisteredHardwareTargets, RegisteredVolume, RegisteredVolumeHealth, VolumeRegistrationPlan,
+};
 
 const MIGRATION_NAME: &str = "initial_metadata";
 const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version INTEGER PRIMARY KEY CHECK (version > 0),\n    name TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL\n) STRICT";

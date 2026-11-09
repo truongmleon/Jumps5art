@@ -6,6 +6,8 @@
 use std::{error::Error, path::Path};
 
 #[cfg(target_os = "linux")]
+mod hardware;
+#[cfg(target_os = "linux")]
 mod linux;
 
 pub(super) use jumpstart_server::SOCKET_PATH;

@@ -23,7 +23,9 @@ use crate::{
     capacity::measure_open_directory,
     volume::{
         filesystem_uuid, open_volume_candidate,
-        topology::{metadata_disks, protected_disks, require_disjoint},
+        topology::{
+            HardwareDevice, hardware_devices, metadata_disks, protected_disks, require_disjoint,
+        },
     },
 };
 
@@ -57,6 +59,18 @@ pub struct RegisteredVolumeHealth {
     pub catalog_only: Counter,
     pub unobserved_registered: Counter,
     pub volumes: Vec<VolumeObservation>,
+}
+
+/// A bounded inventory of mounted, identity-checked hardware probe targets.
+pub struct RegisteredHardwareTargets {
+    pub volumes: Vec<VolumeHardwareTarget>,
+    pub omitted_volumes: usize,
+}
+
+/// One volume and either its checked device nodes or a topology refusal.
+pub struct VolumeHardwareTarget {
+    pub volume_id: Uuid,
+    pub devices: Result<Vec<HardwareDevice>>,
 }
 
 /// One registered volume's live observation, tied to its recorded ID and directory.
@@ -246,6 +260,57 @@ impl AdminMetadata {
             unobserved_registered: count((registered - HEALTH_SAMPLE_LIMIT).max(0))?,
             volumes,
         }))
+    }
+
+    /// Return hardware targets from the journal and verify each mounted volume marker.
+    ///
+    /// The caller can poll these devices after dropping its reference to the
+    /// SQLite lease. Refused or disconnected targets are reported separately.
+    pub fn registered_hardware_targets(&self) -> Result<RegisteredHardwareTargets> {
+        self.check_binding()?;
+        if self.report().schema_version < 5 {
+            return Err(StorageError::AdminUnavailable(
+                "metadata predates the volume journal",
+            ));
+        }
+        const TARGET_LIMIT: usize = 32;
+        let connection = &self.source.connection;
+        let total: i64 = connection.query_row(
+            "SELECT count(*) FROM volume_registrations WHERE registered_volume_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT plan_id FROM volume_registrations WHERE registered_volume_id IS NOT NULL
+             ORDER BY root_path LIMIT ?1",
+        )?;
+        let mut rows = statement.query([TARGET_LIMIT])?;
+        let mut volumes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let intent =
+                self.load_intent(Uuid::from_bytes(row.get(0)?))?
+                    .ok_or(StorageError::Integrity(
+                        "registered volume is missing its journal entry",
+                    ))?;
+            volumes.push(VolumeHardwareTarget {
+                volume_id: intent.marker.volume_id,
+                devices: self.volume_hardware_targets(&intent),
+            });
+        }
+        self.check_binding()?;
+        Ok(RegisteredHardwareTargets {
+            omitted_volumes: usize::try_from(total)
+                .unwrap_or(usize::MAX)
+                .saturating_sub(volumes.len()),
+            volumes,
+        })
+    }
+
+    /// Check the volume marker before enumerating the hardware beneath its mount.
+    fn volume_hardware_targets(&self, intent: &Intent) -> Result<Vec<HardwareDevice>> {
+        let (directory, candidate) = self.open_intent(intent)?;
+        verify_marker(&directory, &intent.path, MARKER, &intent.marker)?;
+        hardware_devices(&candidate)
     }
 
     /// Match the mounted marker and measure that same directory's capacity.
