@@ -130,7 +130,7 @@ enum Command {
         #[command(subcommand)]
         command: JobCommand,
     },
-    /// Observe storage or register an approved primary through the daemon.
+    /// Observe storage or register an approved volume through the daemon.
     Storage {
         #[command(subcommand)]
         command: StorageCommand,
@@ -336,7 +336,7 @@ enum StorageCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Apply or retry a previously approved Linux primary registration.
+    /// Apply or retry a previously approved Linux volume registration.
     Apply {
         /// Plan ID returned by storage register --plan.
         plan_id: uuid::Uuid,
@@ -541,7 +541,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             } => (
                 admin::apply_volume(&socket, plan_id, acknowledge_unverified_encryption)?,
                 json,
-                "Registered primary volume:",
+                "Registered storage volume:",
             ),
         },
         Command::Maintenance { command } => {

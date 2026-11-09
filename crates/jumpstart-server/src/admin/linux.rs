@@ -205,7 +205,7 @@ async fn reply(
                 let candidate = inspect_volume_candidate(&path, role, &lease.report().root)?;
                 let evidence = serde_json::to_value(&candidate)?;
                 let (plan_id, apply_blocker) = match lease
-                    .plan_primary(candidate)
+                    .plan_volume(candidate)
                     .and_then(|plan| plans.insert(plan))
                 {
                     Ok(id) => (Some(id), None),
@@ -215,7 +215,9 @@ async fn reply(
                     "scope": "registration_preflight",
                     "candidate": evidence,
                     "encryption": "unknown",
-                    "registered_topology": "not_checked",
+                    "registered_topology": if role == VolumeRole::Backup && plan_id.is_some() {
+                        "separate_kernel_disks"
+                    } else { "unconfirmed" },
                     "plan_id": plan_id,
                     "apply_blocker": apply_blocker,
                     "expires_in_seconds": plan_id.map(|_| PLAN_LIFETIME.as_secs()),
@@ -234,13 +236,20 @@ async fn reply(
                     }
                     plans.prune();
                     let plan = plans.0.get(&plan_id).map(|(_, plan)| plan);
-                    let primary = lease.apply_primary(plan_id, plan)?;
+                    let volume = lease.apply_volume(plan_id, plan)?;
                     plans.0.remove(&plan_id);
-                    Ok(json!({
-                        "scope": "primary_registration",
-                        "plan_id": plan_id,
-                        "primary": primary,
-                    }))
+                    Ok(match volume.role {
+                        VolumeRole::Primary => json!({
+                            "scope": "primary_registration",
+                            "plan_id": plan_id,
+                            "primary": volume,
+                        }),
+                        VolumeRole::Backup => json!({
+                            "scope": "backup_registration",
+                            "plan_id": plan_id,
+                            "backup": volume,
+                        }),
+                    })
                 },
             ),
             Command::Maintenance { enabled } => admin_reply(

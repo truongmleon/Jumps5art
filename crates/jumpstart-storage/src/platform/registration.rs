@@ -1,4 +1,4 @@
-//! Binds an approved Linux directory to a durable primary-volume identity.
+//! Binds an approved Linux directory to a durable volume identity.
 //!
 //! SQLite records what to publish before the directory is modified. The same
 //! plan can resume an interruption between marker publication and catalog
@@ -21,7 +21,10 @@ use super::{AdminMetadata, io};
 use crate::{
     CapacityReport, FORMAT_VERSION, Result, StorageError, VolumeCandidate, VolumeRole,
     capacity::measure_open_directory,
-    volume::{filesystem_uuid, open_volume_candidate},
+    volume::{
+        filesystem_uuid, open_volume_candidate,
+        topology::{metadata_disks, protected_disks, require_disjoint},
+    },
 };
 
 const MARKER: &str = ".jumpstart-volume.json";
@@ -34,14 +37,15 @@ pub struct VolumeRegistrationPlan {
     filesystem: Uuid,
 }
 
-/// A stable primary identity shared by the disk marker and the metadata journal.
+/// Stable server and volume identities shared by the disk marker and the metadata journal.
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RegisteredPrimary {
+pub struct RegisteredVolume {
     pub format_version: u32,
     pub server_id: ServerId,
     pub volume_id: Uuid,
-    pub primary_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_id: Option<Uuid>,
     pub registration_nonce: Uuid,
     pub role: VolumeRole,
 }
@@ -55,10 +59,11 @@ pub struct RegisteredVolumeHealth {
     pub volumes: Vec<VolumeObservation>,
 }
 
-/// One primary's live observation, tied to its recorded ID and directory.
+/// One registered volume's live observation, tied to its recorded ID and directory.
 #[derive(Serialize)]
 pub struct VolumeObservation {
     pub volume_id: Uuid,
+    pub role: VolumeRole,
     pub path: PathBuf,
     #[serde(flatten)]
     pub evidence: VolumeEvidence,
@@ -79,19 +84,14 @@ struct Intent {
     filesystem: Uuid,
     inode: String,
     birth: String,
-    marker: RegisteredPrimary,
+    marker: RegisteredVolume,
     finalized: bool,
 }
 
 impl AdminMetadata {
-    /// Validate read-only preflight evidence and return an eligible primary plan.
-    pub fn plan_primary(&self, candidate: VolumeCandidate) -> Result<VolumeRegistrationPlan> {
+    /// Validate read-only preflight evidence and return an eligible volume plan.
+    pub fn plan_volume(&self, candidate: VolumeCandidate) -> Result<VolumeRegistrationPlan> {
         self.require_registration_writes()?;
-        if candidate.role != VolumeRole::Primary {
-            return Err(StorageError::InvalidVolume(
-                "backup registration requires independent-device verification",
-            ));
-        }
         if let Some(reason) = candidate.blocking_reasons.first() {
             return Err(StorageError::InvalidVolume(reason));
         }
@@ -101,22 +101,23 @@ impl AdminMetadata {
             ));
         }
         let filesystem = filesystem_uuid(&candidate)?;
-        self.check_new_primary(&candidate.path, filesystem)?;
+        self.check_new_volume(&candidate.path, filesystem)?;
+        self.check_topology(&candidate)?;
         Ok(VolumeRegistrationPlan {
             candidate,
             filesystem,
         })
     }
 
-    /// Apply a fresh plan or replay its persisted intent and return the primary IDs.
+    /// Apply a fresh plan or replay its persisted intent and return its assigned IDs.
     ///
     /// The caller must authorize this operation and check the plan's expiry and
     /// encryption acknowledgement before passing it to the storage layer.
-    pub fn apply_primary(
+    pub fn apply_volume(
         &mut self,
         plan_id: Uuid,
         plan: Option<&VolumeRegistrationPlan>,
-    ) -> Result<RegisteredPrimary> {
+    ) -> Result<RegisteredVolume> {
         self.require_registration_writes()?;
         let intent = match self.load_intent(plan_id)? {
             Some(intent) => intent,
@@ -126,7 +127,7 @@ impl AdminMetadata {
                 ))?;
                 let (_, observed) = open_volume_candidate(
                     &plan.candidate.path,
-                    VolumeRole::Primary,
+                    plan.candidate.role,
                     &self.report().root,
                 )?;
                 if observed != plan.candidate || filesystem_uuid(&observed)? != plan.filesystem {
@@ -134,7 +135,8 @@ impl AdminMetadata {
                         "candidate changed since preflight",
                     ));
                 }
-                self.check_new_primary(&observed.path, plan.filesystem)?;
+                self.check_new_volume(&observed.path, plan.filesystem)?;
+                self.check_topology(&observed)?;
                 let intent = Intent {
                     path: observed.path,
                     filesystem: plan.filesystem,
@@ -142,13 +144,13 @@ impl AdminMetadata {
                     birth: observed.directory_birth.ok_or(StorageError::InvalidVolume(
                         "directory birth time is unavailable",
                     ))?,
-                    marker: RegisteredPrimary {
+                    marker: RegisteredVolume {
                         format_version: FORMAT_VERSION,
                         server_id: self.report().server_id,
                         volume_id: Uuid::new_v4(),
-                        primary_id: Uuid::new_v4(),
+                        primary_id: (observed.role == VolumeRole::Primary).then(Uuid::new_v4),
                         registration_nonce: Uuid::new_v4(),
-                        role: VolumeRole::Primary,
+                        role: observed.role,
                     },
                     finalized: false,
                 };
@@ -168,6 +170,7 @@ impl AdminMetadata {
         }
         self.ensure_writer()?;
         self.checkpoint_admin()?;
+        self.check_topology(&observed)?;
         publish_marker(&directory, plan_id, &intent)?;
         let (_, rebound) = self.open_intent(&intent)?;
         if observed.mount_id != rebound.mount_id
@@ -178,13 +181,14 @@ impl AdminMetadata {
                 "candidate mount changed during apply",
             ));
         }
+        self.check_topology(&rebound)?;
         self.check_binding()?;
         self.finalize_intent(plan_id, &intent)?;
         self.checkpoint_admin()?;
         Ok(intent.marker)
     }
 
-    /// Observe up to eight registered primaries and disclose all omitted rows.
+    /// Observe up to eight registered volumes and disclose all omitted rows.
     ///
     /// Returns no evidence on a root that predates the registration journal.
     /// A missing or substituted mount is unavailable even if another disk has
@@ -215,7 +219,7 @@ impl AdminMetadata {
             let intent = self.load_intent(plan_id)?.ok_or(StorageError::Integrity(
                 "registered volume is missing its journal entry",
             ))?;
-            let evidence = match self.observe_primary(&intent) {
+            let evidence = match self.observe_volume(&intent) {
                 Ok((true, capacity)) => VolumeEvidence::ReadOnly { capacity },
                 Ok((false, capacity)) => VolumeEvidence::IdentityVerified { capacity },
                 Err(error) => VolumeEvidence::Unavailable {
@@ -224,6 +228,7 @@ impl AdminMetadata {
             };
             volumes.push(VolumeObservation {
                 volume_id: intent.marker.volume_id,
+                role: intent.marker.role,
                 path: intent.path,
                 evidence,
             });
@@ -244,7 +249,7 @@ impl AdminMetadata {
     }
 
     /// Match the mounted marker and measure that same directory's capacity.
-    fn observe_primary(&self, intent: &Intent) -> Result<(bool, CapacityReport)> {
+    fn observe_volume(&self, intent: &Intent) -> Result<(bool, CapacityReport)> {
         let (directory, candidate) = self.open_intent(intent)?;
         verify_marker(&directory, &intent.path, MARKER, &intent.marker)?;
         let capacity = measure_open_directory(&directory, &intent.path)?;
@@ -259,17 +264,20 @@ impl AdminMetadata {
 
     /// Fence registration when metadata is stale, too old, or in maintenance.
     fn require_registration_writes(&self) -> Result<()> {
-        match self.maintenance()? {
-            Some(false) => Ok(()),
-            Some(true) => Err(StorageError::AdminUnavailable("maintenance is enabled")),
-            None => Err(StorageError::AdminUnavailable(
+        let maintenance = self.maintenance()?;
+        if self.report().schema_version < 6 {
+            return Err(StorageError::AdminUnavailable(
                 "migrate offline metadata before registering volumes",
-            )),
+            ));
         }
+        if maintenance == Some(true) {
+            return Err(StorageError::AdminUnavailable("maintenance is enabled"));
+        }
+        Ok(())
     }
 
     /// Reject overlapping roots and filesystem reuse, including unfinished intents.
-    fn check_new_primary(&self, path: &Path, filesystem: Uuid) -> Result<()> {
+    fn check_new_volume(&self, path: &Path, filesystem: Uuid) -> Result<()> {
         if path.to_str().is_none() {
             return Err(StorageError::InvalidVolume("the volume path must be UTF-8"));
         }
@@ -304,34 +312,81 @@ impl AdminMetadata {
         Ok(())
     }
 
+    /// Verify a backup's separation from metadata and every opposite-role root.
+    ///
+    /// Pending and finalized registrations both count. An offline or unverifiable
+    /// protected disk blocks approval because separation cannot be established.
+    fn check_topology(&self, candidate: &VolumeCandidate) -> Result<()> {
+        let connection = &self.source.connection;
+        let mut statement = connection.prepare(
+            "SELECT plan_id FROM volume_registrations WHERE role!=?1 ORDER BY plan_id LIMIT 129",
+        )?;
+        let mut rows = statement.query([candidate.role.as_str()])?;
+        let mut opposite = Vec::new();
+        while let Some(row) = rows.next()? {
+            if opposite.len() == 128 {
+                return Err(StorageError::VolumeTopologyUnknown(
+                    "too many registrations to verify",
+                ));
+            }
+            opposite.push(Uuid::from_bytes(row.get(0)?));
+        }
+        if candidate.role == VolumeRole::Primary && opposite.is_empty() {
+            return Ok(());
+        }
+        let disks = protected_disks(candidate)?;
+        if candidate.role == VolumeRole::Backup {
+            require_disjoint(&disks, &metadata_disks(&self.directory)?)?;
+        }
+        for plan_id in opposite {
+            let intent = self.load_intent(plan_id)?.ok_or(StorageError::Integrity(
+                "protected volume is missing its journal entry",
+            ))?;
+            let (directory, observed) = self.open_intent(&intent)?;
+            if intent.finalized {
+                verify_marker(&directory, &intent.path, MARKER, &intent.marker)?;
+            }
+            require_disjoint(&disks, &protected_disks(&observed)?)?;
+        }
+        Ok(())
+    }
+
     /// Load an accepted plan from the current authority's journal, when present.
     fn load_intent(&self, plan: Uuid) -> Result<Option<Intent>> {
+        let backup_column = if self.report().schema_version >= 6 {
+            "role='backup'"
+        } else {
+            "0"
+        };
+        let sql = format!(
+            "SELECT root_path, filesystem_uuid, directory_inode, directory_birth, volume_id,
+                    primary_id, registration_nonce, registered_volume_id IS NOT NULL, {backup_column}
+             FROM volume_registrations WHERE plan_id=?1"
+        );
         Ok(self
             .source
             .connection
-            .query_row(
-                "SELECT root_path, filesystem_uuid, directory_inode, directory_birth, volume_id,
-                    primary_id, registration_nonce, registered_volume_id IS NOT NULL
-             FROM volume_registrations WHERE plan_id=?1",
-                [plan.as_bytes().as_slice()],
-                |row| {
-                    Ok(Intent {
-                        path: PathBuf::from(row.get::<_, String>(0)?),
-                        filesystem: Uuid::from_bytes(row.get(1)?),
-                        inode: row.get(2)?,
-                        birth: row.get(3)?,
-                        marker: RegisteredPrimary {
-                            format_version: FORMAT_VERSION,
-                            server_id: self.report().server_id,
-                            volume_id: Uuid::from_bytes(row.get(4)?),
-                            primary_id: Uuid::from_bytes(row.get(5)?),
-                            registration_nonce: Uuid::from_bytes(row.get(6)?),
-                            role: VolumeRole::Primary,
+            .query_row(&sql, [plan.as_bytes().as_slice()], |row| {
+                Ok(Intent {
+                    path: PathBuf::from(row.get::<_, String>(0)?),
+                    filesystem: Uuid::from_bytes(row.get(1)?),
+                    inode: row.get(2)?,
+                    birth: row.get(3)?,
+                    marker: RegisteredVolume {
+                        format_version: FORMAT_VERSION,
+                        server_id: self.report().server_id,
+                        volume_id: Uuid::from_bytes(row.get(4)?),
+                        primary_id: row.get::<_, Option<[u8; 16]>>(5)?.map(Uuid::from_bytes),
+                        registration_nonce: Uuid::from_bytes(row.get(6)?),
+                        role: if row.get(8)? {
+                            VolumeRole::Backup
+                        } else {
+                            VolumeRole::Primary
                         },
-                        finalized: row.get(7)?,
-                    })
-                },
-            )
+                    },
+                    finalized: row.get(7)?,
+                })
+            })
             .optional()?)
     }
 
@@ -340,7 +395,7 @@ impl AdminMetadata {
         self.source.connection.execute(
             "INSERT INTO volume_registrations (plan_id, root_path, filesystem_uuid,
                 directory_inode, directory_birth, server_id, volume_id, primary_id,
-                registration_nonce) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                registration_nonce, role) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 plan.as_bytes().as_slice(),
                 intent.path.to_str(),
@@ -349,8 +404,13 @@ impl AdminMetadata {
                 intent.birth,
                 intent.marker.server_id.as_uuid().as_bytes().as_slice(),
                 intent.marker.volume_id.as_bytes().as_slice(),
-                intent.marker.primary_id.as_bytes().as_slice(),
+                intent
+                    .marker
+                    .primary_id
+                    .as_ref()
+                    .map(|id| id.as_bytes().as_slice()),
                 intent.marker.registration_nonce.as_bytes().as_slice(),
+                intent.marker.role.as_str(),
             ],
         )?;
         Ok(())
@@ -359,7 +419,7 @@ impl AdminMetadata {
     /// Reopen the accepted path and verify the identity that survives a reboot.
     fn open_intent(&self, intent: &Intent) -> Result<(OwnedFd, VolumeCandidate)> {
         let (directory, candidate) =
-            open_volume_candidate(&intent.path, VolumeRole::Primary, &self.report().root)?;
+            open_volume_candidate(&intent.path, intent.marker.role, &self.report().root)?;
         if candidate.directory_inode != intent.inode
             || candidate.directory_birth.as_deref() != Some(intent.birth.as_str())
             || filesystem_uuid(&candidate)? != intent.filesystem
@@ -376,15 +436,20 @@ impl AdminMetadata {
         Ok((directory, candidate))
     }
 
-    /// Make the primary visible and mark its intent complete in one transaction.
+    /// Make the volume visible and mark its intent complete in one transaction.
     fn finalize_intent(&mut self, plan: Uuid, intent: &Intent) -> Result<()> {
         let tx = self.source.connection.transaction()?;
         tx.execute(
             "INSERT INTO volumes (volume_id, role, primary_id, filesystem_identity, health)
-             VALUES (?1, 'primary', ?2, ?3, 'unknown')",
+             VALUES (?1, ?2, ?3, ?4, 'unknown')",
             params![
                 intent.marker.volume_id.as_bytes().as_slice(),
-                intent.marker.primary_id.as_bytes().as_slice(),
+                intent.marker.role.as_str(),
+                intent
+                    .marker
+                    .primary_id
+                    .as_ref()
+                    .map(|id| id.as_bytes().as_slice()),
                 intent.filesystem.to_string(),
             ],
         )?;
@@ -493,7 +558,7 @@ fn verify_marker(
     directory: &OwnedFd,
     path: &Path,
     name: &str,
-    expected: &RegisteredPrimary,
+    expected: &RegisteredVolume,
 ) -> Result<File> {
     let file = openat(
         directory,
@@ -522,7 +587,7 @@ fn verify_marker(
             "the volume marker exceeds its size limit",
         ));
     }
-    let actual: RegisteredPrimary = serde_json::from_slice(&bytes)?;
+    let actual: RegisteredVolume = serde_json::from_slice(&bytes)?;
     if actual != *expected {
         return Err(StorageError::InvalidVolume(
             "the existing volume marker differs from the accepted identity",
@@ -534,6 +599,51 @@ fn verify_marker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backup gets a volume ID and keeps the primary identifier out of its marker.
+    #[test]
+    fn backup_intent_has_no_primary_id_after_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("metadata");
+        let path = temp.path().join("backup");
+        std::fs::create_dir(&path).unwrap();
+        let report = crate::initialize(&root).unwrap();
+        let plan = Uuid::new_v4();
+        let intent = Intent {
+            path,
+            filesystem: Uuid::new_v4(),
+            inode: "1".into(),
+            birth: "2:0".into(),
+            marker: RegisteredVolume {
+                format_version: FORMAT_VERSION,
+                server_id: report.server_id,
+                volume_id: Uuid::new_v4(),
+                primary_id: None,
+                registration_nonce: Uuid::new_v4(),
+                role: VolumeRole::Backup,
+            },
+            finalized: false,
+        };
+        let directory = File::open(&intent.path).unwrap().into();
+        let mut lease = AdminMetadata::open(&root).unwrap();
+        lease.ensure_writer().unwrap();
+        lease.save_intent(plan, &intent).unwrap();
+        lease.checkpoint_admin().unwrap();
+        publish_marker(&directory, plan, &intent).unwrap();
+        lease.finalize_intent(plan, &intent).unwrap();
+        lease.checkpoint_admin().unwrap();
+        drop(lease);
+        let reopened = AdminMetadata::open(&root)
+            .unwrap()
+            .load_intent(plan)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.marker, intent.marker);
+        assert!(reopened.finalized);
+        let value = serde_json::to_value(reopened.marker).unwrap();
+        assert_eq!(value["role"], "backup");
+        assert!(value.get("primary_id").is_none());
+    }
 
     /// Exercise journal replay and catalog publication without provisioning a real disk.
     #[test]
@@ -550,11 +660,11 @@ mod tests {
             filesystem: Uuid::new_v4(),
             inode: "1".into(),
             birth: "2:0".into(),
-            marker: RegisteredPrimary {
+            marker: RegisteredVolume {
                 format_version: FORMAT_VERSION,
                 server_id: report.server_id,
                 volume_id: Uuid::new_v4(),
-                primary_id: Uuid::new_v4(),
+                primary_id: Some(Uuid::new_v4()),
                 registration_nonce: Uuid::new_v4(),
                 role: VolumeRole::Primary,
             },

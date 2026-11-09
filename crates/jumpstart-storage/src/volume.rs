@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 use crate::{Result, StorageError};
 
+pub(crate) mod topology;
+
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 const MAX_MOUNTINFO_BYTES: u64 = 1024 * 1024;
 
@@ -32,6 +34,16 @@ const MAX_MOUNTINFO_BYTES: u64 = 1024 * 1024;
 pub enum VolumeRole {
     Primary,
     Backup,
+}
+
+impl VolumeRole {
+    /// Return the role used by the registration journal and marker.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Backup => "backup",
+        }
+    }
 }
 
 /// Read-only evidence tied to one selected mount and directory.
@@ -101,18 +113,7 @@ pub(crate) fn open_volume_candidate(
             "the kernel did not report mount and inode identity",
         ));
     }
-    let mut mountinfo = String::new();
-    File::open(MOUNTINFO)
-        .and_then(|file| {
-            file.take(MAX_MOUNTINFO_BYTES + 1)
-                .read_to_string(&mut mountinfo)
-        })
-        .map_err(|error| io("read mount table", Path::new(MOUNTINFO), error))?;
-    if mountinfo.len() as u64 > MAX_MOUNTINFO_BYTES {
-        return Err(StorageError::InvalidVolume(
-            "mount table exceeds its observation limit",
-        ));
-    }
+    let mountinfo = read_mountinfo()?;
     let (filesystem, read_only) = mount_details(&mountinfo, stat.stx_mnt_id)?;
     let empty = directory_is_empty(&directory, path)?;
     let marker_present = match statat(
@@ -159,6 +160,23 @@ pub(crate) fn open_volume_candidate(
             blocking_reasons,
         },
     ))
+}
+
+/// Read the bounded Linux mount table for the daemon's namespace.
+fn read_mountinfo() -> Result<String> {
+    let mut mountinfo = String::new();
+    File::open(MOUNTINFO)
+        .and_then(|file| {
+            file.take(MAX_MOUNTINFO_BYTES + 1)
+                .read_to_string(&mut mountinfo)
+        })
+        .map_err(|error| io("read mount table", Path::new(MOUNTINFO), error))?;
+    if mountinfo.len() as u64 > MAX_MOUNTINFO_BYTES {
+        return Err(StorageError::InvalidVolume(
+            "mount table exceeds its observation limit",
+        ));
+    }
+    Ok(mountinfo)
 }
 
 /// Match an opened descriptor's mount ID to its filesystem and read-only flags.
