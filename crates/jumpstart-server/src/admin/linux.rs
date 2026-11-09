@@ -279,6 +279,16 @@ fn admin_reply<T>(
 /// explicit status so an accessible daemon cannot imply healthy hardware.
 fn live_health(root: &Path, metadata: &Result<AdminMetadata, StorageError>) -> Value {
     let capacity = crate::health::capacity_component(inspect_capacity(root));
+    let registered_volumes = match metadata {
+        Ok(lease) => match lease.registered_volume_health() {
+            Ok(Some(evidence)) => json!({"status": "observed", "evidence": evidence}),
+            Ok(None) => {
+                json!({"status": "unknown", "detail": "root predates the registration journal"})
+            }
+            Err(error) => json!({"status": "unknown", "detail": error.to_string()}),
+        },
+        Err(error) => json!({"status": "unknown", "detail": error.to_string()}),
+    };
     let (metadata_evidence, jobs) = match metadata {
         Ok(lease) => match lease.check_binding() {
             Ok(()) => (
@@ -312,7 +322,7 @@ fn live_health(root: &Path, metadata: &Result<AdminMetadata, StorageError>) -> V
         "metadata": metadata_evidence,
         "capacity": capacity,
         "snapshot_jobs": jobs,
-        "registered_volumes": {"status": "unknown"},
+        "registered_volumes": registered_volumes,
         "disk_hardware": {"status": "unknown"},
     })
 }

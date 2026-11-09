@@ -55,11 +55,11 @@ pub(super) use jobs::{
 pub(super) use migration::migrate;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};
 
-// Linux registration owns filesystem mutations for the admin lease.
+// Linux registration owns filesystem mutations and observations for the admin lease.
 #[cfg(target_os = "linux")]
 mod registration;
 #[cfg(target_os = "linux")]
-pub use registration::{RegisteredPrimary, VolumeRegistrationPlan};
+pub use registration::{RegisteredPrimary, RegisteredVolumeHealth, VolumeRegistrationPlan};
 
 const MIGRATION_NAME: &str = "initial_metadata";
 const MIGRATIONS_TABLE: &str = "CREATE TABLE schema_migrations (\n    version INTEGER PRIMARY KEY CHECK (version > 0),\n    name TEXT NOT NULL,\n    checksum TEXT NOT NULL,\n    applied_at TEXT NOT NULL\n) STRICT";

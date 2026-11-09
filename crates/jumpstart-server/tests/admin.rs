@@ -217,6 +217,12 @@ fn live_health_distinguishes_a_replaced_root_from_the_verified_metadata() {
     assert_eq!(report["capacity"]["evidence"]["scope"], "capacity_only");
     assert_eq!(report["snapshot_jobs"]["by_state"]["queued"], "1");
     assert_eq!(report["disk_hardware"]["status"], "unknown");
+    assert_eq!(report["registered_volumes"]["status"], "observed");
+    assert_eq!(
+        report["registered_volumes"]["evidence"]["volumes"],
+        serde_json::json!([])
+    );
+    assert_eq!(report["registered_volumes"]["evidence"]["pending"], "0");
 
     fs::rename(&root, parent.path().join("detached")).unwrap();
     fs::create_dir(&root).unwrap();
@@ -229,6 +235,7 @@ fn live_health_distinguishes_a_replaced_root_from_the_verified_metadata() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["metadata"]["status"], "unavailable");
     assert_eq!(report["snapshot_jobs"]["status"], "unknown");
+    assert_eq!(report["registered_volumes"]["status"], "unknown");
     assert_eq!(report["capacity"]["evidence"]["scope"], "capacity_only");
     assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
 }

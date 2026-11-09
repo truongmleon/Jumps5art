@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use jumpstart_domain::ServerId;
+use jumpstart_domain::{Counter, ServerId};
 use rusqlite::{OptionalExtension, params};
 use rustix::fs::{Dir, Mode, OFlags, RenameFlags, fsync, openat, renameat_with};
 use serde::{Deserialize, Serialize};
@@ -19,12 +19,14 @@ use uuid::Uuid;
 
 use super::{AdminMetadata, io};
 use crate::{
-    FORMAT_VERSION, Result, StorageError, VolumeCandidate, VolumeRole,
+    CapacityReport, FORMAT_VERSION, Result, StorageError, VolumeCandidate, VolumeRole,
+    capacity::measure_open_directory,
     volume::{filesystem_uuid, open_volume_candidate},
 };
 
 const MARKER: &str = ".jumpstart-volume.json";
 const MARKER_LIMIT: u64 = 2048;
+const HEALTH_SAMPLE_LIMIT: i64 = 8;
 
 /// A short-lived approval candidate held by the daemon before it accepts a write.
 pub struct VolumeRegistrationPlan {
@@ -42,6 +44,33 @@ pub struct RegisteredPrimary {
     pub primary_id: Uuid,
     pub registration_nonce: Uuid,
     pub role: VolumeRole,
+}
+
+/// Live registration evidence with counts for catalog rows outside the sample.
+#[derive(Serialize)]
+pub struct RegisteredVolumeHealth {
+    pub pending: Counter,
+    pub catalog_only: Counter,
+    pub unobserved_registered: Counter,
+    pub volumes: Vec<VolumeObservation>,
+}
+
+/// One primary's live observation, tied to its recorded ID and directory.
+#[derive(Serialize)]
+pub struct VolumeObservation {
+    pub volume_id: Uuid,
+    pub path: PathBuf,
+    #[serde(flatten)]
+    pub evidence: VolumeEvidence,
+}
+
+/// Separates verified marker evidence from a read-only or unavailable directory.
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum VolumeEvidence {
+    IdentityVerified { capacity: CapacityReport },
+    ReadOnly { capacity: CapacityReport },
+    Unavailable { detail: String },
 }
 
 /// The exact directory and marker expected by a persisted apply request.
@@ -153,6 +182,79 @@ impl AdminMetadata {
         self.finalize_intent(plan_id, &intent)?;
         self.checkpoint_admin()?;
         Ok(intent.marker)
+    }
+
+    /// Observe up to eight registered primaries and disclose all omitted rows.
+    ///
+    /// Returns no evidence on a root that predates the registration journal.
+    /// A missing or substituted mount is unavailable even if another disk has
+    /// appeared at its former path and has plenty of free space.
+    pub fn registered_volume_health(&self) -> Result<Option<RegisteredVolumeHealth>> {
+        self.check_binding()?;
+        if self.report().schema_version < 5 {
+            return Ok(None);
+        }
+        let connection = &self.source.connection;
+        let (pending, catalog_only, registered): (i64, i64, i64) = connection.query_row(
+            "SELECT
+                (SELECT count(*) FROM volume_registrations WHERE registered_volume_id IS NULL),
+                (SELECT count(*) FROM volumes AS v WHERE NOT EXISTS (
+                    SELECT 1 FROM volume_registrations AS r WHERE r.registered_volume_id=v.volume_id)),
+                (SELECT count(*) FROM volume_registrations WHERE registered_volume_id IS NOT NULL)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT plan_id FROM volume_registrations WHERE registered_volume_id IS NOT NULL
+             ORDER BY root_path LIMIT ?1",
+        )?;
+        let mut rows = statement.query([HEALTH_SAMPLE_LIMIT])?;
+        let mut volumes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let plan_id = Uuid::from_bytes(row.get(0)?);
+            let intent = self.load_intent(plan_id)?.ok_or(StorageError::Integrity(
+                "registered volume is missing its journal entry",
+            ))?;
+            let evidence = match self.observe_primary(&intent) {
+                Ok((true, capacity)) => VolumeEvidence::ReadOnly { capacity },
+                Ok((false, capacity)) => VolumeEvidence::IdentityVerified { capacity },
+                Err(error) => VolumeEvidence::Unavailable {
+                    detail: error.to_string(),
+                },
+            };
+            volumes.push(VolumeObservation {
+                volume_id: intent.marker.volume_id,
+                path: intent.path,
+                evidence,
+            });
+        }
+        self.check_binding()?;
+        let count = |value| {
+            u64::try_from(value)
+                .ok()
+                .and_then(|value| Counter::from_u64(value).ok())
+                .ok_or(StorageError::Integrity("invalid volume health count"))
+        };
+        Ok(Some(RegisteredVolumeHealth {
+            pending: count(pending)?,
+            catalog_only: count(catalog_only)?,
+            unobserved_registered: count((registered - HEALTH_SAMPLE_LIMIT).max(0))?,
+            volumes,
+        }))
+    }
+
+    /// Match the mounted marker and measure that same directory's capacity.
+    fn observe_primary(&self, intent: &Intent) -> Result<(bool, CapacityReport)> {
+        let (directory, candidate) = self.open_intent(intent)?;
+        verify_marker(&directory, &intent.path, MARKER, &intent.marker)?;
+        let capacity = measure_open_directory(&directory, &intent.path)?;
+        let (_, current) = self.open_intent(intent)?;
+        if candidate.mount_id != current.mount_id || candidate.read_only != current.read_only {
+            return Err(StorageError::InvalidVolume(
+                "the volume mount changed during inspection",
+            ));
+        }
+        Ok((candidate.read_only, capacity))
     }
 
     /// Fence registration when metadata is stale, too old, or in maintenance.
@@ -485,5 +587,21 @@ mod tests {
         let receipt = lease.load_intent(plan).unwrap().unwrap();
         assert!(receipt.finalized);
         assert_eq!(receipt.marker, intent.marker);
+
+        // Even with a valid marker, a substitute directory must not report capacity.
+        let detached = temp.path().join("detached");
+        std::fs::rename(&intent.path, &detached).unwrap();
+        std::fs::create_dir(&intent.path).unwrap();
+        std::fs::copy(detached.join(MARKER), &marker_path).unwrap();
+        let report = lease.registered_volume_health().unwrap().unwrap();
+        assert_eq!(report.pending, Counter::ZERO);
+        assert_eq!(report.catalog_only, Counter::ZERO);
+        assert_eq!(report.unobserved_registered, Counter::ZERO);
+        assert_eq!(report.volumes.len(), 1);
+        assert_eq!(report.volumes[0].volume_id, intent.marker.volume_id);
+        assert!(matches!(
+            &report.volumes[0].evidence,
+            VolumeEvidence::Unavailable { detail } if detail.contains("accepted directory or filesystem changed")
+        ));
     }
 }
