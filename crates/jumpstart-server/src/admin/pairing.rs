@@ -428,8 +428,8 @@ async fn authenticate(
         return Err("peer route is outside the selected LAN".into());
     }
     let connection = incoming.await?;
-    if connection.alpn() != ALPN || !connection_matches(&connection, peer) {
-        return Err("pairing connection did not retain its selected route".into());
+    if connection.alpn() != ALPN {
+        return Err("pairing connection negotiated an unexpected protocol".into());
     }
     let (send, mut receive) = connection.accept_bi().await?;
     let mut prefix = [0; 4];
@@ -441,6 +441,9 @@ async fn authenticate(
     let mut body = vec![0; count];
     receive.read_exact(&mut body).await?;
     let request = decode_body(&body)?;
+    if !connection_matches(&connection, peer) {
+        return Err("pairing connection did not retain its selected route".into());
+    }
     Ok(NetworkEvent {
         window_id,
         peer,
@@ -453,7 +456,7 @@ async fn authenticate(
 /// Require every observed QUIC path to remain on the original pairing source.
 fn connection_matches(connection: &Connection, peer: SocketAddrV4) -> bool {
     let paths = connection.paths();
-    let mut observed = paths.iter().filter(|path| path.is_selected()).peekable();
+    let mut observed = paths.iter().peekable();
     observed.peek().is_some() && observed.all(|path| {
         matches!(path.remote_addr(), iroh::TransportAddr::Custom(address) if lan::decode(address) == Some(peer))
     })
@@ -605,7 +608,7 @@ mod tests {
                 server_key.public(),
                 [TransportAddr::Ip(invitation.lan_endpoint)],
             );
-            let connection = client.connect(target, ALPN).await.unwrap();
+            let connection = client.connect(target.clone(), ALPN).await.unwrap();
             let (mut send, mut receive) = connection.open_bi().await.unwrap();
             let instance = ClientInstanceId::new();
             write(
@@ -662,6 +665,17 @@ mod tests {
             assert!(lease.device_receipt(&key).unwrap().is_some());
             lease.revoke_device(id).unwrap();
             assert!(lease.device_receipt(&key).unwrap().is_none());
+
+            let retry = client.connect(target, ALPN).await.unwrap();
+            let (mut send, mut receive) = retry.open_bi().await.unwrap();
+            write(&mut send, &json!({"method": "receipt"}))
+                .await
+                .unwrap();
+            send.finish().unwrap();
+            admin.receive(&metadata, events.recv().await.unwrap()).await;
+            let refusal = read_value(&mut receive).await;
+            assert_eq!(refusal["status"], "unavailable");
+            assert!(refusal.get("receipt").is_none());
         })
         .await
         .expect("bounded pairing exchange");

@@ -287,11 +287,9 @@ impl CustomEndpoint for LanEndpoint {
                 && self.endpoint.link.in_prefix(remote)
             {
                 let len = buf.filled().len();
-                metas[0] = RecvMeta {
-                    len,
-                    stride: len,
-                    ..RecvMeta::default()
-                };
+                metas[0] = RecvMeta::default();
+                metas[0].len = len;
+                metas[0].stride = len;
                 info[0] = RecvInfo::new(encode(remote), Some(self.local));
                 return Poll::Ready(Ok(1));
             }
