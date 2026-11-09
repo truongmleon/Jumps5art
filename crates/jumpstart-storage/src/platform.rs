@@ -76,6 +76,35 @@ struct VerifiedMetadata {
     _lock: File,
 }
 
+/// Retains exclusive ownership of the verified metadata root while the daemon runs.
+///
+/// The daemon starts with a checked, read-only database. Keeping the lock with
+/// the connection prevents an offline migration or job runner from changing
+/// the same root while it is being served.
+#[cfg(target_os = "linux")]
+pub struct AdminMetadata {
+    source: VerifiedMetadata,
+}
+
+#[cfg(target_os = "linux")]
+impl AdminMetadata {
+    /// Open an existing root and retain its exclusive maintenance lock.
+    ///
+    /// `root` selects the directory. Returns the verified lease or a storage
+    /// error. Missing roots, pending recovery, and active owners are refused.
+    pub fn open(root: &Path) -> Result<Self> {
+        let (root, lock) = lock_metadata(root, true)?;
+        Ok(Self {
+            source: verify_locked_metadata(root, lock)?,
+        })
+    }
+
+    /// Return the verified startup report while the metadata lease is held.
+    pub fn report(&self) -> &MetadataReport {
+        &self.source.report
+    }
+}
+
 /// Create and verify a sibling staging root, then publish it without replacement.
 ///
 /// # Arguments

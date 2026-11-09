@@ -73,6 +73,9 @@ pub use capacity::{
     CapacityAssessment, CapacityReport, CapacityScope, assess_capacity, inspect_capacity,
 };
 
+#[cfg(target_os = "linux")]
+pub use platform::AdminMetadata;
+
 pub const FORMAT_VERSION: u32 = 1;
 pub const SCHEMA_VERSION: u32 = 4;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
