@@ -75,8 +75,9 @@ pub use capacity::{
 
 #[cfg(target_os = "linux")]
 pub use platform::{
-    AdminMetadata, RegisteredHardwareTargets, RegisteredVolume, RegisteredVolumeHealth,
-    VolumeRegistrationPlan, WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint,
+    AdminMetadata, DevicePage, DeviceRecord, DeviceRegistration, RegisteredHardwareTargets,
+    RegisteredVolume, RegisteredVolumeHealth, VolumeRegistrationPlan, WorldsCatalogStatus,
+    WorldsRecoveryIndex, WorldsRecoveryPoint, device_fingerprint,
 };
 #[cfg(target_os = "linux")]
 pub use volume::topology::HardwareDevice;
@@ -87,7 +88,7 @@ pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};
 mod volume;
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
 pub const FORMAT_FILE: &str = "format.json";
 pub const LOCK_FILE: &str = "metadata.lock";
@@ -396,6 +397,9 @@ pub enum StorageError {
     /// The local admin request requires a verified and writable metadata lease.
     #[error("local administration unavailable: {0}")]
     AdminUnavailable(&'static str),
+    /// A device identity or authority command violates the persisted contract.
+    #[error("invalid device: {0}")]
+    InvalidDevice(&'static str),
     /// A Worlds index read needs catalog storage and a bounded request.
     #[error("Worlds catalog unavailable: {0}")]
     WorldsCatalogUnavailable(&'static str),

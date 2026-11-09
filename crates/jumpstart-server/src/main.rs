@@ -135,6 +135,11 @@ enum Command {
         #[command(subcommand)]
         command: StorageCommand,
     },
+    /// List and revoke approved device installations on the local server.
+    Devices {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
     /// Persist or clear the daemon's local mutation fence.
     Maintenance {
         #[command(subcommand)]
@@ -350,6 +355,30 @@ enum StorageCommand {
     },
 }
 
+/// Operator actions on the daemon's persisted device authority.
+#[derive(Subcommand)]
+enum DeviceCommand {
+    /// List active and revoked installations in ID order.
+    List {
+        #[arg(long)]
+        after: Option<jumpstart_domain::DeviceId>,
+        #[arg(long, default_value_t = 50)]
+        limit: u16,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove authorization for an exact device ID.
+    Revoke {
+        device_id: jumpstart_domain::DeviceId,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Commands that toggle the local daemon's durable maintenance state.
 #[derive(Subcommand)]
 enum MaintenanceCommand {
@@ -542,6 +571,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 admin::apply_volume(&socket, plan_id, acknowledge_unverified_encryption)?,
                 json,
                 "Registered storage volume:",
+            ),
+        },
+        Command::Devices { command } => match command {
+            DeviceCommand::List {
+                after,
+                limit,
+                socket,
+                json,
+            } => (
+                admin::list_devices(&socket, after, limit)?,
+                json,
+                "Device installations:",
+            ),
+            DeviceCommand::Revoke {
+                device_id,
+                socket,
+                json,
+            } => (
+                admin::revoke_device(&socket, device_id)?,
+                json,
+                "Persisted device revocation:",
             ),
         },
         Command::Maintenance { command } => {

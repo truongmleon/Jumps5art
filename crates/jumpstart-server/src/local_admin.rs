@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use jumpstart_domain::DeviceId;
 use jumpstart_protocol::{FRAME_PREFIX_BYTES, MAX_FRAME_BYTES, decode_body, write_frame};
 use jumpstart_storage::VolumeRole;
 use rustix::net::sockopt::socket_peercred;
@@ -53,6 +54,13 @@ pub enum Command {
     VolumeApply {
         plan_id: Uuid,
         acknowledge_unverified_encryption: bool,
+    },
+    DevicesList {
+        after: Option<DeviceId>,
+        limit: u16,
+    },
+    DevicesRevoke {
+        device_id: DeviceId,
     },
     Maintenance {
         enabled: bool,

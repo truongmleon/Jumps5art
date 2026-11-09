@@ -28,6 +28,8 @@ The commands run on Linux and macOS. On Windows they exit unsuccessfully without
 | `storage register PATH --plan --role primary\|backup` | Observes a proposed volume through the Linux daemon and can issue a primary or backup registration plan. |
 | `storage apply PLAN_ID --acknowledge-unverified-encryption` | Registers the reviewed Linux volume or resumes its accepted plan. |
 | `maintenance enter\|leave` | Persists or clears the Linux daemon's local write fence. |
+| `devices list` | Reads a page of active and revoked device installations from the Linux daemon. |
+| `devices revoke DEVICE_ID` | Persists revocation of the selected installation. |
 | `update plan` | Verifies a signed Linux release directory and reports compatibility with the running daemon. |
 
 `init`, `migrate`, and `snapshot create` require `--development`. Job enqueue/run/run-next/cancel/recover also require `--development`; job list/inspect/history/changes are read-only and need no acknowledgment.
@@ -68,7 +70,7 @@ Heading: `Verified offline development metadata:`
 | `server_id` | UUID string for this server |
 | `sync_epoch` | UUID string recorded with the server ID |
 | `format_version` | Number, currently `1` |
-| `schema_version` | Number, currently `6` |
+| `schema_version` | Number, currently `7` |
 | `change_seq` | Stored decimal-string position; unavailable (`null`) in schema 1 |
 | `journal_mode` | SQLite journal mode of the stored database |
 | `integrity_check` | `"ok"` after the check succeeds |
@@ -113,7 +115,7 @@ cargo run -p jumpstart-server -- migrate --metadata-root /tmp/jumpstart-metadata
 | `--development` | yes | Acknowledges the schema upgrade and limited scope of the recovery copy. |
 | `--json` | no | Print the report as JSON. |
 
-The command upgrades a verified older root to schema 6 after saving a verified pre-upgrade snapshot. A current root reports both versions as 6 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 6. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
+The command upgrades a verified older root to schema 7 after saving a verified pre-upgrade snapshot. A current root reports both versions as 7 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 7. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
 
 ## `snapshot create`
 
@@ -252,6 +254,10 @@ Heading: `Storage capacity observation (not disk health or write approval):`
 | `at_or_below_safety_reserve` | `true` when available bytes are less than or equal to the reserve. |
 
 Byte counts are decimal strings in both text and JSON output. The warning and reserve figures describe this observation. They do not set aside space, identify the disk, or report whether the disk is healthy or encrypted.
+
+## `devices list|revoke`
+
+These commands require schema 7 and the protected Linux socket. `devices list --limit 50 --json` includes active and revoked installations with names, platform, app and key fingerprint. When the page has more entries, pass its `next_after` value as `--after DEVICE_ID`. An installation's ID is stable even when another installation has the same name. `devices revoke DEVICE_ID` persists revocation before returning, including during maintenance. A repeat returns the same revoked record. The registry preserves the key to prevent reapproval. Live session cancellation depends on the application transport.
 
 ## `update plan`
 
