@@ -482,7 +482,7 @@ fn finish(connection: Connection, mut send: SendStream, reply: Value) {
 }
 
 /// Load the server signing key supplied by systemd's encrypted credential mechanism.
-fn read_credential() -> Result<SecretKey, Box<dyn Error>> {
+pub(super) fn read_credential() -> Result<SecretKey, Box<dyn Error>> {
     let directory = std::env::var_os("CREDENTIALS_DIRECTORY")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())

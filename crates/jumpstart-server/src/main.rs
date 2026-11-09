@@ -67,6 +67,9 @@ enum Command {
         /// Unix socket in a pre-existing private runtime directory.
         #[arg(long, default_value = admin::SOCKET_PATH)]
         socket: PathBuf,
+        /// Opt in to paired, read-only Mass on one concrete application UDP address.
+        #[arg(long)]
+        mass_listen: Option<std::net::SocketAddr>,
     },
     /// Ask the running Linux daemon about its metadata state.
     Status {
@@ -496,7 +499,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         Command::Serve {
             metadata_root,
             socket,
-        } => return admin::serve(&metadata_root, &socket),
+            mass_listen,
+        } => return admin::serve(&metadata_root, &socket, mass_listen),
         Command::Status { socket, json } => (
             admin::status(&socket)?,
             json,

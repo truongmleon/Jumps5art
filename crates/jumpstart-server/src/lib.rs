@@ -9,6 +9,8 @@ use std::{error::Error, io::Write};
 pub mod local_admin;
 #[cfg(target_os = "linux")]
 pub mod mass_client;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod remote_mass;
 
 /// Default administrative socket in the private systemd runtime directory.
 pub const SOCKET_PATH: &str = "/run/jumpstart/admin.sock";
