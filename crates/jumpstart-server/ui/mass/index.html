@@ -116,7 +116,7 @@
       <span class="mount-icon"><svg><use href="#i-drive"/></svg></span>
       <h2>Mount Mass on this device</h2>
       <p>The Linux preview shows these same files in your file manager through a read-only FUSE mount. Run the helper on the service host with an empty mount directory.</p>
-      <code id="mount-command">mass mount ~/Mass</code>
+      <code id="mount-command">mkdir -p ~/Mass &amp;&amp; mass mount ~/Mass</code>
       <p class="muted">Linux FUSE3 · Read-only. macOS, Windows, and paired remote mounts are pending.</p>
       <div class="dialog-actions">
         <button id="copy-mount" type="button" class="button secondary">Copy command</button>

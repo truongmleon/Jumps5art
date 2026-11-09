@@ -132,6 +132,19 @@ impl AdminMetadata {
         )
     }
 
+    /// Resolve one exact sibling name for a native filesystem lookup.
+    pub fn mass_lookup(&self, parent: Option<ItemId>, name: &str) -> Result<Option<MassItem>> {
+        self.require_mass()?;
+        if validate_name(name).is_err() {
+            return Ok(None);
+        }
+        let sql =
+            format!("SELECT {COLUMNS} {JOINS} WHERE {LIVE} AND i.parent_id IS ?1 AND i.name=?2");
+        let mut statement = self.source.connection.prepare(&sql)?;
+        let mut rows = statement.query(params![id_bytes(parent.as_ref()), name])?;
+        rows.next()?.map(read_item).transpose()
+    }
+
     /// Read the current metadata for one live Mass entry.
     pub fn mass_item(&self, item: ItemId) -> Result<MassItem> {
         self.require_mass()?;

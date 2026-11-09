@@ -29,3 +29,39 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --locked
+      - name: Exercise Mass import and native Linux mount
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if ! test -c /dev/fuse; then sudo modprobe fuse; fi
+          if ! test -c /dev/loop-control; then sudo modprobe loop; fi
+          if ! command -v fusermount3; then
+            sudo apt-get update
+            sudo apt-get install -y fuse3
+          fi
+          scratch="$(mktemp -d)"
+          disk=""
+          created_alias=""
+          cleanup() {
+            if mountpoint -q "$scratch/volume"; then sudo umount "$scratch/volume"; fi
+            if [[ -n "$created_alias" ]]; then sudo rm -- "$created_alias"; fi
+            if [[ -n "$disk" ]]; then sudo losetup -d "$disk"; fi
+            rm -rf -- "$scratch"
+          }
+          trap cleanup EXIT
+          truncate -s 128M "$scratch/primary.img"
+          disk="$(sudo losetup --find --show "$scratch/primary.img")"
+          [[ "$disk" =~ ^/dev/loop[0-9]+$ ]]
+          sudo mkfs.ext4 -q "$disk"
+          uuid="$(sudo blkid -s UUID -o value "$disk")"
+          [[ "$uuid" =~ ^[0-9a-f-]{36}$ ]]
+          sudo mkdir -p /dev/disk/by-uuid
+          alias="/dev/disk/by-uuid/$uuid"
+          if sudo ln -s "$disk" "$alias" 2>/dev/null; then created_alias="$alias"; fi
+          [[ "$(readlink -f "$alias")" == "$disk" ]]
+          mkdir "$scratch/volume"
+          sudo mount -o nodev,nosuid,noexec "$disk" "$scratch/volume"
+          sudo install -o "$(id -u)" -g "$(id -g)" -m 0700 -d "$scratch/volume/mass-primary"
+          JUMPSTART_MASS_TEST_PRIMARY="$scratch/volume/mass-primary" \
+            cargo test --locked -p jumpstart-server --test admin \
+              linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes -- --nocapture

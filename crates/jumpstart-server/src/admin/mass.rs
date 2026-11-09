@@ -68,6 +68,9 @@ async fn execute(
         MassCommand::Search { query, after } => {
             serde_json::to_value(lease.mass_search(&query, after)?)?
         }
+        MassCommand::Lookup { parent, name } => {
+            serde_json::to_value(lease.mass_lookup(parent, &name)?)?
+        }
         MassCommand::Item { id } => serde_json::to_value(lease.mass_item(id)?)?,
         MassCommand::CreateFolder { destination } => {
             serde_json::to_value(lease.mass_create_folder(destination)?)?
