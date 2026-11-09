@@ -48,16 +48,29 @@ fn status(socket: &Path) -> Output {
 
 /// Create and verify a real private listener, then wait for a successful exchange.
 fn start(root: &Path, socket: &Path) -> TestDaemon {
-    let mut daemon = TestDaemon(
-        command()
-            .args(["serve", "--metadata-root"])
-            .arg(root)
-            .arg("--socket")
-            .arg(socket)
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    start_with_mass(root, socket, None)
+}
+
+/// Start a real daemon, optionally enabling an isolated paired Mass endpoint.
+fn start_with_mass(
+    root: &Path,
+    socket: &Path,
+    mass: Option<(&Path, std::net::SocketAddr)>,
+) -> TestDaemon {
+    let mut process = command();
+    process
+        .args(["serve", "--metadata-root"])
+        .arg(root)
+        .arg("--socket")
+        .arg(socket)
+        .stdout(Stdio::null());
+    if let Some((credentials, address)) = mass {
+        process
+            .env("CREDENTIALS_DIRECTORY", credentials)
+            .arg("--mass-listen")
+            .arg(address.to_string());
+    }
+    let mut daemon = TestDaemon(process.spawn().unwrap());
     let start = Instant::now();
     loop {
         if socket.exists() && status(socket).status.success() {
@@ -577,13 +590,14 @@ fn mass_browser_rejects_missing_capability_and_rebound_host() {
 /// Exercise the kernel mount and, when supplied, the full registered-primary import.
 #[test]
 fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
-    use jumpstart_domain::ItemId;
+    use iroh::SecretKey;
+    use jumpstart_domain::{ClientInstanceId, DeviceId, ItemId, Owner};
     use jumpstart_server::{
         local_admin::{Command as AdminCommand, call},
         mass_client::MassClient,
     };
     use jumpstart_storage::{
-        VolumeRole,
+        AdminMetadata, DeviceRegistration, VolumeRole,
         mass::{MASS_CHUNK, MassDestination},
     };
     use rusqlite::{Connection, params};
@@ -611,7 +625,7 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
     let socket = parent.path().join("admin.sock");
     let mountpoint = parent.path().join("drive");
     fs::create_dir(&mountpoint).unwrap();
-    jumpstart_storage::initialize(&root).unwrap();
+    let metadata = jumpstart_storage::initialize(&root).unwrap();
     if real_primary.is_none() {
         let db = Connection::open(root.join("database/jumpstart.sqlite")).unwrap();
         let primary = Uuid::new_v4();
@@ -628,7 +642,39 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
             params![ItemId::new().as_uuid().as_bytes().as_slice(), Uuid::new_v4().as_bytes().as_slice(), primary.as_bytes().as_slice()],
         ).unwrap();
     }
-    let _daemon = start(&root, &socket);
+    let credentials = parent.path().join("credentials");
+    let paired = real_primary.as_ref().map(|_| {
+        fs::create_dir(&credentials).unwrap();
+        let key = SecretKey::generate();
+        let credential = credentials.join("jumpstart-iroh.key");
+        fs::write(&credential, key.to_bytes()).unwrap();
+        fs::set_permissions(&credential, fs::Permissions::from_mode(0o400)).unwrap();
+        let seed = SecretKey::generate();
+        let instance = ClientInstanceId::new();
+        let device = DeviceId::new();
+        AdminMetadata::open(&root).unwrap().register_device(DeviceRegistration {
+            device_id: device,
+            public_key: *seed.public().as_bytes(),
+            name: "Finder integration fixture".into(),
+            platform: "macos".into(),
+            app: Owner::Mass,
+            instance_id: instance,
+            signed_receipt: b"authority fixture".to_vec(),
+        }).unwrap();
+        let address = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let profile = serde_json::json!({
+            "address": address, "server_key": key.public().to_string(), "server_id": metadata.server_id,
+            "seed": seed.to_bytes(), "instance_id": instance,
+        });
+        (address, device, profile)
+    });
+    let _daemon = start_with_mass(
+        &root,
+        &socket,
+        paired
+            .as_ref()
+            .map(|(address, _, _)| (credentials.as_path(), *address)),
+    );
     let bytes = real_primary.map(|path| {
         let plan = call(
             &socket,
@@ -674,6 +720,23 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
             imported.id
         );
         assert_eq!(client.list(Some(folder.id), None).unwrap().items.len(), 1);
+        let (_, device, profile) = paired.as_ref().unwrap();
+        let list = device_helper(serde_json::json!({"action": "list", "profile": profile, "parent": folder.id}));
+        assert_eq!(list["status"], "ok", "{list}");
+        assert_eq!(list["value"]["entities"][0]["id"], imported.id.to_string());
+        let output = parent.path().join("finder-materialized.bin");
+        let file = imported.file.unwrap();
+        let fetch = device_helper(serde_json::json!({
+            "action": "fetch", "profile": profile, "id": imported.id, "version": file.version_id, "output": output,
+        }));
+        assert_eq!(fetch["status"], "ok", "{fetch}");
+        assert_eq!(fs::read(&output).unwrap(), bytes);
+        let mut wrong = profile.clone();
+        wrong["instance_id"] = serde_json::to_value(ClientInstanceId::new()).unwrap();
+        assert_eq!(device_helper(serde_json::json!({"action": "probe", "profile": wrong}))["status"], "error");
+        call(&socket, AdminCommand::DevicesRevoke { device_id: *device }).unwrap();
+        assert_eq!(device_helper(serde_json::json!({"action": "probe", "profile": profile}))["status"], "error");
+        eprintln!("verified the Finder helper's paired catalog, file download, instance check, and revocation");
         bytes
     });
     let mut helper = TestDaemon(
@@ -714,4 +777,18 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
     kill_process(pid, Signal::TERM).unwrap();
     assert!(helper.0.wait().unwrap().success());
     assert_eq!(fs::read_dir(&mountpoint).unwrap().count(), 0);
+}
+
+/// Invoke the same private stdin protocol used by the native File Provider.
+fn device_helper(request: Value) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mass-device"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    serde_json::to_writer(&mut stdin, &request).unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
 }

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleDisplayName</key><string>Mass</string>
+    <key>CFBundleExecutable</key><string>MassFinderExtension</string>
+    <key>CFBundleIdentifier</key><string>com.jumpstart.mass.finder.provider</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Mass File Provider</string>
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSLocalNetworkUsageDescription</key><string>Mass retrieves your paired Jumpstart library when requested in Finder.</string>
+    <key>MassKeychainGroup</key><string>UNSIGNED.com.jumpstart.mass.finder.shared</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key><string>com.apple.fileprovider-nonui</string>
+        <key>NSExtensionPrincipalClass</key><string>MassFinderExtension.MassProvider</string>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>NSExtensionFileProviderSupportsEnumeration</key><true/>
+            <key>NSExtensionFileProviderDownloadPipelineDepth</key><integer>1</integer>
+        </dict>
+        <key>NSExtensionFileProviderActions</key>
+        <array>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key><string>com.jumpstart.mass.download</string>
+                <key>NSExtensionFileProviderActionName</key><string>Download from Mass</string>
+                <key>NSExtensionFileProviderActionActivationRule</key><string>fileproviderItems.@count == 1</string>
+            </dict>
+        </array>
+    </dict>
+</dict>
+</plist>
