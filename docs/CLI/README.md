@@ -10,6 +10,8 @@ These are the commands the binary accepts. [CONTRIBUTING.md](../../CONTRIBUTING.
 
 The commands run on Linux and macOS. On Windows they exit unsuccessfully without changing files. The `health` report identifies unavailable checks there.
 
+The [Mass preview guide](MASS.md) covers the separate file-browser helper.
+
 ## Available commands
 
 | Command | What it does |

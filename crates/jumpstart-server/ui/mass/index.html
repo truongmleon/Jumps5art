@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f2f5f6">
+  <title>Mass · My Drive</title>
+  <link rel="stylesheet" href="/drive.css">
+  <script src="/drive.js" defer></script>
+</head>
+<body>
+  <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-drive" viewBox="0 0 24 24"><path d="M6 4h12l4 11v4a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-4L6 4Z"/><path d="M2 15h20m-5 2.5h2"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h4M9 13h6m-6 4h6"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9" r="1.5"/><path d="m3 17 5-4 4 3 4-5 5 5"/></symbol>
+    <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l11-2v12M9 9l11-2"/><ellipse cx="6" cy="18" rx="3" ry="2"/><ellipse cx="17" cy="15" rx="3" ry="2"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12M3 6h2m-2 6h2m-2 6h2"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4M5 16v4h14v-4"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2 6m2-12v6h-6"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 6-1 1a3 3 0 0 1-4-4l4-4a3 3 0 0 1 4 0m2 8a3 3 0 0 0 4 0l4-4a3 3 0 0 0-4-4l-1 1"/></symbol>
+  </svg>
+  <header class="top">
+    <a class="brand" href="/" id="brand" aria-label="Mass home">
+      <span class="brand-icon"><svg><use href="#i-drive"/></svg></span>
+      <span>Mass<span class="brand-subtitle"> by Jumpstart</span></span>
+    </a>
+    <form id="search-form" class="search" role="search">
+      <svg><use href="#i-search"/></svg>
+      <input id="search" type="search" placeholder="Search in Drive" aria-label="Search in Drive" maxlength="255" autocomplete="off">
+      <kbd aria-hidden="true">/</kbd>
+    </form>
+    <div class="session"><span id="session-dot" class="dot"></span><span id="session-label">Connecting</span></div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Drive navigation">
+      <div class="new-wrap">
+        <button id="new" class="new-button" type="button" aria-expanded="false" aria-controls="new-menu"><svg><use href="#i-plus"/></svg> New</button>
+        <div id="new-menu" class="new-menu" hidden>
+          <button id="new-folder" type="button"><svg><use href="#i-folder"/></svg> New folder</button>
+          <button id="new-upload" type="button"><svg><use href="#i-up"/></svg> File upload</button>
+        </div>
+      </div>
+      <p class="rail-heading">Workspace</p>
+      <nav class="rail">
+        <button type="button" id="my-drive" class="nav-item active"><svg><use href="#i-folder"/></svg> My Drive</button>
+        <button type="button" id="mount-guide" class="nav-item"><svg><use href="#i-drive"/></svg> Mount on a device</button>
+      </nav>
+      <section class="storage">
+        <h2>Upload destination</h2>
+        <label for="primary" class="sr-only">Registered primary</label>
+        <select id="primary"><option value="">Loading primaries…</option></select>
+        <p id="primary-note">Choose where new files are stored.</p>
+      </section>
+    </aside>
+    <main class="drive" id="drive" aria-labelledby="title">
+      <div class="drive-top">
+        <nav id="breadcrumbs" class="breadcrumbs" aria-label="Breadcrumbs"></nav>
+        <div class="view-controls">
+          <button id="refresh" class="icon-button" type="button" aria-label="Refresh files" title="Refresh files"><svg><use href="#i-refresh"/></svg></button>
+          <div class="segmented" role="group" aria-label="File layout">
+            <button id="list-view" class="icon-button" type="button" aria-label="List view" aria-pressed="true" title="List view"><svg><use href="#i-list"/></svg></button>
+            <button id="grid-view" class="icon-button" type="button" aria-label="Grid view" aria-pressed="false" title="Grid view"><svg><use href="#i-grid"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="title-bar">
+        <div><h1 id="title">My Drive</h1><p id="entry-count" class="muted">Loading files…</p></div>
+        <button id="upload" class="button secondary" type="button"><svg><use href="#i-up"/></svg> Upload files</button>
+      </div>
+      <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="retry" type="button" hidden>Retry upload</button></div>
+      <div class="file-area">
+        <section class="files" aria-label="Files and folders">
+          <div id="list-head" class="list-head" hidden>
+            <button type="button" id="sort-name">Name <span aria-hidden="true"></span></button>
+            <button type="button" id="sort-date">Date added <span aria-hidden="true"></span></button>
+            <span>Size</span><span aria-hidden="true"></span>
+          </div>
+          <div id="entries" class="entries" role="list" aria-live="polite"></div>
+          <div id="empty" class="empty" hidden>
+            <span class="empty-illustration"><svg><use href="#i-folder"/></svg></span>
+            <h2 id="empty-title">This folder is empty</h2>
+            <p id="empty-copy">Drop files here, or use New to get started.</p>
+          </div>
+          <button id="more" class="button secondary more" type="button" hidden>Load more</button>
+        </section>
+        <aside id="details" class="details" aria-label="File details" hidden>
+          <div class="details-heading"><h2>Details</h2><button id="close-details" class="icon-button" type="button" aria-label="Close details"><svg><use href="#i-close"/></svg></button></div>
+          <div id="detail-body"></div>
+        </aside>
+      </div>
+      <div class="drop-mask" id="drop-mask" hidden><svg><use href="#i-up"/></svg> Drop files to upload</div>
+    </main>
+  </div>
+  <input id="file-input" type="file" multiple hidden>
+  <dialog id="folder-dialog">
+    <form id="folder-form">
+      <h2>New folder</h2>
+      <label for="folder-name">Folder name</label>
+      <input id="folder-name" type="text" required maxlength="255" placeholder="Untitled folder">
+      <div class="dialog-actions">
+        <button id="cancel-folder" type="button" class="button secondary">Cancel</button>
+        <button type="submit" class="button primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="mount-dialog">
+    <div class="dialog-content">
+      <span class="mount-icon"><svg><use href="#i-drive"/></svg></span>
+      <h2>Mount Mass on this device</h2>
+      <p>The Linux preview shows these same files in your file manager through a read-only FUSE mount. Run the helper on the service host with an empty mount directory.</p>
+      <code id="mount-command">mass mount ~/Mass</code>
+      <p class="muted">Linux FUSE3 · Read-only. macOS, Windows, and paired remote mounts are pending.</p>
+      <div class="dialog-actions">
+        <button id="copy-mount" type="button" class="button secondary">Copy command</button>
+        <button id="close-mount" type="button" class="button primary">Done</button>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>

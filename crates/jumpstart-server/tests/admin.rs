@@ -514,3 +514,62 @@ fn mass_socket_lists_the_catalog_and_rejects_an_unregistered_destination() {
     assert!(error.to_string().contains("registered primary"));
     assert!(client.list(None, None).unwrap().items.is_empty());
 }
+
+/// Only a browser holding the printed loopback capability can read the Mass catalog.
+#[test]
+fn mass_browser_rejects_missing_capability_and_rebound_host() {
+    use std::{
+        io::{BufRead, BufReader, Read},
+        net::TcpStream,
+    };
+
+    if geteuid().is_root() {
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    jumpstart_storage::initialize(&root).unwrap();
+    let _daemon = start(&root, &socket);
+    let mut helper = TestDaemon(
+        Command::new(env!("CARGO_BIN_EXE_mass"))
+            .args(["web", "--socket"])
+            .arg(&socket)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut lines = BufReader::new(helper.0.stdout.take().unwrap()).lines();
+    assert_eq!(lines.next().unwrap().unwrap(), "Open Mass in your browser");
+    let url = lines.next().unwrap().unwrap();
+    let (host, token) = url
+        .strip_prefix("http://")
+        .unwrap()
+        .split_once("/#")
+        .unwrap();
+    let request = |path: &str, header_host: &str, token: Option<&str>| {
+        let mut stream = TcpStream::connect(host).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: {header_host}\r\nConnection: close\r\n"
+        )
+        .unwrap();
+        if let Some(token) = token {
+            write!(stream, "Authorization: Bearer {token}\r\n").unwrap();
+        }
+        stream.write_all(b"\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    assert!(request("/", host, None).contains("Search in Drive"));
+    assert!(request("/api/files", host, None).starts_with("HTTP/1.1 401"));
+    assert!(request("/api/files", "attacker.invalid", Some(token)).starts_with("HTTP/1.1 403"));
+    let authorized = request("/api/files", host, Some(token));
+    assert!(authorized.starts_with("HTTP/1.1 200"));
+    assert!(authorized.contains("\"items\":[]"));
+}
