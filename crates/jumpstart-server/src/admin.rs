@@ -112,3 +112,38 @@ pub(super) fn apply_volume(
         Err("the administration daemon requires Linux".into())
     }
 }
+
+/// Read a bounded device page through the authenticated local socket.
+pub(super) fn list_devices(
+    socket: &Path,
+    after: Option<jumpstart_domain::DeviceId>,
+    limit: u16,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use jumpstart_server::local_admin::{Command, call};
+        call(socket, Command::DevicesList { after, limit })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (socket, after, limit);
+        Err("the administration daemon requires Linux".into())
+    }
+}
+
+/// Revoke an installation through the authenticated local socket.
+pub(super) fn revoke_device(
+    socket: &Path,
+    device_id: jumpstart_domain::DeviceId,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use jumpstart_server::local_admin::{Command, call};
+        call(socket, Command::DevicesRevoke { device_id })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (socket, device_id);
+        Err("the administration daemon requires Linux".into())
+    }
+}

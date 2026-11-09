@@ -21,8 +21,8 @@ use uuid::Uuid;
 
 use super::{
     VerifiedMetadata, apply_schema2, apply_schema3, destination, io, lock_metadata, open_directory,
-    open_regular, read_change_seq, read_marker, readonly_uri, schema4, schema5, schema6, snapshot,
-    sync_directory, verify_database, verify_locked_metadata,
+    open_regular, read_change_seq, read_marker, readonly_uri, schema4, schema5, schema6, schema7,
+    snapshot, sync_directory, verify_database, verify_locked_metadata,
 };
 use crate::{
     DATABASE_DIRECTORY, DATABASE_FILE, FORMAT_FILE, FORMAT_VERSION, FormatMarker, MIGRATION_FILE,
@@ -103,7 +103,7 @@ fn migrate_with_hook(
         let backup = snapshot::create_snapshot_from_verified(&source, snapshot_output)?;
         milestone(MigrationStep::BackupPrepared)?;
         let journal = MigrationJournal {
-            journal_format_version: 5,
+            journal_format_version: 6,
             from_schema_version: source.marker.schema_version,
             to_schema_version: SCHEMA_VERSION,
             server_id: source.marker.server_id,
@@ -246,8 +246,15 @@ fn finish_upgrade(
             milestone(MigrationStep::IntermediateCommitted)?;
         }
     }
-    if database_marker.schema_version == 5 && journal.to_schema_version == 6 {
+    if database_marker.schema_version == 5 && journal.to_schema_version >= 6 {
         schema6::apply(&mut connection)?;
+        database_marker.schema_version = 6;
+        if journal.to_schema_version > 6 {
+            milestone(MigrationStep::IntermediateCommitted)?;
+        }
+    }
+    if database_marker.schema_version == 6 && journal.to_schema_version == 7 {
+        schema7::apply(&mut connection)?;
     }
     milestone(MigrationStep::DatabaseCommitted)?;
     let database_marker = validate_database_state(&connection, &marker, &journal)?;
@@ -485,7 +492,10 @@ fn validate_journal(root: &Path, output: &Path, journal: &MigrationJournal) -> R
             && journal.to_schema_version == 5)
         || (journal.journal_format_version == 5
             && matches!(journal.from_schema_version, 1..=5)
-            && journal.to_schema_version == 6);
+            && journal.to_schema_version == 6)
+        || (journal.journal_format_version == 6
+            && matches!(journal.from_schema_version, 1..=6)
+            && journal.to_schema_version == 7);
     if !supported
         || journal.backup.schema_version != journal.from_schema_version
         || journal.backup.format_version != FORMAT_VERSION

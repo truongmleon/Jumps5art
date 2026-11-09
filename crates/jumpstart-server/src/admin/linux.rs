@@ -258,6 +258,17 @@ async fn reply(
                     })
                 },
             ),
+            Command::DevicesList { after, limit } => admin_reply(metadata.as_ref(), |lease| {
+                let page = lease.list_devices(after, limit)?;
+                Ok(json!({"scope": "device_authority", "page": page}))
+            }),
+            Command::DevicesRevoke { device_id } => admin_reply(
+                metadata.as_mut().map_err(|error| &*error),
+                |lease: &mut AdminMetadata| {
+                    let device = lease.revoke_device(device_id)?;
+                    Ok(json!({"scope": "device_revocation", "device": device}))
+                },
+            ),
             Command::Maintenance { enabled } => admin_reply(
                 metadata.as_mut().map_err(|error| &*error),
                 |lease: &mut AdminMetadata| {

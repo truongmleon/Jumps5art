@@ -402,3 +402,81 @@ fn maintenance_survives_restart_and_refuses_storage_apply_until_left() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown or expired"));
 }
+
+/// Exercise the CLI and daemon against a persisted device approval fixture.
+#[test]
+fn device_revocation_remains_in_the_catalog_after_restart() {
+    use jumpstart_domain::{ClientInstanceId, DeviceId, Owner};
+    use jumpstart_storage::{AdminMetadata, DeviceRegistration};
+
+    if geteuid().is_root() {
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    jumpstart_storage::initialize(&root).unwrap();
+    let id = DeviceId::new();
+    let key = [11; 32];
+    let instance_id = ClientInstanceId::new();
+    let grant = || DeviceRegistration {
+        device_id: id,
+        public_key: key,
+        name: "Library laptop".into(),
+        platform: "linux".into(),
+        app: Owner::Mass,
+        instance_id,
+        signed_receipt: b"signed receipt fixture".to_vec(),
+    };
+    let mut lease = AdminMetadata::open(&root).unwrap();
+    lease.register_device(grant()).unwrap();
+    assert!(lease.device_receipt(&key).unwrap().is_some());
+    drop(lease);
+    let mut daemon = start(&root, &socket);
+
+    let revoke = || {
+        command()
+            .args(["devices", "revoke", &id.to_string(), "--json", "--socket"])
+            .arg(&socket)
+            .output()
+            .unwrap()
+    };
+    let output = revoke();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let revoked: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repeated = revoke();
+    assert!(repeated.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&repeated.stdout).unwrap(),
+        revoked
+    );
+    assert!(revoked["device"]["revoked_at_ms"].is_string());
+
+    let pid = Pid::from_raw(i32::try_from(daemon.0.id()).unwrap()).unwrap();
+    kill_process(pid, Signal::TERM).unwrap();
+    assert!(daemon.0.wait().unwrap().success());
+    let mut lease = AdminMetadata::open(&root).unwrap();
+    assert!(lease.device_key_known(&key).unwrap());
+    assert!(lease.device_receipt(&key).unwrap().is_none());
+    assert!(lease.register_device(grant()).is_err());
+    drop(lease);
+
+    let _restarted = start(&root, &socket);
+    let output = command()
+        .args(["devices", "list", "--json", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["page"]["devices"][0], revoked["device"]);
+}

@@ -41,6 +41,7 @@ mod schema3;
 mod schema4;
 mod schema5;
 mod schema6;
+mod schema7;
 mod snapshot;
 #[cfg(target_os = "linux")]
 mod worlds;
@@ -55,6 +56,12 @@ pub(super) use jobs::{
 };
 pub(super) use migration::migrate;
 pub(super) use snapshot::{create_snapshot, verify_snapshot};
+
+// The Linux daemon is the device authority writer.
+#[cfg(target_os = "linux")]
+mod devices;
+#[cfg(target_os = "linux")]
+pub use devices::{DevicePage, DeviceRecord, DeviceRegistration, device_fingerprint};
 
 // Linux registration owns filesystem mutations and observations for the admin lease.
 #[cfg(target_os = "linux")]
@@ -495,6 +502,7 @@ fn create_database(path: &Path, marker: &FormatMarker) -> Result<()> {
     schema4::apply(&mut connection)?;
     schema5::apply(&mut connection)?;
     schema6::apply(&mut connection)?;
+    schema7::apply(&mut connection)?;
     verify_database(&connection, marker)?;
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -812,6 +820,10 @@ fn verify_database(connection: &Connection, marker: &FormatMarker) -> Result<()>
         expected_migrations.push((6, schema6::MIGRATION_NAME.to_owned(), schema6::checksum()));
         schema6::verify_state(connection)?;
     }
+    if version >= 7 {
+        expected_migrations.push((7, schema7::MIGRATION_NAME.to_owned(), schema7::checksum()));
+        schema7::verify_state(connection)?;
+    }
     if migrations != expected_migrations {
         return Err(StorageError::MigrationMismatch);
     }
@@ -863,6 +875,9 @@ fn verify_schema_objects(connection: &Connection, version: u32) -> Result<()> {
         5 => expected.extend(schema5::statements()),
         6.. => expected.extend(schema6::statements()),
         _ => {}
+    }
+    if version >= 7 {
+        expected.extend(schema7::statements());
     }
     expected.sort_unstable();
     let actual = connection
