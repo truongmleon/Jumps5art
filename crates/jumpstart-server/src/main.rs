@@ -39,6 +39,7 @@ use jumpstart_storage::{
 
 mod admin;
 mod health;
+mod update;
 
 /// Parsed options with `command: Command` selecting one local metadata operation.
 /// No network listener is configured or started by this development tool.
@@ -131,6 +132,11 @@ enum Command {
     Storage {
         #[command(subcommand)]
         command: StorageCommand,
+    },
+    /// Verify a signed server release before applying an update.
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommand,
     },
 }
 
@@ -325,6 +331,20 @@ enum StorageCommand {
     },
 }
 
+/// Read-only operations for a signed release and its compatibility evidence.
+#[derive(Subcommand)]
+enum UpdateCommand {
+    /// Verify a signed release directory against the running daemon's storage.
+    Plan {
+        #[arg(long)]
+        release_root: PathBuf,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Parse process arguments, execute the command, and report failures to stderr.
 ///
 /// # Returns
@@ -477,6 +497,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             }
         },
         Command::Jobs { command } => return run_jobs(command),
+        Command::Update { command } => match command {
+            UpdateCommand::Plan {
+                release_root,
+                socket,
+                json,
+            } => (
+                update::plan(&release_root, &socket)?,
+                json,
+                "Verified signed update preflight:",
+            ),
+        },
     };
     print_report(&report, title, json)
 }

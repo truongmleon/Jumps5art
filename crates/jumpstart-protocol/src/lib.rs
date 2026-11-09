@@ -21,6 +21,7 @@ mod finite;
 mod handshake;
 pub mod pairing;
 mod range;
+pub mod release;
 mod upload;
 
 pub use codec::{
