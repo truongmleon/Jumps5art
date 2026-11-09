@@ -6,8 +6,12 @@
 //! for an operator, not a durable volume identity or permission to write.
 
 use std::{
-    fs::File,
+    fs::{self, File},
     io::Read,
+    os::{
+        fd::OwnedFd,
+        unix::fs::{FileTypeExt, MetadataExt},
+    },
     path::{Component, Path, PathBuf},
 };
 
@@ -15,6 +19,7 @@ use rustix::fs::{
     AtFlags, CWD, Dir, Mode, OFlags, ResolveFlags, StatxFlags, openat2, statat, statx,
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{Result, StorageError};
 
@@ -22,7 +27,7 @@ const MOUNTINFO: &str = "/proc/self/mountinfo";
 const MAX_MOUNTINFO_BYTES: u64 = 1024 * 1024;
 
 /// Intended role of the candidate. The daemon must enforce role separation at apply.
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeRole {
     Primary,
@@ -30,7 +35,7 @@ pub enum VolumeRole {
 }
 
 /// Read-only evidence tied to one selected mount and directory.
-#[derive(Serialize)]
+#[derive(Clone, Eq, PartialEq, Serialize)]
 pub struct VolumeCandidate {
     pub path: PathBuf,
     pub role: VolumeRole,
@@ -38,6 +43,7 @@ pub struct VolumeCandidate {
     pub device_major: u32,
     pub device_minor: u32,
     pub directory_inode: String,
+    pub directory_birth: Option<String>,
     pub filesystem: String,
     pub read_only: bool,
     pub empty: bool,
@@ -56,6 +62,15 @@ pub fn inspect_volume_candidate(
     role: VolumeRole,
     metadata_root: &Path,
 ) -> Result<VolumeCandidate> {
+    Ok(open_volume_candidate(path, role, metadata_root)?.1)
+}
+
+/// Retain the exact opened directory alongside its current mount evidence.
+pub(crate) fn open_volume_candidate(
+    path: &Path,
+    role: VolumeRole,
+    metadata_root: &Path,
+) -> Result<(OwnedFd, VolumeCandidate)> {
     if !path.is_absolute()
         || path
             .components()
@@ -74,8 +89,13 @@ pub fn inspect_volume_candidate(
     )
     .map_err(|error| io("open volume candidate without following links", path, error))?;
     let identity_flags = StatxFlags::MNT_ID | StatxFlags::INO;
-    let stat = statx(&directory, "", AtFlags::EMPTY_PATH, identity_flags)
-        .map_err(|error| io("read volume mount identity", path, error))?;
+    let stat = statx(
+        &directory,
+        "",
+        AtFlags::EMPTY_PATH,
+        identity_flags | StatxFlags::BTIME,
+    )
+    .map_err(|error| io("read volume mount identity", path, error))?;
     if stat.stx_mask & identity_flags.bits() != identity_flags.bits() {
         return Err(StorageError::InvalidVolume(
             "the kernel did not report mount and inode identity",
@@ -120,19 +140,25 @@ pub fn inspect_volume_candidate(
     } else if !empty {
         blocking_reasons.push("a nonempty candidate requires explicit adoption");
     }
-    Ok(VolumeCandidate {
-        path: path.to_owned(),
-        role,
-        mount_id: stat.stx_mnt_id.to_string(),
-        device_major: stat.stx_dev_major,
-        device_minor: stat.stx_dev_minor,
-        directory_inode: stat.stx_ino.to_string(),
-        filesystem: filesystem.to_owned(),
-        read_only,
-        empty,
-        marker_present,
-        blocking_reasons,
-    })
+    let directory_birth = (stat.stx_mask & StatxFlags::BTIME.bits() != 0)
+        .then(|| format!("{}:{}", stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec));
+    Ok((
+        directory,
+        VolumeCandidate {
+            path: path.to_owned(),
+            role,
+            mount_id: stat.stx_mnt_id.to_string(),
+            device_major: stat.stx_dev_major,
+            device_minor: stat.stx_dev_minor,
+            directory_inode: stat.stx_ino.to_string(),
+            directory_birth,
+            filesystem: filesystem.to_owned(),
+            read_only,
+            empty,
+            marker_present,
+            blocking_reasons,
+        },
+    ))
 }
 
 /// Match an opened descriptor's mount ID to its filesystem and read-only flags.
@@ -188,4 +214,62 @@ fn io(action: &'static str, path: &Path, source: impl Into<std::io::Error>) -> S
         path: path.to_owned(),
         source: source.into(),
     }
+}
+
+/// Resolve the kernel device numbers to an unambiguous stable filesystem UUID.
+///
+/// `candidate` supplies the observed block device. Returns its UUID from
+/// Linux's udev aliases, or an error when exact filesystem identity is unknown.
+pub(crate) fn filesystem_uuid(candidate: &VolumeCandidate) -> Result<Uuid> {
+    if !matches!(candidate.filesystem.as_str(), "ext4" | "xfs") {
+        return Err(StorageError::InvalidVolume(
+            "registration currently requires ext4 or XFS",
+        ));
+    }
+    let path = Path::new("/dev/disk/by-uuid");
+    let mut matched = None;
+    for (index, entry) in fs::read_dir(path)
+        .map_err(|error| io("read filesystem UUID aliases", path, error))?
+        .enumerate()
+    {
+        if index >= 4096 {
+            return Err(StorageError::InvalidVolume(
+                "filesystem UUID alias limit exceeded",
+            ));
+        }
+        let entry = entry.map_err(|error| io("read filesystem UUID alias", path, error))?;
+        if !entry
+            .file_type()
+            .map_err(|error| io("inspect filesystem UUID alias", &entry.path(), error))?
+            .is_symlink()
+        {
+            continue;
+        }
+        let metadata = match fs::metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io("read filesystem UUID target", &entry.path(), error)),
+        };
+        if !metadata.file_type().is_block_device()
+            || rustix::fs::major(metadata.rdev()) != candidate.device_major
+            || rustix::fs::minor(metadata.rdev()) != candidate.device_minor
+        {
+            continue;
+        }
+        let id = entry.file_name();
+        let id = id
+            .to_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or(StorageError::InvalidVolume(
+                "the matching filesystem UUID is malformed",
+            ))?;
+        if matched.replace(id).is_some() {
+            return Err(StorageError::InvalidVolume(
+                "multiple aliases identify the candidate filesystem",
+            ));
+        }
+    }
+    matched.ok_or(StorageError::InvalidVolume(
+        "no stable UUID was observed for the candidate filesystem",
+    ))
 }

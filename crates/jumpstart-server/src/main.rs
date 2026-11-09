@@ -130,10 +130,15 @@ enum Command {
         #[command(subcommand)]
         command: JobCommand,
     },
-    /// Observe existing-directory storage capacity without approving writes.
+    /// Observe storage or register an approved primary through the daemon.
     Storage {
         #[command(subcommand)]
         command: StorageCommand,
+    },
+    /// Persist or clear the daemon's local mutation fence.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
     },
     /// Verify a signed server release before applying an update.
     Update {
@@ -302,7 +307,7 @@ fn parse_job_state(value: &str) -> Result<JobState, String> {
     }
 }
 
-/// Read-only filesystem observations, separate from verifying a metadata root.
+/// Observe capacity and plan or apply Linux volume registrations.
 ///
 /// `Inspect` owns an existing directory's positional `PathBuf` and a `bool`
 /// selecting JSON output. Its capacity observation checks neither disk health
@@ -323,9 +328,40 @@ enum StorageCommand {
         path: PathBuf,
         #[arg(long, value_parser = ["primary", "backup"])]
         role: String,
-        /// Request preflight evidence only.
+        /// Request preflight evidence and a plan ID if the candidate is eligible.
         #[arg(long)]
         plan: bool,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply or retry a previously approved Linux primary registration.
+    Apply {
+        /// Plan ID returned by storage register --plan.
+        plan_id: uuid::Uuid,
+        /// Confirm that the daemon could not verify this filesystem's encryption.
+        #[arg(long, required = true)]
+        acknowledge_unverified_encryption: bool,
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Commands that toggle the local daemon's durable maintenance state.
+#[derive(Subcommand)]
+enum MaintenanceCommand {
+    /// Prevent new local daemon mutations.
+    Enter {
+        #[arg(long, default_value = admin::SOCKET_PATH)]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-enable otherwise permitted local daemon mutations.
+    Leave {
         #[arg(long, default_value = admin::SOCKET_PATH)]
         socket: PathBuf,
         #[arg(long)]
@@ -488,7 +524,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             } => {
                 if !plan {
                     return Err(
-                        "volume registration currently supports --plan preflight only".into(),
+                        "use --plan to review the candidate before running storage apply".into(),
                     );
                 }
                 (
@@ -497,7 +533,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                     "Read-only volume registration preflight:",
                 )
             }
+            StorageCommand::Apply {
+                plan_id,
+                acknowledge_unverified_encryption,
+                socket,
+                json,
+            } => (
+                admin::apply_volume(&socket, plan_id, acknowledge_unverified_encryption)?,
+                json,
+                "Registered primary volume:",
+            ),
         },
+        Command::Maintenance { command } => {
+            let (enabled, socket, json) = match command {
+                MaintenanceCommand::Enter { socket, json } => (true, socket, json),
+                MaintenanceCommand::Leave { socket, json } => (false, socket, json),
+            };
+            (
+                admin::maintenance(&socket, enabled)?,
+                json,
+                "Local daemon maintenance state:",
+            )
+        }
         Command::Jobs { command } => return run_jobs(command),
         Command::Update { command } => match command {
             UpdateCommand::Plan {

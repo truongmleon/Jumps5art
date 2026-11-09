@@ -482,7 +482,7 @@ fn migration_requires_acknowledgment_before_storage_io() {
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
-/// Verify migration of current schema 4 reports a no-op, preserves identity and
+/// Verify migration of current schema 5 reports a no-op, preserves identity and
 /// database bytes, and does not create a recovery artifact. Fixture failures panic.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
@@ -491,7 +491,7 @@ fn migration_of_current_schema_reports_json_noop_without_creating_snapshot() {
     let source = parent.path().join("source");
     let snapshot = parent.path().join("unused-snapshot");
     let initial = initialize_source(&source);
-    assert_eq!(initial["schema_version"], 4);
+    assert_eq!(initial["schema_version"], jumpstart_storage::SCHEMA_VERSION);
     let marker_before = fs::read(source.join("format.json")).unwrap();
     let database_before = fs::read(source.join("database/jumpstart.sqlite")).unwrap();
     let output = command()
@@ -509,8 +509,14 @@ fn migration_of_current_schema_reports_json_noop_without_creating_snapshot() {
     assert!(output.stderr.is_empty());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["metadata"], initial);
-    assert_eq!(report["from_schema_version"], 4);
-    assert_eq!(report["to_schema_version"], 4);
+    assert_eq!(
+        report["from_schema_version"],
+        jumpstart_storage::SCHEMA_VERSION
+    );
+    assert_eq!(
+        report["to_schema_version"],
+        jumpstart_storage::SCHEMA_VERSION
+    );
     assert_eq!(report["backup"], Value::Null);
     assert_eq!(report["resumed"], false);
     assert_eq!(fs::read(source.join("format.json")).unwrap(), marker_before);
@@ -576,8 +582,8 @@ fn migration_noop_text_reports_versions_and_absent_backup() {
     );
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.starts_with("Verified offline development metadata migration:\n"));
-    assert!(text.contains("  from_schema_version: 4\n"));
-    assert!(text.contains("  to_schema_version: 4\n"));
+    assert!(text.contains("  from_schema_version: 5\n"));
+    assert!(text.contains("  to_schema_version: 5\n"));
     assert!(text.contains("  backup: null\n"));
     assert!(text.contains("  resumed: false\n"));
     assert!(!snapshot.exists());
@@ -735,7 +741,7 @@ fn queued_jobs_persist_and_read_commands_leave_metadata_unchanged() {
     let root = parent.path().join("metadata");
     let output = parent.path().join("snapshot");
     let initial = initialize_source(&root);
-    assert_eq!(initial["schema_version"], 4);
+    assert_eq!(initial["schema_version"], jumpstart_storage::SCHEMA_VERSION);
     let queued = enqueue_snapshot(&root, &output);
     let id = queued["job_id"].as_str().unwrap();
     assert_eq!(queued["state"], "queued");

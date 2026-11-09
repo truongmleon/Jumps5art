@@ -5,17 +5,20 @@
 //! check on the client side binds a response to the private directory's owner.
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fs,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use jumpstart_server::local_admin::{
     ADMIN_VERSION, Command, DEADLINE, Reply, Request, call, read, socket_owner, write,
 };
 use jumpstart_storage::{
-    AdminMetadata, StorageError, VolumeRole, inspect_capacity, inspect_volume_candidate,
+    AdminMetadata, StorageError, VolumeRegistrationPlan, VolumeRole, inspect_capacity,
+    inspect_volume_candidate,
 };
 use rustix::{net::sockopt::socket_peercred, process::geteuid};
 use serde_json::{Value, json};
@@ -25,6 +28,35 @@ use tokio::{
     signal::unix::{SignalKind, signal},
     time::timeout,
 };
+
+use uuid::Uuid;
+
+const PLAN_LIFETIME: Duration = Duration::from_secs(600);
+const MAX_PLANS: usize = 16;
+
+/// Holds only unaccepted plans; accepted plans and their IDs live in SQLite.
+#[derive(Default)]
+struct VolumePlans(BTreeMap<Uuid, (Instant, VolumeRegistrationPlan)>);
+
+impl VolumePlans {
+    /// Discard expired plans before admitting or accepting an operator request.
+    fn prune(&mut self) {
+        self.0.retain(|_, (expiry, _)| *expiry > Instant::now());
+    }
+
+    /// Save validated preflight evidence and return its daemon-local plan ID.
+    fn insert(&mut self, plan: VolumeRegistrationPlan) -> jumpstart_storage::Result<Uuid> {
+        self.prune();
+        if self.0.len() >= MAX_PLANS {
+            return Err(StorageError::AdminUnavailable(
+                "too many open registration plans",
+            ));
+        }
+        let id = Uuid::new_v4();
+        self.0.insert(id, (Instant::now() + PLAN_LIFETIME, plan));
+        Ok(id)
+    }
+}
 
 /// Owns the bound socket path. On shutdown it removes only its own filesystem entry.
 struct BoundSocket {
@@ -77,7 +109,7 @@ async fn accept(
     socket: &Path,
     uid: u32,
     root: &Path,
-    metadata: Result<AdminMetadata, StorageError>,
+    mut metadata: Result<AdminMetadata, StorageError>,
 ) -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -89,6 +121,7 @@ async fn accept(
         inode: entry.ino(),
     };
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+    let mut plans = VolumePlans::default();
     loop {
         tokio::select! {
             _ = terminate.recv() => return Ok(()),
@@ -104,7 +137,7 @@ async fn accept(
                 tokio::select! {
                     _ = terminate.recv() => return Ok(()),
                     _ = interrupt.recv() => return Ok(()),
-                    _ = timeout(DEADLINE, reply(&mut stream, root, &metadata)) => {}
+                    _ = timeout(DEADLINE, reply(&mut stream, root, &mut metadata, &mut plans)) => {}
                 }
             }
         }
@@ -119,7 +152,8 @@ async fn accept(
 async fn reply(
     stream: &mut UnixStream,
     root: &Path,
-    metadata: &Result<AdminMetadata, StorageError>,
+    metadata: &mut Result<AdminMetadata, StorageError>,
+    plans: &mut VolumePlans,
 ) -> Result<(), Box<dyn Error>> {
     let request: Request = read(stream).await?;
     let reply = if request.version != ADMIN_VERSION {
@@ -135,12 +169,13 @@ async fn reply(
                     .and_then(|lease| {
                         lease
                             .check_binding()
-                            .map(|()| lease.report())
+                            .and_then(|()| Ok((lease.report(), lease.maintenance()?)))
                             .map_err(|error| error.to_string())
                     }) {
-                    Ok(metadata) => json!({
+                    Ok((metadata, maintenance)) => json!({
                         "state": "metadata_verified",
                         "metadata": metadata,
+                        "maintenance": maintenance,
                     }),
                     Err(error) => json!({
                         "state": "recovery_required",
@@ -151,7 +186,7 @@ async fn reply(
             Command::Health => Reply::Ok {
                 report: live_health(root, metadata),
             },
-            Command::WorldsStatus => worlds_reply(metadata, |lease| {
+            Command::WorldsStatus => admin_reply(metadata.as_ref(), |lease| {
                 let evidence = lease.worlds_catalog_status()?;
                 let absent = evidence.registered_primaries == jumpstart_domain::Counter::ZERO;
                 Ok(json!({
@@ -162,46 +197,73 @@ async fn reply(
                     "evidence": evidence,
                 }))
             }),
-            Command::WorldsBackupList { limit } => worlds_reply(metadata, |lease| {
+            Command::WorldsBackupList { limit } => admin_reply(metadata.as_ref(), |lease| {
                 let index = lease.worlds_recovery_index(limit)?;
                 Ok(json!({"scope": "worlds_recovery_index", "index": index}))
             }),
-            Command::VolumePreflight { path, role } => match metadata {
-                Ok(metadata) => {
-                    match inspect_volume_candidate(&path, role, &metadata.report().root) {
-                        Ok(candidate) => Reply::Ok {
-                            report: json!({
-                                "scope": "registration_preflight",
-                                "candidate": candidate,
-                                "encryption": "unknown",
-                                "registered_topology": "not_checked",
-                            }),
-                        },
-                        Err(error) => Reply::Error {
-                            message: error.to_string(),
-                        },
+            Command::VolumePreflight { path, role } => admin_reply(metadata.as_ref(), |lease| {
+                let candidate = inspect_volume_candidate(&path, role, &lease.report().root)?;
+                let evidence = serde_json::to_value(&candidate)?;
+                let (plan_id, apply_blocker) = match lease
+                    .plan_primary(candidate)
+                    .and_then(|plan| plans.insert(plan))
+                {
+                    Ok(id) => (Some(id), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                Ok(json!({
+                    "scope": "registration_preflight",
+                    "candidate": evidence,
+                    "encryption": "unknown",
+                    "registered_topology": "not_checked",
+                    "plan_id": plan_id,
+                    "apply_blocker": apply_blocker,
+                    "expires_in_seconds": plan_id.map(|_| PLAN_LIFETIME.as_secs()),
+                }))
+            }),
+            Command::VolumeApply {
+                plan_id,
+                acknowledge_unverified_encryption,
+            } => admin_reply(
+                metadata.as_mut().map_err(|error| &*error),
+                |lease: &mut AdminMetadata| {
+                    if !acknowledge_unverified_encryption {
+                        return Err(StorageError::InvalidVolume(
+                            "apply requires --acknowledge-unverified-encryption",
+                        ));
                     }
-                }
-                Err(_) => Reply::Error {
-                    message: "verify the daemon's metadata before planning volume registration"
-                        .into(),
+                    plans.prune();
+                    let plan = plans.0.get(&plan_id).map(|(_, plan)| plan);
+                    let primary = lease.apply_primary(plan_id, plan)?;
+                    plans.0.remove(&plan_id);
+                    Ok(json!({
+                        "scope": "primary_registration",
+                        "plan_id": plan_id,
+                        "primary": primary,
+                    }))
                 },
-            },
+            ),
+            Command::Maintenance { enabled } => admin_reply(
+                metadata.as_mut().map_err(|error| &*error),
+                |lease: &mut AdminMetadata| {
+                    let maintenance = lease.set_maintenance(enabled)?;
+                    Ok(json!({"scope": "local_admin_maintenance", "maintenance": maintenance}))
+                },
+            ),
         }
     };
     write(stream, &reply).await
 }
 
-/// Query a Worlds component through the checked daemon lease or return a refusal.
+/// Run a command through the checked daemon lease or return its refusal.
 ///
 /// The closure is called only when a verified metadata lease exists. The
 /// resulting reply preserves storage refusals without exposing a raw connection.
-fn worlds_reply(
-    metadata: &Result<AdminMetadata, StorageError>,
-    query: impl FnOnce(&AdminMetadata) -> jumpstart_storage::Result<Value>,
+fn admin_reply<T>(
+    metadata: Result<T, &StorageError>,
+    query: impl FnOnce(T) -> jumpstart_storage::Result<Value>,
 ) -> Reply {
     let result = metadata
-        .as_ref()
         .map_err(ToString::to_string)
         .and_then(|lease| query(lease).map_err(|error| error.to_string()));
     match result {

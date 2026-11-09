@@ -74,7 +74,10 @@ pub use capacity::{
 };
 
 #[cfg(target_os = "linux")]
-pub use platform::{AdminMetadata, WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint};
+pub use platform::{
+    AdminMetadata, RegisteredPrimary, VolumeRegistrationPlan, WorldsCatalogStatus,
+    WorldsRecoveryIndex, WorldsRecoveryPoint,
+};
 #[cfg(target_os = "linux")]
 pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};
 
@@ -82,7 +85,7 @@ pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};
 mod volume;
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 pub const APPLICATION_ID: i32 = 0x4a53_4d44;
 pub const FORMAT_FILE: &str = "format.json";
 pub const LOCK_FILE: &str = "metadata.lock";
@@ -385,6 +388,9 @@ pub enum StorageError {
     /// The kernel could not establish the requested volume candidate's identity.
     #[error("invalid volume candidate: {0}")]
     InvalidVolume(&'static str),
+    /// The local admin request requires a verified and writable metadata lease.
+    #[error("local administration unavailable: {0}")]
+    AdminUnavailable(&'static str),
     /// A Worlds index read needs catalog storage and a bounded request.
     #[error("Worlds catalog unavailable: {0}")]
     WorldsCatalogUnavailable(&'static str),
