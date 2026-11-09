@@ -75,9 +75,11 @@ pub use capacity::{
 
 #[cfg(target_os = "linux")]
 pub use platform::{
-    AdminMetadata, RegisteredVolume, RegisteredVolumeHealth, VolumeRegistrationPlan,
-    WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint,
+    AdminMetadata, RegisteredHardwareTargets, RegisteredVolume, RegisteredVolumeHealth,
+    VolumeRegistrationPlan, WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint,
 };
+#[cfg(target_os = "linux")]
+pub use volume::topology::HardwareDevice;
 #[cfg(target_os = "linux")]
 pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};
 

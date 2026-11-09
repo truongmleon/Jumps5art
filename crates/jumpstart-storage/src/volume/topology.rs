@@ -8,10 +8,11 @@ use std::{
     fs::{self, File},
     io::Read,
     os::fd::AsFd,
+    os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
 };
 
-use rustix::fs::{AtFlags, StatxFlags, statx};
+use rustix::fs::{AtFlags, StatxFlags, major, minor, statx};
 
 use super::VolumeCandidate;
 use crate::{Result, StorageError};
@@ -25,6 +26,72 @@ pub(crate) struct PhysicalDisk {
     pub sysfs: PathBuf,
     pub failure_domain: PathBuf,
     hardware_id: String,
+}
+
+/// The OS device node and kernel instance that hardware diagnostics may read.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct HardwareDevice {
+    sysfs: PathBuf,
+    node: PathBuf,
+    numbers: (u32, u32),
+    disk_sequence: String,
+}
+
+impl HardwareDevice {
+    /// Return the checked block device path for the host diagnostics utility.
+    pub fn node(&self) -> &Path {
+        &self.node
+    }
+
+    /// Verify that the node still identifies the same Linux disk instance.
+    pub fn still_current(&self) -> bool {
+        read_attribute(&self.sysfs.join("diskseq")).is_ok_and(|seq| seq == self.disk_sequence)
+            && fs::symlink_metadata(&self.node).is_ok_and(|metadata| {
+                metadata.file_type().is_block_device()
+                    && (major(metadata.rdev()), minor(metadata.rdev())) == self.numbers
+            })
+    }
+}
+
+/// Resolve a checked mount to probeable physical devices without issuing I/O to them.
+pub(crate) fn hardware_devices(candidate: &VolumeCandidate) -> Result<Vec<HardwareDevice>> {
+    let disks = resolve(
+        Path::new(SYS),
+        candidate.device_major,
+        candidate.device_minor,
+    )?;
+    disks.into_iter().map(hardware_device).collect()
+}
+
+/// Bind the diagnostic path to the current kernel disk sequence and device number.
+fn hardware_device(disk: PhysicalDisk) -> Result<HardwareDevice> {
+    let node = Path::new("/dev").join(
+        disk.sysfs
+            .file_name()
+            .ok_or_else(|| unknown("kernel device name is unavailable"))?,
+    );
+    let numbers = read_attribute(&disk.sysfs.join("dev"))
+        .ok()
+        .and_then(|text| {
+            let (major, minor) = text.split_once(':')?;
+            Some((major.parse().ok()?, minor.parse().ok()?))
+        })
+        .ok_or_else(|| unknown("kernel device numbers are unavailable"))?;
+    let disk_sequence = read_attribute(&disk.sysfs.join("diskseq"))
+        .map_err(|_| unknown("kernel disk sequence is unavailable"))?;
+    if disk_sequence.parse::<u64>().is_err() {
+        return Err(unknown("kernel disk sequence is invalid"));
+    }
+    let device = HardwareDevice {
+        sysfs: disk.sysfs,
+        node,
+        numbers,
+        disk_sequence,
+    };
+    if !device.still_current() {
+        return Err(unknown("the device node no longer names the observed disk"));
+    }
+    Ok(device)
 }
 
 /// Check that ext4's mounted journal is on the data device, then resolve its disks.

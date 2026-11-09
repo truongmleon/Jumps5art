@@ -20,7 +20,7 @@ blake3.workspace = true
 jumpstart-protocol.workspace = true
 rustix = { workspace = true, features = ["net", "process"] }
 serde.workspace = true
-tokio = { version = "1.53", features = ["io-util", "macros", "net", "rt", "signal", "time"] }
+tokio = { version = "1.53", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 
 [dev-dependencies]
 tempfile.workspace = true

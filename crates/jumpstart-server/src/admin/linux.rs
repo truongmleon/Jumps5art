@@ -31,6 +31,8 @@ use tokio::{
 
 use uuid::Uuid;
 
+use super::hardware::{Monitor, POLL_INTERVAL};
+
 const PLAN_LIFETIME: Duration = Duration::from_secs(600);
 const MAX_PLANS: usize = 16;
 
@@ -122,10 +124,13 @@ async fn accept(
     };
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     let mut plans = VolumePlans::default();
+    let mut hardware = Monitor::new();
+    let mut poll = tokio::time::interval(POLL_INTERVAL);
     loop {
         tokio::select! {
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
+            _ = poll.tick() => hardware.refresh(&metadata),
             accepted = listener.accept() => {
                 let (mut stream, _) = accepted?;
                 let Ok(peer) = socket_peercred(&stream) else {
@@ -137,7 +142,7 @@ async fn accept(
                 tokio::select! {
                     _ = terminate.recv() => return Ok(()),
                     _ = interrupt.recv() => return Ok(()),
-                    _ = timeout(DEADLINE, reply(&mut stream, root, &mut metadata, &mut plans)) => {}
+                    _ = timeout(DEADLINE, reply(&mut stream, root, &mut metadata, &mut plans, &mut hardware)) => {}
                 }
             }
         }
@@ -154,6 +159,7 @@ async fn reply(
     root: &Path,
     metadata: &mut Result<AdminMetadata, StorageError>,
     plans: &mut VolumePlans,
+    hardware: &mut Monitor,
 ) -> Result<(), Box<dyn Error>> {
     let request: Request = read(stream).await?;
     let reply = if request.version != ADMIN_VERSION {
@@ -184,7 +190,7 @@ async fn reply(
                 },
             },
             Command::Health => Reply::Ok {
-                report: live_health(root, metadata),
+                report: live_health(root, metadata, hardware.report()),
             },
             Command::WorldsStatus => admin_reply(metadata.as_ref(), |lease| {
                 let evidence = lease.worlds_catalog_status()?;
@@ -261,6 +267,11 @@ async fn reply(
             ),
         }
     };
+    if matches!(&reply, Reply::Ok { report } if matches!(
+        report["scope"].as_str(), Some("primary_registration" | "backup_registration")
+    )) {
+        hardware.refresh(metadata);
+    }
     write(stream, &reply).await
 }
 
@@ -286,7 +297,11 @@ fn admin_reply<T>(
 /// Capacity is measured now. Metadata evidence names the startup verification
 /// and is downgraded if its file binding changes. Unknown components retain
 /// explicit status so an accessible daemon cannot imply healthy hardware.
-fn live_health(root: &Path, metadata: &Result<AdminMetadata, StorageError>) -> Value {
+fn live_health(
+    root: &Path,
+    metadata: &Result<AdminMetadata, StorageError>,
+    disk_hardware: Value,
+) -> Value {
     let capacity = crate::health::capacity_component(inspect_capacity(root));
     let registered_volumes = match metadata {
         Ok(lease) => match lease.registered_volume_health() {
@@ -332,7 +347,7 @@ fn live_health(root: &Path, metadata: &Result<AdminMetadata, StorageError>) -> V
         "capacity": capacity,
         "snapshot_jobs": jobs,
         "registered_volumes": registered_volumes,
-        "disk_hardware": {"status": "unknown"},
+        "disk_hardware": disk_hardware,
     })
 }
 
