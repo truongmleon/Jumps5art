@@ -13,7 +13,9 @@ use std::{
 };
 
 use jumpstart_protocol::{FRAME_PREFIX_BYTES, MAX_FRAME_BYTES, decode_body, write_frame};
-use jumpstart_storage::{AdminMetadata, StorageError, VolumeRole, inspect_volume_candidate};
+use jumpstart_storage::{
+    AdminMetadata, StorageError, VolumeRole, inspect_capacity, inspect_volume_candidate,
+};
 use rustix::{net::sockopt::socket_peercred, process::geteuid};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -41,6 +43,7 @@ struct Request {
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Status,
+    Health,
     VolumePreflight { path: PathBuf, role: VolumeRole },
 }
 
@@ -91,7 +94,7 @@ pub(super) fn serve(root: &Path, socket: &Path) -> Result<(), Box<dyn Error>> {
     Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(accept(socket, uid.as_raw(), metadata))
+        .block_on(accept(socket, uid.as_raw(), root, metadata))
 }
 
 /// Bind and handle one request at a time, with a deadline on each connection.
@@ -102,6 +105,7 @@ pub(super) fn serve(root: &Path, socket: &Path) -> Result<(), Box<dyn Error>> {
 async fn accept(
     socket: &Path,
     uid: u32,
+    root: &Path,
     metadata: Result<AdminMetadata, StorageError>,
 ) -> Result<(), Box<dyn Error>> {
     let mut terminate = signal(SignalKind::terminate())?;
@@ -129,7 +133,7 @@ async fn accept(
                 tokio::select! {
                     _ = terminate.recv() => return Ok(()),
                     _ = interrupt.recv() => return Ok(()),
-                    _ = timeout(DEADLINE, reply(&mut stream, &metadata)) => {}
+                    _ = timeout(DEADLINE, reply(&mut stream, root, &metadata)) => {}
                 }
             }
         }
@@ -143,6 +147,7 @@ async fn accept(
 /// new root or changes the daemon state.
 async fn reply(
     stream: &mut UnixStream,
+    root: &Path,
     metadata: &Result<AdminMetadata, StorageError>,
 ) -> Result<(), Box<dyn Error>> {
     let request: Request = read(stream).await?;
@@ -153,16 +158,27 @@ async fn reply(
     } else {
         match request.command {
             Command::Status => Reply::Ok {
-                report: match metadata {
+                report: match metadata
+                    .as_ref()
+                    .map_err(ToString::to_string)
+                    .and_then(|lease| {
+                        lease
+                            .check_binding()
+                            .map(|()| lease.report())
+                            .map_err(|error| error.to_string())
+                    }) {
                     Ok(metadata) => json!({
                         "state": "metadata_verified",
-                        "metadata": metadata.report(),
+                        "metadata": metadata,
                     }),
                     Err(error) => json!({
                         "state": "recovery_required",
-                        "detail": error.to_string(),
+                        "detail": error,
                     }),
                 },
+            },
+            Command::Health => Reply::Ok {
+                report: live_health(root, metadata),
             },
             Command::VolumePreflight { path, role } => match metadata {
                 Ok(metadata) => {
@@ -190,12 +206,62 @@ async fn reply(
     write(stream, &reply).await
 }
 
+/// Collect independent live evidence from the selected root and retained lease.
+///
+/// Capacity is measured now. Metadata evidence names the startup verification
+/// and is downgraded if its file binding changes. Unknown components retain
+/// explicit status so an accessible daemon cannot imply healthy hardware.
+fn live_health(root: &Path, metadata: &Result<AdminMetadata, StorageError>) -> Value {
+    let capacity = crate::health::capacity_component(inspect_capacity(root));
+    let (metadata_evidence, jobs) = match metadata {
+        Ok(lease) => match lease.check_binding() {
+            Ok(()) => (
+                json!({
+                    "status": "verified_at_startup",
+                    "verification_age_ms": lease.verification_age().as_millis().to_string(),
+                    "evidence": lease.report(),
+                }),
+                match lease.snapshot_job_counts() {
+                    Ok(Some(counts)) => json!({"status": "observed", "by_state": counts}),
+                    Ok(None) => {
+                        json!({"status": "unknown", "detail": "root predates the snapshot job ledger"})
+                    }
+                    Err(error) => json!({"status": "unknown", "detail": error.to_string()}),
+                },
+            ),
+            Err(error) => (
+                json!({"status": "unavailable", "detail": error.to_string(),
+                    "next_action": "Stop the daemon and verify the mounted metadata root."}),
+                json!({"status": "unknown"}),
+            ),
+        },
+        Err(error) => (
+            json!({"status": "recovery_required", "detail": error.to_string(),
+                "next_action": "Inspect the root and its recovery journal before restarting."}),
+            json!({"status": "unknown"}),
+        ),
+    };
+    json!({
+        "scope": "live_local_admin",
+        "metadata": metadata_evidence,
+        "capacity": capacity,
+        "snapshot_jobs": jobs,
+        "registered_volumes": {"status": "unknown"},
+        "disk_hardware": {"status": "unknown"},
+    })
+}
+
 /// Query the daemon only after checking the socket path and peer credentials.
 ///
 /// `socket` is an absolute path in the daemon's private directory. Returns the
 /// status report or a connection, authentication, timeout, or remote error.
 pub(super) fn status(socket: &Path) -> Result<Value, Box<dyn Error>> {
     call(socket, Command::Status)
+}
+
+/// Return the current health evidence from the protected daemon socket.
+pub(super) fn health(socket: &Path) -> Result<Value, Box<dyn Error>> {
+    call(socket, Command::Health)
 }
 
 /// Exchange a typed, read-only registration preflight request.
