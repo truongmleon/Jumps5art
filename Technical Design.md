@@ -1188,6 +1188,8 @@ An open SQLite read transaction may grow WAL retention. Bound the database-copy 
 
 Newly copied bytes are read back before first successful publication. Previously verified immutable backup objects can be reused; their last verification remains visible rather than being rewritten as newly verified.
 
+The development inventory reads a verified schema-4 metadata snapshot and counts the catalog resources each primary must preserve, including retained versions and Recently Deleted items. Deduplicate blob bytes within each primary and count a missing or unverified placement on the primary where it is needed. An indexed Worlds recovery point remains a catalog observation until its manifest and objects are verified. The inventory fixture checks the same blob shared by several versions on one primary and referenced separately on another, with only one recorded verified placement.
+
 ### 14.3 Mirroring, History, and Failure Isolation
 
 After an accepted source-library/user-state or Worlds-catalog commit, enqueue a coalesced backup intent. Backup jobs, health checks, verification timestamps, GC and other housekeeping do not trigger their own new source snapshots. Begin normal incremental synchronization after 60 seconds of quiet, no later than 15 minutes while an eligible destination is online; explicit **Back Up Now** bypasses that delay. Store scheduler state so restarts coalesce pending changes rather than inventing repeated snapshots. Paused, missing, stale, full, identity-conflicted, and unreadable destinations remain distinct visible states. A successful mirror updates the current generation; it is never a destructive filesystem sync of directory differences.

@@ -33,9 +33,9 @@ use clap::{Parser, Subcommand};
 use jumpstart_domain::{BlobId, Counter, JobId, JobState, PositiveCounter, SyncEpoch};
 use jumpstart_storage::{
     SnapshotJob, SnapshotJobChangePage, cancel_job, create_snapshot, enqueue_snapshot_job,
-    initialize, inspect, inspect_capacity, inspect_job, job_history, list_jobs, list_jobs_in_state,
-    migrate, pull_job_changes, recover_jobs, restore_metadata_snapshot, run_next_snapshot_job,
-    run_snapshot_job, verify_snapshot,
+    initialize, inspect, inspect_capacity, inspect_job, inventory_snapshot, job_history, list_jobs,
+    list_jobs_in_state, migrate, pull_job_changes, recover_jobs, restore_metadata_snapshot,
+    run_next_snapshot_job, run_snapshot_job, verify_snapshot,
 };
 
 mod admin;
@@ -180,6 +180,14 @@ enum SnapshotCommand {
     },
     /// Verify an existing snapshot without changing it or requiring its source.
     Verify {
+        #[arg(long)]
+        snapshot_root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inventory retained catalog objects and recorded placements in a verified snapshot.
+    Inventory {
+        /// Existing standalone snapshot with the application catalog.
         #[arg(long)]
         snapshot_root: PathBuf,
         #[arg(long)]
@@ -601,6 +609,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 serde_json::to_value(verify_snapshot(&snapshot_root)?)?,
                 json,
                 "Verified local metadata snapshot (not a full backup):",
+            ),
+            SnapshotCommand::Inventory {
+                snapshot_root,
+                json,
+            } => (
+                serde_json::to_value(inventory_snapshot(&snapshot_root)?)?,
+                json,
+                "Backup catalog inventory (recorded placements only):",
             ),
             SnapshotCommand::Restore {
                 snapshot_root,

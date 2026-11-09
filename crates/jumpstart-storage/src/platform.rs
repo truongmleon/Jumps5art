@@ -33,6 +33,7 @@ use super::{
     LOCK_FILE, MIGRATION_FILE, MetadataReport, Result, SCHEMA_VERSION, StorageError,
 };
 
+mod backup_inventory;
 mod changes;
 mod history;
 mod jobs;
@@ -50,6 +51,7 @@ mod worlds;
 #[cfg(target_os = "linux")]
 pub use worlds::{WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint};
 
+pub(super) use backup_inventory::inventory_snapshot;
 pub(super) use changes::pull_job_changes;
 pub(super) use history::job_history;
 pub(super) use jobs::{

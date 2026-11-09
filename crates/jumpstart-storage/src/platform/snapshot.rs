@@ -196,6 +196,18 @@ pub(super) fn create_snapshot_from_verified(
 /// Rejects extra entries (including journals), symlinks, unsupported formats,
 /// incorrect/missing watermarks, mismatched hashes/sizes, and invalid SQLite state.
 pub(crate) fn verify_snapshot(root: &Path) -> Result<SnapshotReport> {
+    let (report, connection) = open_verified_snapshot(root)?;
+    connection
+        .close()
+        .map_err(|(_, error)| StorageError::Database(error))?;
+    Ok(report)
+}
+
+/// Verify a standalone snapshot and keep its checked read-only connection.
+///
+/// `root` selects the bundle. Returns the captured report and the connection
+/// used to verify its database so inventory reads the same SQLite view.
+pub(super) fn open_verified_snapshot(root: &Path) -> Result<(SnapshotReport, Connection)> {
     require_directory(root)?;
     let root =
         fs::canonicalize(root).map_err(|error| io("resolve snapshot directory", root, error))?;
@@ -230,10 +242,7 @@ pub(crate) fn verify_snapshot(root: &Path) -> Result<SnapshotReport> {
             "snapshot change sequence does not match its database",
         ));
     }
-    connection
-        .close()
-        .map_err(|(_, error)| StorageError::Database(error))?;
-    Ok(SnapshotReport {
+    let report = SnapshotReport {
         root,
         snapshot_format_version: manifest.snapshot_format_version,
         scope: manifest.scope,
@@ -244,7 +253,8 @@ pub(crate) fn verify_snapshot(root: &Path) -> Result<SnapshotReport> {
         change_seq: manifest.change_seq,
         database_bytes: manifest.database_bytes,
         database_hash: manifest.database_hash,
-    })
+    };
+    Ok((report, connection))
 }
 
 /// Require the exact two-file scope before opening an immutable SQLite connection.
