@@ -265,10 +265,8 @@ impl PairingAdmin {
         event: NetworkEvent,
     ) {
         self.expire();
-        let result = self.handle(metadata, event).await;
-        if result.is_err() {
-            self.expire();
-        }
+        let _ = self.handle(metadata, event).await;
+        self.expire();
     }
 
     /// Advance a submission or return a receipt scoped to its authenticated key.
@@ -363,7 +361,6 @@ impl PairingAdmin {
                 });
             }
         }
-        self.expire();
         Ok(())
     }
 
