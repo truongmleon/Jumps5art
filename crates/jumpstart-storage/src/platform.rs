@@ -40,6 +40,10 @@ mod migration;
 mod schema3;
 mod schema4;
 mod snapshot;
+#[cfg(target_os = "linux")]
+mod worlds;
+#[cfg(target_os = "linux")]
+pub use worlds::{WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint};
 
 pub(super) use changes::pull_job_changes;
 pub(super) use history::job_history;

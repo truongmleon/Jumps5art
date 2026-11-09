@@ -74,7 +74,7 @@ pub use capacity::{
 };
 
 #[cfg(target_os = "linux")]
-pub use platform::AdminMetadata;
+pub use platform::{AdminMetadata, WorldsCatalogStatus, WorldsRecoveryIndex, WorldsRecoveryPoint};
 #[cfg(target_os = "linux")]
 pub use volume::{VolumeCandidate, VolumeRole, inspect_volume_candidate};
 
@@ -100,6 +100,8 @@ pub const SNAPSHOT_DATABASE_FILE: &str = "metadata.sqlite";
 pub const MAX_JOB_CHANGE_PAGE_BYTES: usize = 1_048_576;
 /// Maximum number of whole saved-job changes requested in one bounded page.
 pub const MAX_JOB_CHANGE_PAGE_RECORDS: u16 = 500;
+/// Largest bounded page of recorded Worlds recovery points.
+pub const MAX_WORLDS_INDEX_ROWS: u16 = 100;
 
 /// The answer to "which server bookkeeping root did this operation check?"
 ///
@@ -383,6 +385,9 @@ pub enum StorageError {
     /// The kernel could not establish the requested volume candidate's identity.
     #[error("invalid volume candidate: {0}")]
     InvalidVolume(&'static str),
+    /// A Worlds index read needs catalog storage and a bounded request.
+    #[error("Worlds catalog unavailable: {0}")]
+    WorldsCatalogUnavailable(&'static str),
     /// A local change-page request has an invalid budget or future position.
     #[error("invalid snapshot-job change cursor: {0}")]
     InvalidJobChangeCursor(&'static str),
