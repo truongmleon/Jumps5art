@@ -739,6 +739,12 @@ One generation job at a time, lowest scheduler priority. Start only with a grant
 
 ## 10. Mass
 
+### Local Mass development slice
+
+The Linux local Mass service uses the protected daemon socket, the shared catalog, and an explicitly selected registered primary. The preview accepts a whole upload of up to 32 MiB and a BLAKE3 digest, and stores the request digest and planned item/version IDs before publishing content. Only a synchronized object and recovery manifest may enter the catalog transaction. Matching retries return the original identity. Schema 8 keeps these local receipts and chunk hashes separate from the snapshot-job feed pending the general application feed in §18.1. The local browse and search pages use stable item-ID cursors. Each data read verifies an immutable 1 MiB chunk or final tail against the recorded digest before returning bytes.
+
+The local regression checks require a changed chunk to fail before bytes are returned, a conflicting immutable object to remain intact, a file version to become visible with its matching placement, and an unregistered primary to refuse a socket upload. The publication fixture uses scratch storage for fault injection. Physical-volume and distributed-client release gates remain in §§4, 6, and 17.
+
 ### 10.1 Download State and Provider Contracts
 
 `RemoteSource` exposes `probe -> identity/capabilities/input_needed`, `fetch(range_or_piece)`, `verify`, and `refresh_identity`. `remote_download` stores a redacted source locator, secret-store references, selected files/destination, source identity, checked byte ranges/pieces, retry budget, worker version, and commit receipt.

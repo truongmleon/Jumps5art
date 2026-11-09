@@ -72,7 +72,7 @@ Heading: `Verified offline development metadata:`
 | `server_id` | UUID string for this server |
 | `sync_epoch` | UUID string recorded with the server ID |
 | `format_version` | Number, currently `1` |
-| `schema_version` | Number, currently `7` |
+| `schema_version` | Number, currently `8` |
 | `change_seq` | Stored decimal-string position; unavailable (`null`) in schema 1 |
 | `journal_mode` | SQLite journal mode of the stored database |
 | `integrity_check` | `"ok"` after the check succeeds |
@@ -117,7 +117,7 @@ cargo run -p jumpstart-server -- migrate --metadata-root /tmp/jumpstart-metadata
 | `--development` | yes | Acknowledges the schema upgrade and limited scope of the recovery copy. |
 | `--json` | no | Print the report as JSON. |
 
-The command upgrades a verified older root to schema 7 after saving a verified pre-upgrade snapshot. A current root reports both versions as 7 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 7. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
+The command upgrades a verified older root to schema 8 after saving a verified pre-upgrade snapshot. A current root reports both versions as 8 and `backup: null`. A journal from an older binary finishes its recorded target. Run a second migration with a fresh snapshot path to reach schema 8. See [recovery and retry details](../../CONTRIBUTING.md#recoverable-metadata-schema-upgrade).
 
 ## `snapshot create`
 

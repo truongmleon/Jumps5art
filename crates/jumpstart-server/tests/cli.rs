@@ -482,7 +482,7 @@ fn migration_requires_acknowledgment_before_storage_io() {
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
-/// Verify migration of current schema 7 reports a no-op, preserves identity and
+/// Verify migration of current schema 8 reports a no-op, preserves identity and
 /// database bytes, and does not create a recovery artifact. Fixture failures panic.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
@@ -582,8 +582,8 @@ fn migration_noop_text_reports_versions_and_absent_backup() {
     );
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.starts_with("Verified offline development metadata migration:\n"));
-    assert!(text.contains("  from_schema_version: 7\n"));
-    assert!(text.contains("  to_schema_version: 7\n"));
+    assert!(text.contains("  from_schema_version: 8\n"));
+    assert!(text.contains("  to_schema_version: 8\n"));
     assert!(text.contains("  backup: null\n"));
     assert!(text.contains("  resumed: false\n"));
     assert!(!snapshot.exists());

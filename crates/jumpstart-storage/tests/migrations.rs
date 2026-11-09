@@ -128,7 +128,7 @@ mod filesystem {
     /// Panics if the simulated journal cannot be serialized or written.
     fn write_journal(root: &Path, source: &MetadataReport, backup: &SnapshotReport) {
         let journal = json!({
-            "journal_format_version": 6,
+            "journal_format_version": 7,
             "from_schema_version": source.schema_version,
             "to_schema_version": SCHEMA_VERSION,
             "server_id": source.server_id,
@@ -417,7 +417,7 @@ mod filesystem {
         let valid: Value =
             serde_json::from_slice(&fs::read(root.join(MIGRATION_FILE)).unwrap()).unwrap();
         let mut future = valid.clone();
-        future["journal_format_version"] = json!(7);
+        future["journal_format_version"] = json!(8);
         let mut wrong_identity = valid.clone();
         wrong_identity["server_id"] = json!(jumpstart_domain::ServerId::new());
         for bytes in [

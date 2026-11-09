@@ -480,3 +480,37 @@ fn device_revocation_remains_in_the_catalog_after_restart() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["page"]["devices"][0], revoked["device"]);
 }
+
+/// The protected socket exposes the real empty catalog and refuses an unbound primary.
+#[test]
+fn mass_socket_lists_the_catalog_and_rejects_an_unregistered_destination() {
+    use jumpstart_server::mass_client::MassClient;
+    use jumpstart_storage::mass::MassDestination;
+    use uuid::Uuid;
+
+    if geteuid().is_root() {
+        return;
+    }
+    let parent = tempfile::tempdir().unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = parent.path().join("metadata");
+    let socket = parent.path().join("admin.sock");
+    jumpstart_storage::initialize(&root).unwrap();
+    let _daemon = start(&root, &socket);
+    let client = MassClient::new(socket);
+    assert!(client.list(None, None).unwrap().items.is_empty());
+    assert!(client.primaries().unwrap().is_empty());
+    let error = client
+        .import(
+            MassDestination {
+                request_id: Uuid::new_v4(),
+                primary_id: Uuid::new_v4(),
+                parent: None,
+                name: "file.txt".into(),
+            },
+            b"cannot reach storage",
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("registered primary"));
+    assert!(client.list(None, None).unwrap().items.is_empty());
+}

@@ -103,6 +103,37 @@ struct Intent {
 }
 
 impl AdminMetadata {
+    /// Open a finalized primary and verify the marker before using its handle.
+    pub(super) fn registered_primary_root(
+        &self,
+        id: Uuid,
+        write: bool,
+    ) -> Result<(OwnedFd, VolumeCandidate)> {
+        self.check_binding()?;
+        let plan = self
+            .source
+            .connection
+            .query_row(
+                "SELECT plan_id FROM volume_registrations
+             WHERE primary_id=?1 AND registered_volume_id IS NOT NULL",
+                [id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StorageError::Mass("select a registered primary"))?;
+        let intent = self
+            .load_intent(Uuid::from_bytes(plan))?
+            .ok_or(StorageError::Integrity(
+                "registered primary is missing its journal entry",
+            ))?;
+        let (directory, observed) = self.open_intent(&intent)?;
+        verify_marker(&directory, &intent.path, MARKER, &intent.marker)?;
+        if write && observed.read_only {
+            return Err(StorageError::Mass("the primary is mounted read-only"));
+        }
+        Ok((directory, observed))
+    }
+
     /// Validate read-only preflight evidence and return an eligible volume plan.
     pub fn plan_volume(&self, candidate: VolumeCandidate) -> Result<VolumeRegistrationPlan> {
         self.require_registration_writes()?;

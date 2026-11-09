@@ -172,6 +172,9 @@ async fn reply(
         }
     } else {
         match request.command {
+            Command::Mass { request } => {
+                return super::mass::reply(stream, metadata, request).await;
+            }
             Command::Status => Reply::Ok {
                 report: match metadata
                     .as_ref()
