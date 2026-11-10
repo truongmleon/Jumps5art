@@ -1,4 +1,4 @@
-//! Implements device enrollment and checked catalog/file reads for Finder.
+//! Implements device enrollment and verified catalog and file operations for Finder.
 //!
 //! Each process opens one pinned iroh session. A file is materialized into a
 //! private staging file only after its received ranges and full digest agree.
@@ -23,8 +23,8 @@ use jumpstart_domain::{
 };
 use jumpstart_protocol::Hello;
 use jumpstart_server::remote_mass::{
-    ALPN, Call, CatalogItems, CatalogPage, DEADLINE, Get, Greeting, List, Outcome, Range,
-    RangeReply, Reply, capability, read, write,
+    ALPN, Call, CatalogItems, CatalogPage, Create, CreateContent, DEADLINE, Get, Greeting, List,
+    Outcome, Range, RangeReply, Reply, capability, create_capability, read, write,
 };
 use jumpstart_storage::mass::{MASS_CHUNK, MAX_MASS_IMPORT, MassFile, MassItem};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -57,6 +57,13 @@ enum Command {
     Item {
         profile: Profile,
         id: ItemId,
+    },
+    Create {
+        profile: Profile,
+        request_id: Uuid,
+        parent: ItemId,
+        name: String,
+        input: Option<PathBuf>,
     },
     Fetch {
         profile: Profile,
@@ -120,6 +127,7 @@ struct Session {
     _connection: iroh::endpoint::Connection,
     output: SendStream,
     input: RecvStream,
+    can_create: bool,
 }
 
 /// A destination owned by this helper until complete verification and sync.
@@ -206,6 +214,18 @@ async fn execute(command: Command) -> Result<Value, Failure> {
             let mut session = Session::open(&profile).await?;
             Ok(serde_json::to_value(session.item(id).await?)?)
         }
+        Command::Create {
+            profile,
+            request_id,
+            parent,
+            name,
+            input,
+        } => {
+            let mut session = Session::open(&profile).await?;
+            Ok(serde_json::to_value(
+                session.create(request_id, parent, name, input).await?,
+            )?)
+        }
         Command::Fetch {
             profile,
             id,
@@ -241,11 +261,11 @@ impl Session {
             let hello = Hello::new(
                 env!("CARGO_PKG_VERSION"),
                 profile.instance_id,
-                vec![feature.clone()],
+                vec![feature.clone(), create_capability()],
                 vec![feature],
             )?;
             write(&mut output, &hello).await?;
-            match read::<Greeting>(&mut input).await? {
+            let can_create = match read::<Greeting>(&mut input).await? {
                 Greeting::Ready { welcome } => {
                     welcome.validate_for(&hello)?;
                     if welcome.server_id != profile.server_id {
@@ -253,14 +273,16 @@ impl Session {
                             "the Mass server identity changed; pair again explicitly".into()
                         );
                     }
+                    welcome.capabilities.contains(&create_capability())
                 }
                 Greeting::Error { error } => return Err(error.message.into()),
-            }
+            };
             Ok(Self {
                 _endpoint: endpoint,
                 _connection: connection,
                 output,
                 input,
+                can_create,
             })
         })
         .await?
@@ -268,9 +290,19 @@ impl Session {
 
     /// Send one request and validate its matching response before using it.
     async fn call<T: DeserializeOwned>(&mut self, request: Call) -> Result<T, Failure> {
+        self.call_with_bytes(request, &[]).await
+    }
+
+    /// Send an optional exact raw body after its JSON control frame.
+    async fn call_with_bytes<T: DeserializeOwned>(
+        &mut self,
+        request: Call,
+        bytes: &[u8],
+    ) -> Result<T, Failure> {
         timeout(DEADLINE, async {
             let (id, _) = request.envelope();
             write(&mut self.output, &request).await?;
+            self.output.write_all(bytes).await?;
             let reply: Reply<T> = read(&mut self.input).await?;
             if reply.request_id != id {
                 return Err("the Mass server replied to a different request".into());
@@ -281,6 +313,62 @@ impl Session {
             }
         })
         .await?
+    }
+
+    /// Send one sealed local create and verify the publication receipt.
+    async fn create(
+        &mut self,
+        request_id: Uuid,
+        parent: ItemId,
+        name: String,
+        input: Option<PathBuf>,
+    ) -> Result<MassItem, Failure> {
+        if !self.can_create {
+            return Err("this server has no paired Mass create support".into());
+        }
+        let mut bytes = Vec::new();
+        let content = if let Some(input) = input {
+            let file = File::open(input)?;
+            if !file.metadata()?.is_file() {
+                return Err("the pending Mass source is not a regular file".into());
+            }
+            file.take(MAX_MASS_IMPORT as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_MASS_IMPORT {
+                return Err("the pending Mass file exceeds 32 MiB".into());
+            }
+            Some((
+                Counter::from_u64(bytes.len() as u64)?,
+                BlobId::hash_bytes(&bytes),
+            ))
+        } else {
+            None
+        };
+        let item: MassItem = self
+            .call_with_bytes(
+                Call::Create {
+                    request_id,
+                    schema_version: 1,
+                    body: Create {
+                        parent,
+                        name: name.clone(),
+                        content: content.map(|(length, blob_id)| CreateContent { length, blob_id }),
+                    },
+                },
+                &bytes,
+            )
+            .await?;
+        if item.parent != Some(parent)
+            || item.name != name
+            || item
+                .file
+                .as_ref()
+                .map(|file| (file.byte_length, file.blob_id))
+                != content
+        {
+            return Err("the Mass create receipt did not match the pending save".into());
+        }
+        Ok(item)
     }
 
     /// Retrieve the exact item by stable ID or report its absence.

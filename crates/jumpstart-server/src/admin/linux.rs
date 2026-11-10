@@ -101,7 +101,7 @@ pub(super) fn serve(
     if socket_owner(socket)? != uid.as_raw() {
         return Err("the runtime directory must belong to the daemon user".into());
     }
-    let metadata = AdminMetadata::open(root);
+    let mut metadata = AdminMetadata::open(root);
     if matches!(metadata, Err(StorageError::InUse)) {
         return Err(StorageError::InUse.into());
     }
@@ -154,7 +154,7 @@ async fn accept(
             _ = interrupt.recv() => return Ok(()),
             _ = poll.tick() => hardware.refresh(&metadata),
             Some(event) = pairing_events.recv() => pairing.receive(&metadata, event).await,
-            Some(event) = mass_events.recv() => sessions.receive(&metadata, event),
+            Some(event) = mass_events.recv() => sessions.receive(&mut metadata, event),
             accepted = listener.accept() => {
                 let (mut stream, _) = accepted?;
                 let Ok(peer) = socket_peercred(&stream) else {
