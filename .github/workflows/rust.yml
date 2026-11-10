@@ -65,7 +65,7 @@ jobs:
           JUMPSTART_MASS_TEST_PRIMARY="$scratch/volume/mass-primary" \
             cargo test --locked -p jumpstart-server --test admin \
               linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes -- --nocapture
-      - name: Build the unsigned Finder app and check its filename mapping
+      - name: Build the unsigned Finder app and check its native journal
         if: runner.os == 'macOS'
         shell: bash
         run: |
@@ -73,8 +73,12 @@ jobs:
           trap 'rm -rf -- "$scratch"' EXIT
           export MASS_SWIFT_MODULE_CACHE="$scratch/modules"
           cargo build --locked -p jumpstart-server --bin mass-device
-          bash apps/mass-macos/build.sh --unsigned "$scratch/Mass Finder.app" target/debug/mass-device
+          MASS_ENABLE_WRITE_PREVIEW=1 bash apps/mass-macos/build.sh --unsigned "$scratch/Mass Finder.app" target/debug/mass-device
           swiftc -swift-version 5 -warnings-as-errors -module-cache-path "$MASS_SWIFT_MODULE_CACHE" \
             apps/mass-macos/Provider/MountNames.swift apps/mass-macos/Tests/MountNamesCheck.swift \
             -o "$scratch/check-names"
           "$scratch/check-names"
+          swiftc -swift-version 5 -warnings-as-errors -module-cache-path "$MASS_SWIFT_MODULE_CACHE" \
+            apps/mass-macos/Provider/WriteJournal.swift apps/mass-macos/Tests/WriteJournalCheck.swift \
+            -o "$scratch/check-writes"
+          "$scratch/check-writes"

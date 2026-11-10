@@ -21,6 +21,7 @@ iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
 jumpstart-protocol.workspace = true
 serde.workspace = true
 tokio = { version = "1.53", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+sha2 = "0.10"
 zeroize = "1.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]

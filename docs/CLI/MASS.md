@@ -78,3 +78,14 @@ Use `--unsigned` for a compile and bundle check without signing materials. Finde
 Use **Refresh Finder** to refresh the root catalog. **Remove and forget Mac** removes the native domain and its local credential. Revoke that installation on the server with `jumpstart-server devices revoke DEVICE_ID` to cancel its active Mass sessions and prevent reconnects.
 
 The signed Finder registration, App Sandbox and Keychain handoff, and the Finder action require a real user-session acceptance run. The unsigned CI build verifies the native bundle and persistent filename mapping. The isolated Linux integration verifies the paired helper against real published bytes and confirms that a mismatched or revoked instance is refused.
+
+
+### Opt in to new files and folders from Finder
+
+Build the signed app with `MASS_ENABLE_WRITE_PREVIEW=1` and use the matching Linux daemon. The default signed build remains read-only.
+
+Within an existing Mass folder, copy in a regular file up to 32 MiB or create a new folder. The child inherits the parent's registered primary. Finder creates a local copy first. The extension syncs its private intent and the exact bytes to disk before contacting the server. The Linux daemon verifies the original, publishes it without replacement, and returns the same item on replay of the same paired operation.
+
+If the server is offline, the connection drops, or a name is occupied, the local save remains **Pending Sync**. Open the host app and choose **Refresh Finder** after the server is reachable. To keep a conflicting local copy outside Mass, copy it out in Finder before removing the domain. The removal action asks macOS to preserve dirty user data and reveals the returned recovery location when available.
+
+The create preview applies to new files and folders below the root. Existing-file edits, rename, move, overwrite, delete, root writes, and office atomic replacement are outside this preview. The signed Finder write acceptance still needs to exercise save and retry behavior on a real Mac.

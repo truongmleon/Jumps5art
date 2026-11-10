@@ -601,6 +601,7 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
         mass::{MASS_CHUNK, MassDestination},
     };
     use rusqlite::{Connection, params};
+    use sha2::{Digest, Sha256};
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     use uuid::Uuid;
 
@@ -737,6 +738,7 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
         let create = |request_id| serde_json::json!({
             "action": "create", "profile": profile, "parent": folder.id,
             "name": "Finder upload.bin", "request_id": request_id, "input": upload,
+            "sha256": format!("{:x}", Sha256::digest(b"new Finder bytes")),
         });
         let published = device_helper(create(request_id));
         assert_eq!(published["status"], "ok", "{published}");

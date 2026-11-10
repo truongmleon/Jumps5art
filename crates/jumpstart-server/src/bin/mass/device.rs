@@ -29,6 +29,7 @@ use jumpstart_server::remote_mass::{
 use jumpstart_storage::mass::{MASS_CHUNK, MAX_MASS_IMPORT, MassFile, MassItem};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::{runtime::Builder, time::timeout};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -64,6 +65,7 @@ enum Command {
         parent: ItemId,
         name: String,
         input: Option<PathBuf>,
+        sha256: Option<String>,
     },
     Fetch {
         profile: Profile,
@@ -220,10 +222,13 @@ async fn execute(command: Command) -> Result<Value, Failure> {
             parent,
             name,
             input,
+            sha256,
         } => {
             let mut session = Session::open(&profile).await?;
             Ok(serde_json::to_value(
-                session.create(request_id, parent, name, input).await?,
+                session
+                    .create(request_id, parent, name, input, sha256)
+                    .await?,
             )?)
         }
         Command::Fetch {
@@ -322,6 +327,7 @@ impl Session {
         parent: ItemId,
         name: String,
         input: Option<PathBuf>,
+        sha256: Option<String>,
     ) -> Result<MassItem, Failure> {
         if !self.can_create {
             return Err("this server has no paired Mass create support".into());
@@ -337,11 +343,18 @@ impl Session {
             if bytes.len() > MAX_MASS_IMPORT {
                 return Err("the pending Mass file exceeds 32 MiB".into());
             }
+            let actual = format!("{:x}", Sha256::digest(&bytes));
+            if sha256.as_deref() != Some(actual.as_str()) {
+                return Err("the pending Mass file no longer matches its sealed digest".into());
+            }
             Some((
                 Counter::from_u64(bytes.len() as u64)?,
                 BlobId::hash_bytes(&bytes),
             ))
         } else {
+            if sha256.is_some() {
+                return Err("the pending Mass source is missing".into());
+            }
             None
         };
         let item: MassItem = self

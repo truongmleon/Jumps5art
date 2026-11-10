@@ -79,6 +79,14 @@ struct HelperRequest: Encodable {
     var id: String? = nil
     var version: String? = nil
     var output: String? = nil
+    var request_id: UUID? = nil
+    var input: String? = nil
+    var sha256: String? = nil
+}
+
+/// Read the opt-in build flag from the app or extension bundle.
+func finderWritePreview(_ bundle: Bundle) -> Bool {
+    bundle.object(forInfoDictionaryKey: "MassWritePreview") as? Bool == true
 }
 
 /// An operation refusal shown in setup or mapped to a File Provider error.
