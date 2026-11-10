@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/photogenic/src-tauri",
     "crates/jumpstart-domain",
     "crates/jumpstart-protocol",
     "crates/jumpstart-storage",
