@@ -1,0 +1,82 @@
+name: Photogenic Apple
+
+on:
+  pull_request:
+    paths:
+      - 'apps/photogenic/**'
+      - 'Assets/Icons/Photogenic.png'
+      - '.github/workflows/photogenic.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/photogenic/**'
+      - 'Assets/Icons/Photogenic.png'
+      - '.github/workflows/photogenic.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+
+permissions:
+  contents: read
+
+jobs:
+  apple:
+    name: Photogenic on ${{ matrix.platform }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macOS, iOS simulator]
+    defaults:
+      run:
+        working-directory: apps/photogenic
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install locked app dependencies
+        run: |
+          xcodebuild -version
+          rustup show active-toolchain
+          npm ci
+      - name: Check atomic original-resource staging
+        if: matrix.platform == 'macOS'
+        run: |
+          swiftc -swift-version 5 -warnings-as-errors \
+            src-tauri/apple/Sources/OriginalStaging.swift src-tauri/apple/Tests/OriginalStagingCheck.swift \
+            -o "$RUNNER_TEMP/check-photo-staging"
+          "$RUNNER_TEMP/check-photo-staging"
+      - name: Bundle macOS Photogenic
+        if: matrix.platform == 'macOS'
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: |
+          npm run tauri -- build --debug --bundles app --ci -- --locked
+          app="../../target/debug/bundle/macos/Photogenic.app"
+          codesign --verify --strict "$app"
+          plutil -extract NSPhotoLibraryUsageDescription raw "$app/Contents/Info.plist"
+      - name: Bundle Photogenic for the iOS simulator
+        if: matrix.platform == 'iOS simulator'
+        run: |
+          if [[ "$(uname -m)" == arm64 ]]; then
+            rustup target add aarch64-apple-ios-sim
+            simulator=aarch64-sim
+          else
+            rustup target add x86_64-apple-ios
+            simulator=x86_64
+          fi
+          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          npm run tauri -- ios init --ci --skip-targets-install
+          npm run tauri -- ios build --target "$simulator" --debug --no-sign --ci -- --locked
+          app="$(find src-tauri/gen/apple -type d -name Photogenic.app -print -quit)"
+          test -n "$app"
+          plutil -extract NSPhotoLibraryUsageDescription raw "$app/Info.plist"
