@@ -1,4 +1,4 @@
-//! Serves Mass catalog reads over authenticated application QUIC.
+//! Serves Mass catalog reads and create-only writes over authenticated QUIC.
 //!
 //! Network tasks carry no database connection. They send requests to the
 //! daemon's lease owner, which checks authority for every request and closes
@@ -7,17 +7,17 @@
 use std::{collections::BTreeMap, error::Error, net::SocketAddr, sync::Arc};
 
 use iroh::{Endpoint, SecretKey, endpoint::Connection};
-use jumpstart_domain::{BlobId, ClientInstanceId, Counter, DeviceId, Owner};
+use jumpstart_domain::{BlobId, ClientInstanceId, Counter, DeviceId, ItemId, Owner};
 use jumpstart_protocol::{
     ErrorCode, Hello, ProtocolError, ProtocolLimits, ReadRange, ServerHandshake, negotiate,
 };
 use jumpstart_server::remote_mass::{
-    ALPN, AcceptedRange, Call, CatalogItems, CatalogPage, DEADLINE, Greeting, Outcome, Range,
-    RangeReply, Reply, capability, read, refusal, write,
+    ALPN, AcceptedRange, Call, CatalogItems, CatalogPage, Create, DEADLINE, Greeting, Outcome,
+    Range, RangeReply, Reply, capability, create_capability, read, refusal, write,
 };
 use jumpstart_storage::{
     AdminMetadata, StorageError,
-    mass::{MASS_CHUNK, MASS_PAGE},
+    mass::{MASS_CHUNK, MASS_PAGE, MAX_MASS_IMPORT, MassDestination, MassImport, MassItem},
 };
 use serde_json::Value;
 use tokio::{
@@ -27,6 +27,7 @@ use tokio::{
 use uuid::Uuid;
 
 const CONNECTIONS: usize = 16;
+const CREATE_SLOTS: usize = 2;
 type Failure = Box<dyn Error + Send + Sync>;
 
 /// A request accompanied by its kernel-authenticated connection and reply channel.
@@ -42,6 +43,7 @@ enum Work {
     Request {
         instance: ClientInstanceId,
         call: Call,
+        inbound: Vec<u8>,
     },
 }
 
@@ -58,7 +60,11 @@ pub(super) struct Sessions(BTreeMap<usize, (DeviceId, Connection)>);
 
 impl Sessions {
     /// Authorize and execute one network event without yielding the metadata lease.
-    pub(super) fn receive(&mut self, metadata: &Result<AdminMetadata, StorageError>, event: Event) {
+    pub(super) fn receive(
+        &mut self,
+        metadata: &mut Result<AdminMetadata, StorageError>,
+        event: Event,
+    ) {
         self.0
             .retain(|_, (_, connection)| connection.close_reason().is_none());
         let response = self.respond(metadata, &event.connection, event.work);
@@ -80,7 +86,7 @@ impl Sessions {
     /// Check the connection's actual public key and the exact paired instance.
     fn respond(
         &mut self,
-        metadata: &Result<AdminMetadata, StorageError>,
+        metadata: &mut Result<AdminMetadata, StorageError>,
         connection: &Connection,
         work: Work,
     ) -> Response {
@@ -100,7 +106,7 @@ impl Sessions {
                 })
         };
         let authority = metadata
-            .as_ref()
+            .as_mut()
             .map_err(|_| unavailable())
             .and_then(|lease| lookup(lease).map(|device| (lease, device)));
         match work {
@@ -120,7 +126,7 @@ impl Sessions {
                             server_id: report.server_id,
                             sync_epoch: report.sync_epoch,
                             server_build: env!("CARGO_PKG_VERSION").into(),
-                            supported_features: vec![capability()],
+                            supported_features: vec![capability(), create_capability()],
                             limits,
                             latest_seq: Counter::ZERO,
                             minimum_seq: Counter::ZERO,
@@ -142,10 +148,11 @@ impl Sessions {
                     authorized,
                 }
             }
-            Work::Request { call, .. } => {
+            Work::Request { call, inbound, .. } => {
                 let (request_id, _) = call.envelope();
                 let authorized = authority.is_ok();
-                let result = authority.and_then(|(lease, _)| execute(lease, call));
+                let result =
+                    authority.and_then(|(lease, device)| execute(lease, device, call, &inbound));
                 let (result, bytes) = match result {
                     Ok((value, bytes)) => (Outcome::Ok { value }, bytes),
                     Err(error) => (Outcome::Error { error }, Vec::new()),
@@ -188,16 +195,18 @@ pub(super) fn disabled() -> mpsc::Receiver<Event> {
 /// Admit bounded concurrent connections and refuse excess work before TLS negotiation.
 async fn accept(endpoint: Endpoint, send: mpsc::Sender<Event>) {
     let capacity = Arc::new(Semaphore::new(CONNECTIONS));
+    let writes = Arc::new(Semaphore::new(CREATE_SLOTS));
     while let Some(incoming) = endpoint.accept().await {
         let Ok(slot) = capacity.clone().try_acquire_owned() else {
             incoming.refuse();
             continue;
         };
         let send = send.clone();
+        let writes = writes.clone();
         tokio::spawn(async move {
             let _slot = slot;
             if let Ok(Ok(connection)) = timeout(DEADLINE, incoming).await {
-                let _ = exchange(&connection, &send).await;
+                let _ = exchange(&connection, &send, &writes).await;
                 connection.close(0u32.into(), b"Mass session closed");
             }
         });
@@ -205,10 +214,15 @@ async fn accept(endpoint: Endpoint, send: mpsc::Sender<Event>) {
 }
 
 /// Run one sequential bidirectional stream with a deadline at each boundary.
-async fn exchange(connection: &Connection, send: &mpsc::Sender<Event>) -> Result<(), Failure> {
+async fn exchange(
+    connection: &Connection,
+    send: &mpsc::Sender<Event>,
+    writes: &Semaphore,
+) -> Result<(), Failure> {
     let (mut output, mut input) = timeout(DEADLINE, connection.accept_bi()).await??;
     let hello: Hello = timeout(DEADLINE, read(&mut input)).await??;
     let instance = hello.client_instance_id;
+    let create_negotiated = hello.supported_features.contains(&create_capability());
     let welcome = timeout(DEADLINE, dispatch(connection, send, Work::Hello(hello))).await??;
     timeout(DEADLINE, write(&mut output, &welcome.control)).await??;
     if !welcome.authorized {
@@ -216,10 +230,36 @@ async fn exchange(connection: &Connection, send: &mpsc::Sender<Event>) -> Result
         let _ = timeout(DEADLINE, output.stopped()).await;
         return Ok(());
     }
-    while let Ok(Ok(call)) = timeout(DEADLINE, read(&mut input)).await {
+    while let Ok(Ok(call)) = timeout(DEADLINE, read::<Call>(&mut input)).await {
+        // The greeting has already authenticated this peer. Bound bytes in
+        // memory across all connections, then recheck authority at commit.
+        let _slot;
+        let mut inbound = Vec::new();
+        if let Call::Create { body, .. } = &call {
+            if !create_negotiated {
+                return Err("this Mass session did not negotiate create support".into());
+            }
+            _slot = timeout(DEADLINE, writes.acquire()).await??;
+            if let Some(content) = &body.content {
+                let length = content.length.value();
+                if length > MAX_MASS_IMPORT as u64 {
+                    return Err("the Mass upload exceeds its byte limit".into());
+                }
+                inbound.resize(length as usize, 0);
+                timeout(DEADLINE, input.read_exact(&mut inbound)).await??;
+            }
+        }
         let response = timeout(
             DEADLINE,
-            dispatch(connection, send, Work::Request { instance, call }),
+            dispatch(
+                connection,
+                send,
+                Work::Request {
+                    instance,
+                    call,
+                    inbound,
+                },
+            ),
         )
         .await??;
         timeout(DEADLINE, async {
@@ -254,8 +294,13 @@ async fn dispatch(
     Ok(receive.await?)
 }
 
-/// Apply only the negotiated read methods, each scoped to Mass catalog ownership.
-fn execute(lease: &AdminMetadata, call: Call) -> Result<(Value, Vec<u8>), ProtocolError> {
+/// Apply each operation on the owner task with Mass-scoped catalog access.
+fn execute(
+    lease: &mut AdminMetadata,
+    device: DeviceId,
+    call: Call,
+    inbound: &[u8],
+) -> Result<(Value, Vec<u8>), ProtocolError> {
     if call.envelope().1 != 1 {
         return Err(refusal(
             ErrorCode::Unsupported,
@@ -296,7 +341,85 @@ fn execute(lease: &AdminMetadata, call: Call) -> Result<(Value, Vec<u8>), Protoc
             Ok((to_value(reply), Vec::new()))
         }
         Call::Range { body, .. } => range(lease, body),
+        Call::Create {
+            request_id, body, ..
+        } => {
+            let item = create(lease, device, request_id, body, inbound)?;
+            Ok((to_value(item), Vec::new()))
+        }
     }
+}
+
+/// Publish a new Mass child using the parent's verified primary and a device-scoped receipt.
+fn create(
+    lease: &mut AdminMetadata,
+    device: DeviceId,
+    request_id: Uuid,
+    request: Create,
+    inbound: &[u8],
+) -> Result<MassItem, ProtocolError> {
+    let Create {
+        parent,
+        name,
+        content,
+    } = request;
+    let primary_id = folder_primary(lease, parent)?;
+    let mut receipt = blake3::Hasher::new_derive_key("jumpstart paired Mass create v1");
+    receipt.update(device.as_uuid().as_bytes());
+    receipt.update(request_id.as_bytes());
+    let mut scoped = [0; 16];
+    scoped.copy_from_slice(&receipt.finalize().as_bytes()[..16]);
+    let destination = MassDestination {
+        request_id: Uuid::from_bytes(scoped),
+        primary_id,
+        parent: Some(parent),
+        name,
+    };
+    let result = if let Some(content) = content {
+        lease.mass_import(
+            MassImport {
+                destination,
+                length: content.length,
+                blob_id: content.blob_id,
+            },
+            inbound,
+        )
+    } else {
+        lease.mass_create_folder(destination)
+    };
+    result.map_err(|error| match error {
+        StorageError::Mass("a file or folder with that name already exists") => refusal(
+            ErrorCode::Conflict,
+            "A Mass item already uses that name. Your local copy is retained.",
+        ),
+        StorageError::Mass("this request ID was previously used for different inputs") => refusal(
+            ErrorCode::IdempotencyMismatch,
+            "This pending save has different inputs from its original attempt.",
+        ),
+        StorageError::Mass("upload length or BLAKE3 digest did not verify") => refusal(
+            ErrorCode::Invalid,
+            "The uploaded bytes did not match their manifest.",
+        ),
+        _ => refusal(
+            ErrorCode::Unavailable,
+            "Mass could not publish the new item. Your local copy is retained.",
+        ),
+    })
+}
+
+/// Resolve destinations through the same Mass-only catalog used by reads.
+fn folder_primary(lease: &AdminMetadata, parent: ItemId) -> Result<Uuid, ProtocolError> {
+    lease
+        .mass_item(parent)
+        .ok()
+        .filter(|item| item.file.is_none())
+        .map(|item| item.primary_id)
+        .ok_or_else(|| {
+            refusal(
+                ErrorCode::NotFound,
+                "The destination Mass folder is unavailable.",
+            )
+        })
 }
 
 /// Verify every touched chunk before returning an exact raw range.

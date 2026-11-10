@@ -1,4 +1,4 @@
-//! Defines the paired, read-only Mass RPC subset used by the Finder helper.
+//! Defines the paired Mass RPC subset used by the Finder helper.
 //!
 //! Iroh authenticates the connection key. The receiver checks the paired
 //! database instance separately before catalog metadata or bytes are returned.
@@ -37,6 +37,12 @@ pub enum Call {
         schema_version: u16,
         body: Get,
     },
+    #[serde(rename = "Mass.Create")]
+    Create {
+        request_id: Uuid,
+        schema_version: u16,
+        body: Create,
+    },
     #[serde(rename = "Transfer.ReadRange")]
     Range {
         request_id: Uuid,
@@ -55,6 +61,11 @@ impl Call {
                 ..
             }
             | Self::Get {
+                request_id,
+                schema_version,
+                ..
+            }
+            | Self::Create {
                 request_id,
                 schema_version,
                 ..
@@ -82,6 +93,24 @@ pub struct List {
 #[serde(deny_unknown_fields)]
 pub struct Get {
     pub ids: Vec<ItemId>,
+}
+
+/// Create a new file or folder inside an existing Mass folder. A file's raw
+/// bytes follow this frame, and a folder carries no content descriptor.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Create {
+    pub parent: ItemId,
+    pub name: String,
+    pub content: Option<CreateContent>,
+}
+
+/// The exact content the server is permitted to publish for a new file.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateContent {
+    pub length: Counter,
+    pub blob_id: BlobId,
 }
 
 /// Read the exact range of an identified immutable file version.
@@ -172,6 +201,11 @@ pub fn refusal(code: ErrorCode, message: &'static str) -> ProtocolError {
 /// Return the versioned read capability carried by both sides of the handshake.
 pub fn capability() -> Capability {
     Capability::new(FEATURE).expect("the fixed Mass capability is valid")
+}
+
+/// Advertise create-only writes separately from read access.
+pub fn create_capability() -> Capability {
+    Capability::new("mass.create").expect("the fixed Mass capability is valid")
 }
 
 /// Read a bounded JSON frame without trusting the declared allocation size.

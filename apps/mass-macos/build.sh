@@ -17,6 +17,8 @@ if [[ "$output" != *.app || ! -d "$(dirname "$output")" || -e "$output" || -L "$
 fi
 
 bundle_id="${MASS_BUNDLE_ID:-com.jumpstart.mass.finder}"
+writes="${MASS_ENABLE_WRITE_PREVIEW:-0}"
+[[ "$writes" == 0 || "$writes" == 1 ]]
 team="UNSIGNED"
 prefix="UNSIGNED"
 if [[ "$mode" == --signed ]]; then
@@ -44,7 +46,7 @@ swiftc "${flags[@]}" -parse-as-library -module-name MassFinder \
   -o "$app/Contents/MacOS/MassFinder"
 swiftc "${flags[@]}" -parse-as-library -application-extension -module-name MassFinderExtension \
   -Xlinker -e -Xlinker _NSExtensionMain \
-  "$root/Shared/MassConnection.swift" "$root/Provider/MountNames.swift" "$root/Provider/MassProvider.swift" \
+  "$root/Shared/MassConnection.swift" "$root/Provider/MountNames.swift" "$root/Provider/WriteJournal.swift" "$root/Provider/MassProvider.swift" \
   -o "$provider/Contents/MacOS/MassFinderExtension"
 
 cp "$helper" "$app/Contents/Helpers/mass-device"
@@ -55,6 +57,9 @@ plutil -replace CFBundleIdentifier -string "$bundle_id" "$app/Contents/Info.plis
 plutil -replace CFBundleIdentifier -string "$bundle_id.provider" "$provider/Contents/Info.plist"
 for item in "$app" "$provider"; do
   plutil -replace MassKeychainGroup -string "$group" "$item/Contents/Info.plist"
+  if [[ "$writes" == 1 ]]; then
+    plutil -insert MassWritePreview -bool true "$item/Contents/Info.plist"
+  fi
   plutil -lint "$item/Contents/Info.plist"
 done
 

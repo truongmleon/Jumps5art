@@ -601,6 +601,7 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
         mass::{MASS_CHUNK, MassDestination},
     };
     use rusqlite::{Connection, params};
+    use sha2::{Digest, Sha256};
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     use uuid::Uuid;
 
@@ -731,11 +732,38 @@ fn linux_mass_mount_exposes_catalog_folders_and_refuses_kernel_writes() {
         }));
         assert_eq!(fetch["status"], "ok", "{fetch}");
         assert_eq!(fs::read(&output).unwrap(), bytes);
+        let upload = parent.path().join("finder-upload.bin");
+        fs::write(&upload, b"new Finder bytes").unwrap();
+        let request_id = Uuid::new_v4();
+        let create = |request_id| serde_json::json!({
+            "action": "create", "profile": profile, "parent": folder.id,
+            "name": "Finder upload.bin", "request_id": request_id, "input": upload,
+            "sha256": format!("{:x}", Sha256::digest(b"new Finder bytes")),
+        });
+        let published = device_helper(create(request_id));
+        assert_eq!(published["status"], "ok", "{published}");
+        assert_eq!(device_helper(create(request_id))["value"]["id"], published["value"]["id"]);
+        assert_eq!(device_helper(create(Uuid::new_v4()))["status"], "error");
+        let created_folder = device_helper(serde_json::json!({
+            "action": "create", "profile": profile, "parent": folder.id,
+            "name": "Finder folder", "request_id": Uuid::new_v4(),
+        }));
+        assert_eq!(created_folder["status"], "ok", "{created_folder}");
+        assert!(created_folder["value"]["file"].is_null());
+        let written = parent.path().join("finder-upload-readback.bin");
+        let read_back = device_helper(serde_json::json!({
+            "action": "fetch", "profile": profile, "id": published["value"]["id"],
+            "version": published["value"]["file"]["version_id"], "output": written,
+        }));
+        assert_eq!(read_back["status"], "ok", "{read_back}");
+        assert_eq!(fs::read(written).unwrap(), b"new Finder bytes");
         let mut wrong = profile.clone();
         wrong["instance_id"] = serde_json::to_value(ClientInstanceId::new()).unwrap();
         assert_eq!(device_helper(serde_json::json!({"action": "probe", "profile": wrong}))["status"], "error");
         call(&socket, AdminCommand::DevicesRevoke { device_id: *device }).unwrap();
         assert_eq!(device_helper(serde_json::json!({"action": "probe", "profile": profile}))["status"], "error");
+        assert_eq!(device_helper(create(request_id))["status"], "error");
+        eprintln!("verified paired Finder create, replay, collision, readback, and write revocation");
         eprintln!("verified the Finder helper's paired catalog, file download, instance check, and revocation");
         bytes
     });

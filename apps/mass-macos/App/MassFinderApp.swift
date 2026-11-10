@@ -30,7 +30,9 @@ private struct SetupView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Label("Mass in Finder", systemImage: "externaldrive.connected.to.line.below")
                     .font(.largeTitle.weight(.semibold))
-                Text("Browse your Mass library as a read-only Finder location.")
+                Text(finderWritePreview(.main)
+                     ? "Browse Mass and add new items inside existing folders."
+                     : "Browse your Mass library as a read-only Finder location.")
                     .foregroundStyle(.secondary)
 
                 if setup.profile == nil {
@@ -187,6 +189,10 @@ private final class Setup: ObservableObject {
             guard let manager = NSFileProviderManager(for: domain(profile)) else {
                 throw MassFailure(message: "Open Mass in Finder before refreshing.")
             }
+            if finderWritePreview(.main) {
+                try await checkEndpoint(profile)
+                try await manager.signalErrorResolved(NSFileProviderError(.serverUnreachable))
+            }
             try await manager.signalEnumerator(for: .rootContainer)
             show("Finder refresh requested.")
         } catch { show(error.localizedDescription, failed: true) }
@@ -200,7 +206,9 @@ private final class Setup: ObservableObject {
         do {
             let domain = domain(profile)
             if try await NSFileProviderManager.domains().contains(where: { $0.identifier == domain.identifier }) {
-                try await NSFileProviderManager.remove(domain)
+                if let preserved = try await NSFileProviderManager.remove(domain, mode: .preserveDirtyUserData) {
+                    NSWorkspace.shared.activateFileViewerSelecting([preserved])
+                }
             }
             try MassKeychain(bundle: .main).forget()
             self.profile = nil

@@ -1,4 +1,4 @@
-// Presents the paired Mass catalog as a read-only Finder location.
+// Presents the paired Mass catalog in Finder and seals new items before upload.
 // Only the explicit Mass Download action can retrieve remote file bytes.
 
 import CryptoKit
@@ -103,7 +103,7 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
         return progress
     }
 
-    /// Refuse Finder writes while the durable offline save journal is unavailable.
+    /// Seal and publish a new child of an existing Mass folder when enabled.
     func createItem(
         basedOn itemTemplate: NSFileProviderItem,
         fields: NSFileProviderItemFields,
@@ -112,8 +112,18 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
-        completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission))
-        return Progress(totalUnitCount: 0)
+        guard finderWritePreview(bundle), itemTemplate.parentItemIdentifier != .rootContainer,
+              !options.contains(.mayAlreadyExist), !options.contains(.deletionConflicted),
+              itemTemplate.contentType != .symbolicLink,
+              (itemTemplate.contentType == .folder) == (url == nil) else {
+            completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission))
+            return Progress(totalUnitCount: 0)
+        }
+        return run({ progress in
+            try self.publishCreate(itemTemplate, source: url, progress: progress)
+        }, completion: { item, error in
+            completionHandler(item, [], false, error)
+        })
     }
 
     /// Refuse changes to either file bytes or the mounted namespace.
@@ -130,7 +140,7 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
         return Progress(totalUnitCount: 0)
     }
 
-    /// Refuse deletion through the read-only Finder preview.
+    /// Refuse deletion while the preview supports new items only.
     func deleteItem(
         identifier: NSFileProviderItemIdentifier,
         baseVersion version: NSFileProviderItemVersion,
@@ -204,7 +214,32 @@ final class MassProvider: NSObject, NSFileProviderReplicatedExtension, NSFilePro
     /// Reserve the stable, collision-safe name and wrap the underlying entry.
     private func finderItem(_ entry: MassEntry) throws -> FinderItem {
         let display = try names.displayName(parent: entry.parent, id: entry.id, canonical: entry.name)
-        return FinderItem(entry: entry, display: display)
+        return FinderItem(entry: entry, display: display, allowChildren: finderWritePreview(bundle))
+    }
+
+    /// Retain the OS-owned snapshot before sending it to the paired daemon.
+    private func publishCreate(
+        _ template: NSFileProviderItem, source: URL?, progress: Progress
+    ) throws -> FinderItem {
+        let parent = try checkedID(template.parentItemIdentifier)
+        let journal = WriteJournal(root: storage.appendingPathComponent("PendingCreates", isDirectory: true))
+        let intent = try journal.seal(template: template.itemIdentifier.rawValue, parent: parent,
+                                      name: template.filename.precomposedStringWithCanonicalMapping, source: source)
+        let entry: MassEntry
+        do {
+            entry = try MassHelper(bundle: bundle).run(
+                HelperRequest(action: "create", profile: try profile(), name: intent.name, parent: intent.parent,
+                              request_id: intent.id, input: journal.input(intent)?.path, sha256: intent.hash),
+                as: MassEntry.self, progress: progress
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw MassFailure(message: "Pending Sync. " + error.localizedDescription)
+        }
+        let item = try finderItem(entry)
+        try? journal.finish(intent)
+        return item
     }
 
     /// Verify an explicit download and record it separately for this Finder item.
@@ -300,15 +335,17 @@ private struct Ready: Codable {
     let local: UUID
 }
 
-/// A catalog entry projected into macOS metadata and read-only capabilities.
+/// A catalog entry projected into macOS metadata and supported capabilities.
 private final class FinderItem: NSObject, NSFileProviderItem {
     let entry: MassEntry
     let filename: String
+    let allowChildren: Bool
 
     /// Retain the stable catalog entry and its persisted display name.
-    init(entry: MassEntry, display: String) {
+    init(entry: MassEntry, display: String, allowChildren: Bool = false) {
         self.entry = entry
         self.filename = display
+        self.allowChildren = allowChildren
     }
 
     var itemIdentifier: NSFileProviderItemIdentifier { NSFileProviderItemIdentifier(entry.id) }
@@ -327,7 +364,8 @@ private final class FinderItem: NSObject, NSFileProviderItem {
     }
     var contentModificationDate: Date? { creationDate }
     var capabilities: NSFileProviderItemCapabilities {
-        entry.file == nil ? [.allowsContentEnumerating] : [.allowsReading]
+        if entry.file != nil { return [.allowsReading] }
+        return allowChildren ? [.allowsContentEnumerating, .allowsAddingSubItems] : [.allowsContentEnumerating]
     }
     var itemVersion: NSFileProviderItemVersion {
         let metadata = Data([entry.id, entry.parent ?? "", filename].joined(separator: "\0").utf8)
